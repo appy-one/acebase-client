@@ -4,6 +4,7 @@
   "description": "Client to connect to remote AceBase JSON database server",
   "main": "./src/index.js",
   "private": false,
+  "repository": "github:appy-one/acebase-client",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },

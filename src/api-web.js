@@ -103,7 +103,7 @@ class WebApi extends Api {
             pathSubs.forEach(subscr => {
                 if (subscr.event === data.event) {
                     let val = transport.deserialize(data.val);
-                    subscr.callback(null, data.path, val);
+                    subscr.callback(null, data.path, val.current, val.previous);
                 }
             });
         });
@@ -243,6 +243,19 @@ class WebApi extends Api {
 
     getIndexes() {
         return _request("GET", `${this.url}/index/${this.dbname}`);
+    }
+
+    reflect(path, type, args) {
+        let url = `${this.url}/reflect/${this.dbname}/${path}?type=${type}`;
+        if (typeof args === 'object') {
+            let query = Object.keys(args).map(key => {
+                return `arg_${key}=${args[key]}`;
+            });
+            if (query.length > 0) {
+                url += `&${query.join('&')}`;
+            }
+        }        
+        return _request("GET", url);
     }
 }
 

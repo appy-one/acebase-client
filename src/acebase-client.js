@@ -9,24 +9,4 @@ class AceBaseClient extends AceBase {
     }
 }
 
-// class AceBaseClient extends EventEmitter {
-//     constructor(host, port, dbname) {
-//         super();
-        
-//         //TODO: https
-//         //const api = new WebApi(, dbname, (ready) => {
-//             const db = new AceBase(dbname, { api: { class: WebApi, settings: `http://${host}:${port}` } }); // 
-//             this.types = db.types;
-//             //this.schema = db.schema;
-//             this.ref = db.ref;
-
-//             db.on("ready", () => {
-//                 this.emit("ready");
-//             });
-//         //    this.emit("ready");
-//         //});
-
-//     }
-// }
-
 module.exports = { AceBaseClient };

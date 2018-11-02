@@ -2,13 +2,25 @@ const { Api, transport, debug } = require('acebase');
 const http = require('http');
 const connectSocket = require('socket.io-client');
 const URL = require('url');
+const uuid62 = require('uuid62');
 
-const _request = (method, url, postData) => {
+class AceBaseRequestError extends Error {
+    constructor(request, response, message) {
+        super(message);
+        this.request = request;
+        this.response = response;
+    }
+}
+
+const _request = (method, url, postData, accessToken) => {
     return new Promise((resolve, reject) => {
         let endpoint = URL.parse(url);
 
-        if (typeof postData === "undefined") {
-            postData = "";
+        if (typeof postData === 'undefined') {
+            postData = '';
+        }
+        else if (typeof postData === 'object') {
+            postData = JSON.stringify(postData);
         }
         const options = {
             method: method,
@@ -17,20 +29,35 @@ const _request = (method, url, postData) => {
             port: endpoint.port,
             path: endpoint.path, //.pathname,
             headers: {
-                "Content-Type": "application/json",
-                "Content-Length": Buffer.byteLength(postData)
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData)
             }
         };
+        if (accessToken) {
+            options.headers['Authorization'] = `Bearer ${accessToken}`;
+        }
         const req = http.request(options, res => {
-            if (res.statusCode !== 200) {
-                return reject(new Error(`server error ${res.statusCode}: ${res.statusMessage}`));
-            }
             res.setEncoding("utf8");
-            let data = "";
-            res.on("data", chunk => { data += chunk; });
-            res.on("end", () => {
-                let val = JSON.parse(data);
-                resolve(val);
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    let val = JSON.parse(data);
+                    resolve(val);
+                }
+                else {
+                    const request = options;
+                    request.body = postData;
+                    const response = {
+                        statusCode: res.statusCode,
+                        statusMessage: res.statusMessage,
+                        headers: res.headers,
+                        body: data
+                    };
+                    response.body = data;
+                    return reject(new AceBaseRequestError(request, response, `${res.statusCode} ${res.statusMessage}`));
+                }
+                
             });
         });
         if (postData.length > 0) {
@@ -39,6 +66,45 @@ const _request = (method, url, postData) => {
         req.end();
     });
 };
+
+const _websocketRequest = (socket, event, data, accessToken) => {
+
+    const requestId = uuid62.v1();
+    data.req_id = requestId;
+    data.access_token = accessToken;
+
+    socket.emit(event, data);
+
+    let resolve, reject;
+    let promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+
+    const error = data => {
+        if (data.req_id === requestId) {
+            // Access denied?
+            stop();
+            reject();
+        }
+    };
+    const success = data => {
+        if (data.req_id === requestId) {
+            stop();
+            resolve(data);
+        }
+    };
+    const listen = () => {
+        socket.on("error", error);
+        socket.on("success", success);
+    };
+    const stop = () => {
+        socket.off("error", error);
+        socket.off("success", success);
+    };
+    
+    listen();
+
+    return promise;
+
+}
 
 /**
  * Api to connect to a remote AceBase instance over http
@@ -51,9 +117,13 @@ class WebApi extends Api {
 
         this.url = url;
         this.dbname = dbname;
-        debug.log(`Connecting to AceBase server" ${url}"`);
+        debug.log(`Connecting to AceBase server "${url}"`);
+        if (!url.startsWith('https')) {
+            console.error(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`)
+        }
 
         let subscriptions = {};
+        let accessToken;
         const socket = this.socket = connectSocket(url);
         
         socket.on("connect_error", (data) => {
@@ -111,8 +181,13 @@ class WebApi extends Api {
         this.subscribe = (ref, event, callback) => {
             let pathSubs = subscriptions[ref.path];
             if (!pathSubs) { pathSubs = subscriptions[ref.path] = []; }
+            let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event);
             pathSubs.push({ ref, event, callback });
-            socket.emit("subscribe", { path: ref.path, event });
+
+            if (serverAlreadyNotifying) {
+                return Promise.resolve();
+            }
+            return _websocketRequest(socket, "subscribe", { path: ref.path, event }, accessToken);
         };
 
         this.unsubscribe = (ref, event = undefined, callback = undefined) => {
@@ -136,16 +211,18 @@ class WebApi extends Api {
             if (pathSubs.length === 0) {
                 // Unsubscribe from all events on path
                 delete subscriptions[ref.path];
-                socket.emit("unsubscribe", { path: ref.path });
+                // socket.emit("unsubscribe", { path: ref.path, access_token: accessToken });
+                return _websocketRequest(socket, "unsubscribe", { path: ref.path, access_token: accessToken }, accessToken);
             }
             else if (pathSubs.reduce((c, subscr) => c + (subscr.event === event ? 1 : 0), 0) === 0) {
                 // No callbacks left for specific event
-                socket.emit("unsubscribe", { path: ref.path, event });
+                // socket.emit("unsubscribe", { path: ref.path, event, access_token: accessToken });
+                return _websocketRequest(socket, "unsubscribe", { path: ref.path, event, access_token: accessToken }, accessToken);
             }
         };
 
         this.transaction = (ref, callback) => {
-            const id = require('uuid62').v1();
+            const id = uuid62.v1();
             const startedCallback = (data) => {
                 if (data.id === id) {
                     socket.off("tx_started", startedCallback);
@@ -153,7 +230,7 @@ class WebApi extends Api {
                     const val = callback(currentValue);
                     const finish = (val) => {
                         const newValue = transport.serialize(val);
-                        socket.emit("transaction", { action: "finish", id: id, path: ref.path, value: newValue });
+                        socket.emit("transaction", { action: "finish", id: id, path: ref.path, value: newValue, access_token: accessToken });
                     };
                     if (val instanceof Promise) {
                         val.then(finish);
@@ -172,27 +249,87 @@ class WebApi extends Api {
             }
             socket.on("tx_started", startedCallback);
             socket.on("tx_completed", completedCallback);
-            socket.emit("transaction", { action: "start", id, path: ref.path });
+            socket.emit("transaction", { action: "start", id, path: ref.path, access_token: accessToken });
             return new Promise((resolve) => {
                 txResolve = resolve;
             });
         };
+
+        this._request = (method, url, data) => {
+            return _request(method, url, data, accessToken)
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.signIn = (username, password) => {
+            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { username, password }, accessToken)
+            .then(result => {
+                accessToken = result.access_token;
+                socket.emit("signin", accessToken);
+                return result.user;
+            })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.signOut = () => {
+            if (!accessToken) { return Promise.resolve(); }
+            return _request("POST", `${this.url}/auth/${this.dbname}/signout`, {}, accessToken)
+            .then(() => {
+                socket.emit("signout");
+            })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.changePassword = (uid, currentPassword, newPassword) => {
+            if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
+            return _request("POST", `${this.url}/auth/${this.dbname}/change_password`, { uid, password: currentPassword, new_password: newPassword }, accessToken)
+            .then(result => {
+                accessToken = result.access_token;
+            })
+            .catch(err => {
+                throw err;
+            });
+        };
+    
+        this.signUp = (username, password, displayName) => {
+            return _request("POST", `${this.url}/auth/${this.dbname}/signup`, { username, password, display_name: displayName }, accessToken)
+            .then(result => {
+                accessToken = result.access_token;
+                socket.emit("signin", accessToken);
+                return result.user;
+            })
+            .catch(err => {
+                throw err;
+            });
+        };
     }
 
+
     stats(options = undefined) {
-        return _request("GET", `${this.url}/stats/${this.dbname}`);
+        return this._request("GET", `${this.url}/stats/${this.dbname}`);
     }
 
     set(ref, value) {
         const data = JSON.stringify(transport.serialize(value));
-        return _request("PUT", `${this.url}/data/${this.dbname}/${ref.path}`, data)
-            .then(result => ref);
+        return this._request("PUT", `${this.url}/data/${this.dbname}/${ref.path}`, data)
+        .then(result => ref)
+        .catch(err => {
+            throw err;
+        });
     }
 
     update(ref, updates) {
         const data = JSON.stringify(transport.serialize(updates));
-        return _request("POST", `${this.url}/data/${this.dbname}/${ref.path}`, data)
-            .then(result => ref);
+        return this._request("POST", `${this.url}/data/${this.dbname}/${ref.path}`, data)
+        .then(result => ref)
+        .catch(err => {
+            throw err;
+        });
     }
   
     get(ref, options = undefined) {
@@ -212,16 +349,22 @@ class WebApi extends Api {
                 url += `?${query.join('&')}`;
             }
         }
-        return _request("GET", url)
-            .then(data => {
-                let val = transport.deserialize(data);
-                return val;                
-            });
+        return this._request("GET", url)
+        .then(data => {
+            let val = transport.deserialize(data);
+            return val;                
+        })
+        .catch(err => {
+            throw err;
+        });
     }
 
     exists(ref) {
-        return _request("GET", `${this.url}/exists/${this.dbname}/${ref.path}`)
-            .then(res => res.exists);
+        return this._request("GET", `${this.url}/exists/${this.dbname}/${ref.path}`)
+        .then(res => res.exists)
+        .catch(err => {
+            throw err;
+        });
     }
 
     query(ref, query, options = { snapshots: false }) {
@@ -229,20 +372,29 @@ class WebApi extends Api {
             query,
             options
         }));
-        return _request("POST", `${this.url}/query/${this.dbname}/${ref.path}`, data)
-            .then(data => {
-                let results = transport.deserialize(data);
-                return results.list;
-            });
+        return this._request("POST", `${this.url}/query/${this.dbname}/${ref.path}`, data)
+        .then(data => {
+            let results = transport.deserialize(data);
+            return results.list;
+        })
+        .catch(err => {
+            throw err;
+        });        
     }
 
     createIndex(path, key) {
         const data = JSON.stringify({ action: "create", path, key });
-        return _request("POST", `${this.url}/index/${this.dbname}`, data);
+        return this._request("POST", `${this.url}/index/${this.dbname}`, data)
+        .catch(err => {
+            throw err;
+        });         
     }
 
     getIndexes() {
-        return _request("GET", `${this.url}/index/${this.dbname}`);
+        return this._request("GET", `${this.url}/index/${this.dbname}`)
+        .catch(err => {
+            throw err;
+        });         
     }
 
     reflect(path, type, args) {
@@ -255,7 +407,10 @@ class WebApi extends Api {
                 url += `&${query.join('&')}`;
             }
         }        
-        return _request("GET", url);
+        return this._request("GET", url)
+        .catch(err => {
+            throw err;
+        }); 
     }
 }
 

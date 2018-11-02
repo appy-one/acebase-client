@@ -46,6 +46,25 @@ todoRef.on('child_added', (snapshot) => {
     const item = snapshot.val();
     console.log(`Added to the todo list: ${item.text}`);
 })
+
+// Query to last 50 posts from less than a day ago, containing the word "awesome"
+db.query('posts')
+.where('posted', '>', yesterday)
+.where('title', 'matches', /awesome/i)
+.take(50)
+.order('posted')
+.get()
+.then(snaps => {
+    // snaps is an array of matching posts
+    const posts = snaps.map(snap => snap.val());
+});
+
+// Get data but exclude nested data
+db.ref('users/some_user')
+.get({ exclude: ['posts'] })
+.then(snap => {
+    // snap contains all user's properties except "users/some_user/posts"
+})
 ```
 
 ## More information

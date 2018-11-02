@@ -1,4 +1,4 @@
-# AceBase database client
+# AceBase realtime database client
 
 This repository is to connect to a remote AceBase server. See [AceBase](https://www.npmjs.com/package/acebase) for more information about AceBase databases and usage.
 

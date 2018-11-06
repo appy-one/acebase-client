@@ -78,32 +78,21 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     let resolve, reject;
     let promise = new Promise((res, rej) => { resolve = res; reject = rej; });
 
-    const error = data => {
+    const handle = data => {
         if (data.req_id === requestId) {
-            // Access denied?
-            stop();
-            reject();
+            socket.off("result", handle);
+            if (data.success) {
+                resolve(data);
+            }
+            else {
+                // Access denied?
+                reject(data.reason);
+            }
         }
-    };
-    const success = data => {
-        if (data.req_id === requestId) {
-            stop();
-            resolve(data);
-        }
-    };
-    const listen = () => {
-        socket.on("error", error);
-        socket.on("success", success);
-    };
-    const stop = () => {
-        socket.off("error", error);
-        socket.off("success", success);
-    };
-    
-    listen();
+    };    
+    socket.on("result", handle);
 
     return promise;
-
 }
 
 /**
@@ -263,11 +252,23 @@ class WebApi extends Api {
         };
 
         this.signIn = (username, password) => {
-            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { username, password }, accessToken)
+            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password }, accessToken)
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
-                return result.user;
+                return { user: result.user, accessToken };
+            })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.signInWithToken = (token) => {
+            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token })
+            .then(result => {
+                accessToken = result.access_token;
+                socket.emit("signin", accessToken);
+                return { user: result.user, accessToken };
             })
             .catch(err => {
                 throw err;
@@ -401,7 +402,7 @@ class WebApi extends Api {
         let url = `${this.url}/reflect/${this.dbname}/${path}?type=${type}`;
         if (typeof args === 'object') {
             let query = Object.keys(args).map(key => {
-                return `arg_${key}=${args[key]}`;
+                return `${key}=${args[key]}`;
             });
             if (query.length > 0) {
                 url += `&${query.join('&')}`;

@@ -1,6 +1,6 @@
 {
   "name": "acebase-client",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Client to connect to remote AceBase JSON database server",
   "main": "./src/index.js",
   "private": false,

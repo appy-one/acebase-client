@@ -3,7 +3,7 @@ const { WebApi } = require('./api-web');
 //const { EventEmitter } = require('events');
 
 class AceBaseClient extends AceBase {
-    
+
     constructor(host, port, dbname, https = true) {
         super(dbname, { api: { class: WebApi, settings: `http${https ? 's' : ''}://${host}:${port}` } });
         this.user = null;
@@ -15,9 +15,26 @@ class AceBaseClient extends AceBase {
 
         this.user = null;
         return api.signIn(username, password)
-        .then(user => {
-            this.user = user;
-            return { success: true, user };
+        .then(details => {
+            this.accessToken = details.accessToken;
+            this.user = details.user;
+            return { success: true, user: details.user, accessToken: details.accessToken };
+        })
+        .catch(err => {
+            return { success: false, reason: err.message };
+        });
+    }
+
+    signInWithToken(accessToken) {
+        /** @type {WebApi} */
+        const api = this.api;
+
+        this.user = null;
+        return api.signInWithToken(accessToken)
+        .then(details => {
+            this.accessToken = details.accessToken;
+            this.user = details.user;
+            return { success: true, user: details.user, accessToken: details.accessToken };
         })
         .catch(err => {
             return { success: false, reason: err.message };

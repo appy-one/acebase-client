@@ -1,8 +1,7 @@
-const { Api, transport, debug } = require('acebase');
+const { Api, Transport, debug, ID } = require('acebase-core');
 const http = require('http');
-const connectSocket = require('socket.io-client');
 const URL = require('url');
-const uuid62 = require('uuid62');
+const connectSocket = require('socket.io-client');
 
 class AceBaseRequestError extends Error {
     constructor(request, response, message) {
@@ -69,7 +68,7 @@ const _request = (method, url, postData, accessToken) => {
 
 const _websocketRequest = (socket, event, data, accessToken) => {
 
-    const requestId = uuid62.v1();
+    const requestId = ID.generate();
     data.req_id = requestId;
     data.access_token = accessToken;
 
@@ -99,21 +98,21 @@ const _websocketRequest = (socket, event, data, accessToken) => {
  * Api to connect to a remote AceBase instance over http
  */
 class WebApi extends Api {
-    constructor(dbname = "default", url, readyCallback) {
+    constructor(dbname = "default", settings, readyCallback) {
         // operations are done through http calls,
         // events are triggered through a websocket
         super();
 
-        this.url = url;
+        this.url = settings.url;
         this.dbname = dbname;
-        debug.log(`Connecting to AceBase server "${url}"`);
-        if (!url.startsWith('https')) {
+        debug.log(`Connecting to AceBase server "${this.url}"`);
+        if (!this.url.startsWith('https')) {
             console.error(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`)
         }
 
         let subscriptions = {};
         let accessToken;
-        const socket = this.socket = connectSocket(url);
+        const socket = this.socket = connectSocket(this.url);
         
         socket.on("connect_error", (data) => {
             debug.error(`Websocket connection error: ${data}`);
@@ -141,7 +140,7 @@ class WebApi extends Api {
             if (reconnectSubs === null) { return; }
             Object.keys(reconnectSubs).forEach(path => {
                 reconnectSubs[path].forEach(subscr => {
-                    this.subscribe(subscr.ref, subscr.event, subscr.callback);
+                    this.subscribe(subscr.path, subscr.event, subscr.callback);
                 });
             });
             reconnectSubs = null;
@@ -161,26 +160,26 @@ class WebApi extends Api {
             }
             pathSubs.forEach(subscr => {
                 if (subscr.event === data.event) {
-                    let val = transport.deserialize(data.val);
+                    let val = Transport.deserialize(data.val);
                     subscr.callback(null, data.path, val.current, val.previous);
                 }
             });
         });
 
-        this.subscribe = (ref, event, callback) => {
-            let pathSubs = subscriptions[ref.path];
-            if (!pathSubs) { pathSubs = subscriptions[ref.path] = []; }
+        this.subscribe = (path, event, callback) => {
+            let pathSubs = subscriptions[path];
+            if (!pathSubs) { pathSubs = subscriptions[path] = []; }
             let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event);
-            pathSubs.push({ ref, event, callback });
+            pathSubs.push({ path, event, callback });
 
             if (serverAlreadyNotifying) {
                 return Promise.resolve();
             }
-            return _websocketRequest(socket, "subscribe", { path: ref.path, event }, accessToken);
+            return _websocketRequest(socket, "subscribe", { path, event }, accessToken);
         };
 
-        this.unsubscribe = (ref, event = undefined, callback = undefined) => {
-            let pathSubs = subscriptions[ref.path];
+        this.unsubscribe = (path, event = undefined, callback = undefined) => {
+            let pathSubs = subscriptions[path];
             if (!pathSubs) { return; }
             if (!event) {
                 // Unsubscribe from all events
@@ -199,27 +198,27 @@ class WebApi extends Api {
 
             if (pathSubs.length === 0) {
                 // Unsubscribe from all events on path
-                delete subscriptions[ref.path];
-                // socket.emit("unsubscribe", { path: ref.path, access_token: accessToken });
-                return _websocketRequest(socket, "unsubscribe", { path: ref.path, access_token: accessToken }, accessToken);
+                delete subscriptions[path];
+                // socket.emit("unsubscribe", { path, access_token: accessToken });
+                return _websocketRequest(socket, "unsubscribe", { path, access_token: accessToken }, accessToken);
             }
             else if (pathSubs.reduce((c, subscr) => c + (subscr.event === event ? 1 : 0), 0) === 0) {
                 // No callbacks left for specific event
-                // socket.emit("unsubscribe", { path: ref.path, event, access_token: accessToken });
-                return _websocketRequest(socket, "unsubscribe", { path: ref.path, event, access_token: accessToken }, accessToken);
+                // socket.emit("unsubscribe", { path, event, access_token: accessToken });
+                return _websocketRequest(socket, "unsubscribe", { path: path, event, access_token: accessToken }, accessToken);
             }
         };
 
-        this.transaction = (ref, callback) => {
-            const id = uuid62.v1();
+        this.transaction = (path, callback) => {
+            const id = ID.generate();
             const startedCallback = (data) => {
                 if (data.id === id) {
                     socket.off("tx_started", startedCallback);
-                    const currentValue = transport.deserialize(data.value);
+                    const currentValue = Transport.deserialize(data.value);
                     const val = callback(currentValue);
                     const finish = (val) => {
-                        const newValue = transport.serialize(val);
-                        socket.emit("transaction", { action: "finish", id: id, path: ref.path, value: newValue, access_token: accessToken });
+                        const newValue = Transport.serialize(val);
+                        socket.emit("transaction", { action: "finish", id: id, path, value: newValue, access_token: accessToken });
                     };
                     if (val instanceof Promise) {
                         val.then(finish);
@@ -238,7 +237,7 @@ class WebApi extends Api {
             }
             socket.on("tx_started", startedCallback);
             socket.on("tx_completed", completedCallback);
-            socket.emit("transaction", { action: "start", id, path: ref.path, access_token: accessToken });
+            socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
             return new Promise((resolve) => {
                 txResolve = resolve;
             });
@@ -302,7 +301,7 @@ class WebApi extends Api {
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
-                return result.user;
+                return { user: result.user, accessToken };
             })
             .catch(err => {
                 throw err;
@@ -315,26 +314,24 @@ class WebApi extends Api {
         return this._request("GET", `${this.url}/stats/${this.dbname}`);
     }
 
-    set(ref, value) {
-        const data = JSON.stringify(transport.serialize(value));
-        return this._request("PUT", `${this.url}/data/${this.dbname}/${ref.path}`, data)
-        .then(result => ref)
+    set(path, value) {
+        const data = JSON.stringify(Transport.serialize(value));
+        return this._request("PUT", `${this.url}/data/${this.dbname}/${path}`, data)
         .catch(err => {
             throw err;
         });
     }
 
-    update(ref, updates) {
-        const data = JSON.stringify(transport.serialize(updates));
-        return this._request("POST", `${this.url}/data/${this.dbname}/${ref.path}`, data)
-        .then(result => ref)
+    update(path, updates) {
+        const data = JSON.stringify(Transport.serialize(updates));
+        return this._request("POST", `${this.url}/data/${this.dbname}/${path}`, data)
         .catch(err => {
             throw err;
         });
     }
   
-    get(ref, options = undefined) {
-        let url = `${this.url}/data/${this.dbname}/${ref.path}`;
+    get(path, options = undefined) {
+        let url = `${this.url}/data/${this.dbname}/${path}`;
         if (options) {
             let query = [];
             if (options.exclude instanceof Array) { 
@@ -352,7 +349,7 @@ class WebApi extends Api {
         }
         return this._request("GET", url)
         .then(data => {
-            let val = transport.deserialize(data);
+            let val = Transport.deserialize(data);
             return val;                
         })
         .catch(err => {
@@ -360,22 +357,22 @@ class WebApi extends Api {
         });
     }
 
-    exists(ref) {
-        return this._request("GET", `${this.url}/exists/${this.dbname}/${ref.path}`)
+    exists(path) {
+        return this._request("GET", `${this.url}/exists/${this.dbname}/${path}`)
         .then(res => res.exists)
         .catch(err => {
             throw err;
         });
     }
 
-    query(ref, query, options = { snapshots: false }) {
-        const data = JSON.stringify(transport.serialize({
+    query(path, query, options = { snapshots: false }) {
+        const data = JSON.stringify(Transport.serialize({
             query,
             options
         }));
-        return this._request("POST", `${this.url}/query/${this.dbname}/${ref.path}`, data)
+        return this._request("POST", `${this.url}/query/${this.dbname}/${path}`, data)
         .then(data => {
-            let results = transport.deserialize(data);
+            let results = Transport.deserialize(data);
             return results.list;
         })
         .catch(err => {
@@ -383,12 +380,12 @@ class WebApi extends Api {
         });        
     }
 
-    createIndex(path, key) {
-        const data = JSON.stringify({ action: "create", path, key });
+    createIndex(path, key, options) {
+        const data = JSON.stringify({ action: "create", path, key, options });
         return this._request("POST", `${this.url}/index/${this.dbname}`, data)
         .catch(err => {
             throw err;
-        });         
+        });
     }
 
     getIndexes() {

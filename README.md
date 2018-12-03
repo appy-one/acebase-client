@@ -6,12 +6,23 @@ This repository is to connect to a remote AceBase server. See [AceBase](https://
 
 Install the *acebase-client* npm package: ```npm install acebase-client``` ([github](https://github.com/appy-one/acebase-client), [npm](https://www.npmjs.com/package/acebase-client))
 
+Then, ```require``` it like so:
+
+```javascript
+const { AceBaseClient } = require('acebase-client');
+```
+
+OR, if you want to use the client in the browser, use the following code:
+
+```html
+<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/acebase-client@0.4.0/dist/browser.min.js"></script>
+```
+
 ## Connect to an AceBase server
 
 Use the following code the connect to an AceBase webserver:
 
 ```javascript
-const { AceBaseClient } = require('acebase-client');
 const dbname = 'mydb';
 const db = new AceBaseClient(dbname, "localhost", 5757);
 db.on("ready", () => {

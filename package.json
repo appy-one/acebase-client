@@ -1,8 +1,9 @@
 {
   "name": "acebase-client",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Client to connect to remote AceBase JSON database server",
   "main": "./src/index.js",
+  "types": "./index.d.ts",
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {

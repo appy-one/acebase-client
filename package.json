@@ -1,6 +1,6 @@
 {
   "name": "acebase-client",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Client to connect to remote AceBase JSON database server",
   "main": "./src/index.js",
   "types": "./index.d.ts",
@@ -43,7 +43,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "file:../acebase-core",
+    "acebase-core": "latest",
     "socket.io-client": "*"
   }
 }

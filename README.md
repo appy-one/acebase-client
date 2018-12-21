@@ -25,7 +25,7 @@ Use the following code the connect to an AceBase webserver:
 ```javascript
 const dbname = 'mydb';
 const db = new AceBaseClient(dbname, "localhost", 5757);
-db.on("ready", () => {
+db.ready(() => {
     console.log("Connected successfully");
 });
 ```
@@ -60,12 +60,11 @@ todoRef.on('child_added', (snapshot) => {
 
 // Query to last 50 posts from less than a day ago, containing the word "awesome"
 db.query('posts')
-.where('posted', '>', yesterday)
-.where('title', 'matches', /awesome/i)
+.filter('posted', '>', yesterday)
+.filter('title', 'matches', /awesome/i)
 .take(50)
-.order('posted')
-.get()
-.then(snaps => {
+.sort('posted')
+.get(snaps => {
     // snaps is an array of matching posts
     const posts = snaps.map(snap => snap.val());
 });

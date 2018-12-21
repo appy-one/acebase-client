@@ -69,23 +69,27 @@ const _request = (method, url, postData, accessToken) => {
 const _websocketRequest = (socket, event, data, accessToken) => {
 
     const requestId = ID.generate();
-    data.req_id = requestId;
-    data.access_token = accessToken;
+    const request = data;
+    request.req_id = requestId;
+    request.access_token = accessToken;
 
-    socket.emit(event, data);
+    socket.emit(event, request);
 
     let resolve, reject;
     let promise = new Promise((res, rej) => { resolve = res; reject = rej; });
 
-    const handle = data => {
-        if (data.req_id === requestId) {
+    const handle = response => {
+        if (response.req_id === requestId) {
             socket.off("result", handle);
-            if (data.success) {
-                resolve(data);
+            if (response.success) {
+                resolve(response);
             }
             else {
                 // Access denied?
-                reject(data.reason);
+                const err = new Error(response.reason);
+                err.request = request;
+                err.response = response;
+                reject(err);
             }
         }
     };    
@@ -136,14 +140,21 @@ class WebApi extends Api {
                 readyCallback();
                 readyCallback = null; // once! :-)
             }
-            // Resubscribe to any active subscriptions
-            if (reconnectSubs === null) { return; }
-            Object.keys(reconnectSubs).forEach(path => {
-                reconnectSubs[path].forEach(subscr => {
-                    this.subscribe(subscr.path, subscr.event, subscr.callback);
+            // Sign in again
+            let signInPromise = Promise.resolve();
+            if (accessToken) {
+                signInPromise = this.signInWithToken(accessToken);
+            }
+            signInPromise.then(() => {
+                // Resubscribe to any active subscriptions
+                if (reconnectSubs === null) { return; }
+                Object.keys(reconnectSubs).forEach(path => {
+                    reconnectSubs[path].forEach(subscr => {
+                        this.subscribe(subscr.path, subscr.event, subscr.callback);
+                    });
                 });
+                reconnectSubs = null;
             });
-            reconnectSubs = null;
         });
 
         socket.on("disconnect", (data) => {

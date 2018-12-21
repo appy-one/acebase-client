@@ -6,6 +6,7 @@ declare namespace acebaseclient {
      * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
      */
     class AceBaseClient extends acebasecore.AceBaseBase {
+        user?: AceBaseUser
         constructor(host: string, port: number, dbname: string, https?: boolean);
 
         /**
@@ -56,15 +57,10 @@ declare namespace acebaseclient {
 
     }
 
-    // /**
-    //  * Api to connect to a remote AceBase instance over http
-    //  */
-    // export class WebApi {
-    //     constructor();
-
-    // }
-
     class AceBaseUser {
+        uid: string
+        username: string
+
         /**
          * @param {object} user
          * @param {string} user.uid
@@ -84,13 +80,16 @@ declare namespace acebaseclient {
      * @param {string} [result.reason]
      */
     class AceBaseSignInResult {
+        success: boolean;
+        user?: AceBaseUser;
+        accessToken?: string;
+        reason?: string;
         constructor(result: {
             success: boolean;
             user?: AceBaseUser;
             accessToken?: string;
             reason?: string;
         });
-
     }
 
     /**
@@ -99,6 +98,8 @@ declare namespace acebaseclient {
      * @param {string} [result.reason]
      */
     class AceBaseAuthResult {
+        success: boolean;
+        reason?: string;
         constructor(result: {
             success: boolean;
             reason?: string;
@@ -108,3 +109,10 @@ declare namespace acebaseclient {
 }
 
 export = acebaseclient;
+export import DataSnapshot = acebasecore.DataSnapshot;
+export import DataReference = acebasecore.DataReference;
+export import EventStream = acebasecore.EventStream;
+export import EventSubscription = acebasecore.EventSubscription;
+export import PathReference = acebasecore.PathReference;
+export import TypeMappings = acebasecore.TypeMappings;
+export import TypeMappingOptions = acebasecore.TypeMappingOptions;

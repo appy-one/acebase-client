@@ -14,7 +14,7 @@ declare namespace acebaseclient {
          * @param {()=>void} [callback] (optional) callback function that is called when ready. You can also use the returned promise
          * @returns {Promise<void>} returns a promise that resolves when ready
          */
-        ready(callback: () => void): Promise<void>;
+        ready(callback?: () => void): Promise<void>;
 
         /**
          * Sign into a user account using a username and password. Note that the server must have authentication enabled.

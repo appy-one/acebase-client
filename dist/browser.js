@@ -712,7 +712,7 @@ function localstorage() {
 }
 
 }).call(this,require('_process'))
-},{"./debug":10,"_process":71}],10:[function(require,module,exports){
+},{"./debug":10,"_process":73}],10:[function(require,module,exports){
 
 /**
  * This is the common logic for both the Node.js and web browser
@@ -3102,7 +3102,7 @@ WS.prototype.check = function () {
 };
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../transport":13,"component-inherit":8,"debug":9,"engine.io-parser":20,"parseqs":28,"ws":61,"yeast":39}],19:[function(require,module,exports){
+},{"../transport":13,"component-inherit":8,"debug":9,"engine.io-parser":20,"parseqs":28,"ws":63,"yeast":39}],19:[function(require,module,exports){
 (function (global){
 // browser shim for xmlhttprequest module
 
@@ -4101,7 +4101,7 @@ function hasBinary (obj) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":62,"isarray":26}],24:[function(require,module,exports){
+},{"buffer":64,"isarray":26}],24:[function(require,module,exports){
 
 /**
  * Module exports.
@@ -6268,10 +6268,21 @@ module.exports = yeast;
 },{}],40:[function(require,module,exports){
 const { AceBaseBase } = require('acebase-core');
 const { WebApi } = require('./api-web');
-//const { EventEmitter } = require('events');
+const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
 
+/**
+ * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
+ * @extends module:acebase-core/AceBaseBase
+ */
 class AceBaseClient extends AceBaseBase {
 
+    /**
+     * Create a client to access an AceBase server
+     * @param {string} host Host name, eg "localhost", or "mydb.domain.com"
+     * @param {number} port Port number the server is running on
+     * @param {string} dbname Name of the database you want to access
+     * @param {boolean} https Use SSL (https) to access the server or not. Default: true
+     */
     constructor(host, port, dbname, https = true) {
         super(dbname, {});
         this.api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, ready => {
@@ -6280,6 +6291,12 @@ class AceBaseClient extends AceBaseBase {
         this.user = null;
     }
 
+    /**
+     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * @param {string} username Your database username
+     * @param {string} password Your password
+     * @returns {Promise<AceBaseSignInResult>} returns a promise that resolves with an object
+     */
     signIn(username, password) {
         /** @type {WebApi} */
         const api = this.api;
@@ -6296,6 +6313,11 @@ class AceBaseClient extends AceBaseBase {
         });
     }
 
+    /**
+     * Sign into an account using a previously assigned access token
+     * @param {string} accessToken a previously assigned access token
+     * @returns {Promise<AceBaseSignInResult>} returns a promise that resolves with an object
+     */
     signInWithToken(accessToken) {
         /** @type {WebApi} */
         const api = this.api;
@@ -6312,6 +6334,11 @@ class AceBaseClient extends AceBaseBase {
         });
     }
 
+    /**
+     * Signs out of the current account
+     * @returns {Promise<AceBaseAuthResult>} returns a promise that resolves with an object
+     * 
+     */
     signOut() {
         /** @type {WebApi} */
         const api = this.api;
@@ -6325,6 +6352,12 @@ class AceBaseClient extends AceBaseBase {
         });
     }
 
+    /**
+     * Changes the password of the currrently signed into account
+     * @param {string} oldPassword 
+     * @param {string} newPassword 
+     * @returns {Promise<AceBaseAuthResult>} returns a promise that resolves with an object
+     */
     changePassword(oldPassword, newPassword) {
         /** @type {WebApi} */
         const api = this.api;
@@ -6337,15 +6370,24 @@ class AceBaseClient extends AceBaseBase {
         });
     }
 
+    /**
+     * Creates a new user account with the given details. If successful, you will automatically be 
+     * signed into the account. Note: the request will fail if the server has disabled this option
+     * @param {string} username 
+     * @param {string} password 
+     * @param {string} displayName 
+     * @returns {Promise<AceBaseSignInResult>} returns a promise that resolves with an object
+     */
     signUp(username, password, displayName) {
         /** @type {WebApi} */
         const api = this.api;
 
         this.user = null;
         return api.signUp(username, password, displayName)
-        .then(user => {
-            this.user = user;
-            return { success: true, user };
+        .then(details => {
+            this.accessToken = details.accessToken;
+            this.user = details.user;
+            return { success: true, user: details.user, accessToken: details.accessToken };
         })
         .catch(err => {
             return { success: false, reason: err.message };
@@ -6354,7 +6396,7 @@ class AceBaseClient extends AceBaseBase {
 }
 
 module.exports = { AceBaseClient };
-},{"./api-web":41,"acebase-core":54}],41:[function(require,module,exports){
+},{"./api-web":41,"./user":44,"acebase-core":55}],41:[function(require,module,exports){
 (function (Buffer){
 const { Api, Transport, debug, ID } = require('acebase-core');
 const http = require('http');
@@ -6427,23 +6469,27 @@ const _request = (method, url, postData, accessToken) => {
 const _websocketRequest = (socket, event, data, accessToken) => {
 
     const requestId = ID.generate();
-    data.req_id = requestId;
-    data.access_token = accessToken;
+    const request = data;
+    request.req_id = requestId;
+    request.access_token = accessToken;
 
-    socket.emit(event, data);
+    socket.emit(event, request);
 
     let resolve, reject;
     let promise = new Promise((res, rej) => { resolve = res; reject = rej; });
 
-    const handle = data => {
-        if (data.req_id === requestId) {
+    const handle = response => {
+        if (response.req_id === requestId) {
             socket.off("result", handle);
-            if (data.success) {
-                resolve(data);
+            if (response.success) {
+                resolve(response);
             }
             else {
                 // Access denied?
-                reject(data.reason);
+                const err = new Error(response.reason);
+                err.request = request;
+                err.response = response;
+                reject(err);
             }
         }
     };    
@@ -6494,14 +6540,21 @@ class WebApi extends Api {
                 readyCallback();
                 readyCallback = null; // once! :-)
             }
-            // Resubscribe to any active subscriptions
-            if (reconnectSubs === null) { return; }
-            Object.keys(reconnectSubs).forEach(path => {
-                reconnectSubs[path].forEach(subscr => {
-                    this.subscribe(subscr.path, subscr.event, subscr.callback);
+            // Sign in again
+            let signInPromise = Promise.resolve();
+            if (accessToken) {
+                signInPromise = this.signInWithToken(accessToken);
+            }
+            signInPromise.then(() => {
+                // Resubscribe to any active subscriptions
+                if (reconnectSubs === null) { return; }
+                Object.keys(reconnectSubs).forEach(path => {
+                    reconnectSubs[path].forEach(subscr => {
+                        this.subscribe(subscr.path, subscr.event, subscr.callback);
+                    });
                 });
+                reconnectSubs = null;
             });
-            reconnectSubs = null;
         });
 
         socket.on("disconnect", (data) => {
@@ -6659,7 +6712,7 @@ class WebApi extends Api {
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
-                return result.user;
+                return { user: result.user, accessToken };
             })
             .catch(err => {
                 throw err;
@@ -6738,12 +6791,12 @@ class WebApi extends Api {
         });        
     }
 
-    createIndex(path, key) {
-        const data = JSON.stringify({ action: "create", path, key });
+    createIndex(path, key, options) {
+        const data = JSON.stringify({ action: "create", path, key, options });
         return this._request("POST", `${this.url}/index/${this.dbname}`, data)
         .catch(err => {
             throw err;
-        });         
+        });
     }
 
     getIndexes() {
@@ -6772,9 +6825,9 @@ class WebApi extends Api {
 
 module.exports = { WebApi };
 }).call(this,require("buffer").Buffer)
-},{"acebase-core":54,"buffer":62,"http":86,"socket.io-client":30,"url":93}],42:[function(require,module,exports){
+},{"acebase-core":55,"buffer":64,"http":88,"socket.io-client":30,"url":95}],42:[function(require,module,exports){
 // To use AceBaseClient in the browser
-// from root dir of package, execute: browserify src/browser.js -o browser.js
+// from root dir of package, execute: browserify src/browser.js -o dist/browser.js
 window.AceBase = require('./index');
 window.AceBaseClient = window.AceBase.AceBaseClient;
 
@@ -6782,7 +6835,7 @@ window.AceBaseClient = window.AceBase.AceBaseClient;
 const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, TypeMappingOptions } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
 
-module.exports = { 
+module.exports = {
     AceBaseClient,
     DataReference, 
     DataSnapshot, 
@@ -6791,7 +6844,57 @@ module.exports = {
     TypeMappings, 
     TypeMappingOptions
 };
-},{"./acebase-client":40,"acebase-core":54}],44:[function(require,module,exports){
+},{"./acebase-client":40,"acebase-core":55}],44:[function(require,module,exports){
+
+class AceBaseUser {
+    /**
+     * 
+     * @param {{ uid: string, username: string }} user
+     */
+    constructor(user) {
+        this.uid = user.uid;
+        this.username = user.username;
+    }
+}
+
+class AceBaseSignInResult {
+    /**
+     * 
+     * @param {object} result 
+     * @param {boolean} result.success
+     * @param {AceBaseUser} [result.user]
+     * @param {string} [result.accessToken]
+     * @param {string} [result.reason]
+     */
+    constructor(result) {
+        this.success = result.success;
+        if (result.success) {
+            this.user = result.success;
+            this.accessToken = result.accessToken;
+        }
+        else {
+            this.reason = result.reason;
+        }
+    }
+}
+
+class AceBaseAuthResult {
+    /**
+     * 
+     * @param {object} result 
+     * @param {boolean} result.success
+     * @param {string} [result.reason]
+     */
+    constructor(result) {
+        this.success = result.success;
+        if (!result.success) {
+            this.reason = result.reason;
+        }
+    }
+}
+
+module.exports = { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult };
+},{}],45:[function(require,module,exports){
 (function (Buffer){
 /**
  * Copyright 2015 Huan Du. All rights reserved.
@@ -7181,7 +7284,7 @@ defaultCodec.PostScript = new Ascii85({
 defaultCodec.Ascii85 = Ascii85;
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":62}],45:[function(require,module,exports){
+},{"buffer":64}],46:[function(require,module,exports){
 /**
  * cuid.js
  * Collision-resistant UID generator for browsers and node.
@@ -7266,7 +7369,7 @@ cuid.fingerprint = fingerprint;
 
 module.exports = cuid;
 
-},{"./lib/fingerprint.js":46,"./lib/pad.js":47}],46:[function(require,module,exports){
+},{"./lib/fingerprint.js":47,"./lib/pad.js":48}],47:[function(require,module,exports){
 var pad = require('./pad.js');
 
 var env = typeof window === 'object' ? window : self;
@@ -7280,13 +7383,13 @@ module.exports = function fingerprint () {
   return clientId;
 };
 
-},{"./pad.js":47}],47:[function(require,module,exports){
+},{"./pad.js":48}],48:[function(require,module,exports){
 module.exports = function pad (num, size) {
   var s = '000000000' + num;
   return s.substr(s.length - size);
 };
 
-},{}],48:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 /**
    ________________________________________________________________________________
    
@@ -7346,7 +7449,7 @@ class AceBaseBase extends EventEmitter {
 
     /**
      * 
-     * @param {()=>void} callback (optional) callback function that is called when ready. You can also use the returned promise
+     * @param {()=>void} [callback] (optional) callback function that is called when ready. You can also use the returned promise
      * @returns {Promise<void>} returns a promise that resolves when ready
      */
     ready(callback = undefined) {
@@ -7408,11 +7511,14 @@ class AceBaseBase extends EventEmitter {
              * will index "system/users/user1/name", "system/users/user2/name" etc.
              * You can also use wildcard paths to enable indexing and quering of fragmented data.
              * Example: path "users/*\/posts", key "title": will index all "title" keys in all posts of all users.
-             * @param {string} path
-             * @param {string} key
+             * @param {string} path path to the container node
+             * @param {string} key name of the key to index every container child node
+             * @param {object} [options] any additional options
+             * @param {string} [options.type] special index type, such as 'fulltext', or 'geo'
+             * @param {string[]} [options.include] keys to include in the index. Speeds up sorting on these columns when the index is used (and dramatically increases query speed when .take(n) is used in addition)
              */
-            create: (path, key) => {
-                return this.api.createIndex(path, key);
+            create: (path, key, options) => {
+                return this.api.createIndex(path, key, options);
             }
         };
     }
@@ -7420,7 +7526,7 @@ class AceBaseBase extends EventEmitter {
 }
 
 module.exports = { AceBaseBase, AceBaseSettings };
-},{"./data-reference":50,"./debug":52,"./type-mappings":58,"events":65}],49:[function(require,module,exports){
+},{"./data-reference":51,"./debug":53,"./type-mappings":60,"events":67}],50:[function(require,module,exports){
 
 class Api {
     // interface for local and web api's
@@ -7447,12 +7553,12 @@ class Api {
 }
 
 module.exports = { Api };
-},{}],50:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 const { DataSnapshot } = require('./data-snapshot');
 const { EventStream, EventPublisher } = require('./subscription');
 const { ID } = require('./id');
 const debug = require('./debug');
-const { getPathKeys, getPathInfo } = require('./utils');
+const { PathInfo } = require('./path-info');
 
 class DataRetrievalOptions {
     /**
@@ -7526,44 +7632,49 @@ class DataReference {
         this[_private] = {
             get path() { return path; },
             get key() { return key; },
-            //get query() { return query; },
-            get callbacks() { return callbacks; }
+            get callbacks() { return callbacks; },
+            vars: []
         };
         this.db = db; //Object.defineProperty(this, "db", ...)
     }
 
     /**
-    * Returns the path this instance was created with
+    * The path this instance was created with
+    * @type {string}
     */
     get path() { return this[_private].path; }
 
     /**
-     * Returns the key (property) name of this node
+     * The key or index of this node
+     * @type {string|number}
      */
     get key() { return this[_private].key; }
     
     /**
      * Returns a new reference to this node's parent
+     * @type {DataReference}
      */
     get parent() {
-        const path = getPathInfo(this.path);
-        if (path.parent === null) {
+        const path = PathInfo.get(this.path);
+        if (path.parentPath === null) {
             return null;
         }
-        return new DataReference(this.db, path.parent);
-        // const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("["));
-        // const parentPath = i < 0 ? "" : path.slice(0, i); //path.replace(/\/[a-z0-9_$]+$/, "");
-        // // if (path.lastIndexOf("[") > i) {
-        // //     parentPath = path.slice(0, path.lastIndexOf("["));
-        // // }
-        // if (path === parentPath) { return null; }
-        // return new DataReference(this.db, parentPath);
+        return new DataReference(this.db, path.parentPath);
+    }
+
+    /**
+     * Contains values of the variables/wildcards used in a subscription path if this reference was 
+     * created by an event ("value", "child_added" etc)
+     * @type {object}
+     */
+    get vars() {
+        return this[_private].vars;
     }
 
     /**
      * Returns a new reference to a child node
-     * @param {string} childPath - Child path
-     * @returns {DataReference} - reference to the child
+     * @param {string} childPath Child key or path
+     * @returns {DataReference} reference to the child
      */
     child(childPath) {
         childPath = childPath.replace(/^\/|\/$/g, "");
@@ -7572,10 +7683,14 @@ class DataReference {
     
     /**
      * Sets or overwrites the stored value
-     * @param {any} value - value to store in database
-     * @returns {Promise<DataReference>} - promise that resolves with this reference when completed
+     * @param {any} value value to store in database
+     * @param {(err: Error, ref: DataReference) => void} [onComplete] completion callback to use instead of returning promise 
+     * @returns {Promise<DataReference>} promise that resolves with this reference when completed (when not using onComplete callback)
      */
     set(value, onComplete = undefined) {
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot set the value of a path with wildcards and/or variables`);
+        }
         if (this.parent === null) {
             throw new Error(`Cannot set the root object. Use update, or set individual child properties`);
         }
@@ -7583,38 +7698,64 @@ class DataReference {
             throw new TypeError(`Cannot store value undefined`);
         }
         value = this.db.types.serialize(this.path, value);
-        let flags;
+        // let flags;
         // if (this.__pushed) {
         //     flags = { pushed: true };
         // }
-        return this.db.api.set(this.path, value).then(res => { // , flags
-            onComplete && onComplete(null, this);
-            return this;
-        });
+        const promise = this.db.api.set(this.path, value);
+        if (typeof onComplete === 'function') {
+            promise.then(res => {
+                onComplete(null, this);
+            })
+            .catch(err => {
+                try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
+            });
+        }
+        else {
+            return promise.then(res => this);
+        }
     }
 
     /**
-     * Updates properties of the referenced object
-     * @param {object} updates - object containing the properties to update
-     * @return {Promise<DataReference>} - Returns promise that resolves with this reference once completed
+     * Updates properties of the referenced node
+     * @param {object} updates object containing the properties to update
+     * @param {(err: Error, ref: DataReference) => void} [onComplete] completion callback to use instead of returning promise 
+     * @return {Promise<DataReference>} returns promise that resolves with this reference once completed (when not using onComplete callback)
      */
     update(updates, onComplete = undefined) {
-        const ret = () => {
-            onComplete && onComplete(null, this);
-            return this;
-        };
-        if (typeof updates !== "object" || updates instanceof Array || updates instanceof ArrayBuffer || updates instanceof Date) {
-            return this.set(updates).then(ret);
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot update the value of a path with wildcards and/or variables`);
         }
-        updates = this.db.types.serialize(this.path, updates);
-        return this.db.api.update(this.path, updates).then(ret);
+        let promise;
+        if (typeof updates !== "object" || updates instanceof Array || updates instanceof ArrayBuffer || updates instanceof Date) {
+            promise = this.set(updates);
+        }
+        else {
+            updates = this.db.types.serialize(this.path, updates);
+            promise = this.db.api.update(this.path, updates);
+        }
+        if (typeof onComplete === 'function') {
+            promise.then(() => {
+                onComplete(null, this);
+            })
+            .catch(err => {
+                try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
+            });
+        }
+        else {
+            return promise.then(() => this);
+        }
     }
 
     /**
-     * 
-     * @param {function} callback - callback function(currentValue) => newValue: is called with the current value, should return a new value to store in the database
+     * Sets the value a node using a transaction: it runs you callback function with the current value, uses its return value as the new value to store.
+     * @param {function} callback - callback function(currentValue) => newValue: is called with a snapshot of the current value, must return a new value to store in the database
+     * @returns {Promise<DataReference>} returns a promise that resolves with the DataReference once the transaction has been processed
      */
     transaction(callback) {
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot start a transaction on a path with wildcards and/or variables`);
+        }        
         let cb = (currentValue) => {
             currentValue = this.db.types.deserialize(this.path, currentValue);
             const snap = new DataSnapshot(this, currentValue);
@@ -7646,10 +7787,6 @@ class DataReference {
      * @returns {EventStream} returns an EventStream
      */
     on(event, callback, cancelCallbackOrContext, context) {
-        if (this.path.indexOf('*') >= 0) {
-            throw new Error(`Cannot use wildcards in path to monitor events (yet)`);
-        }
-
         const cancelCallback = typeof cancelCallbackOrContext === 'function' && cancelCallbackOrContext;
         context = typeof cancelCallbackOrContext === 'object' ? cancelCallbackOrContext : context
 
@@ -7669,6 +7806,19 @@ class DataReference {
                     return;
                 }
                 let ref = this.db.ref(path);
+                const vars = PathInfo.extractVariables(this.path, path);
+                ref[_private].vars = vars.reduce((vars, v) => {
+                    if (v.name) {
+                        vars[v.name.slice(1)] = v.value;
+                    }
+                    else if (vars.wildcards) {
+                        vars.wildcards.push(v.value);
+                    }
+                    else {
+                        vars.wildcards = [v.value];
+                    }
+                    return vars;
+                }, {});
                 
                 let callbackObject;
                 if (event.startsWith('notify_')) {
@@ -7719,14 +7869,14 @@ class DataReference {
             eventPublisher.start();
         }
 
-        if (callback) {
+        if (callback && !this.isWildcardPath) {
             // If callback param is supplied (either a callback function or true or something else truthy),
             // it will fire events for current values right now.
             // Otherwise, it expects the .subscribe methode to be used, which will then
             // only be called for future events
             if (event === "value") {
                 this.get(snap => {
-                    eventStream.publish(snap);
+                    eventPublisher.publish(snap);
                     useCallback && callback(snap);
                 });
             }
@@ -7736,7 +7886,7 @@ class DataReference {
                     if (typeof val !== "object") { return; }
                     Object.keys(val).forEach(key => {
                         let childSnap = new DataSnapshot(this.child(key), val[key]);
-                        eventStream.publish(childSnap);
+                        eventPublisher.publish(childSnap);
                         useCallback && callback(childSnap);
                     });
                 });
@@ -7774,35 +7924,40 @@ class DataReference {
 
     /**
      * Gets a snapshot of the stored value. Shorthand method for .once("value")
-     * @param {((snapshot:DataSnapshot) => void)|DataRetrievalOptions} callbackOrOptions - (optional) callback or data retrieval options
-     * @param {DataRetrievalOptions?} options - (optional) data retrieval options to include or exclude specific child keys.
-     * @returns {Promise<DataSnapshot>} returns a promise that resolves with a snapshot of the data
+     * @param {DataRetrievalOptions|((snapshot:DataSnapshot) => void)} [optionsOrCallback] data retrieval options to include or exclude specific child keys, or callback
+     * @param {(snapshot:DataSnapshot) => void} [callback] callback function to run with a snapshot of the data instead of returning a promise
+     * @returns {Promise<DataSnapshot>|void} returns a promise that resolves with a snapshot of the data, or nothing if callback is used
      */
-    get(callbackOrOptions = undefined, options = undefined) {
-        if (this.path.indexOf('*') >= 0) {
-            throw new Error(`Cannot use wildcards to get the value of a single node. Use .query() instead`);
+    get(optionsOrCallback = undefined, callback = undefined) {
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot get the value of a path with wildcards and/or variables. Use .query() instead`);
         }
 
-        const callback = 
-            typeof callbackOrOptions === 'function' 
-            ? callbackOrOptions 
-            : undefined;
-
-        options = 
-            typeof callbackOrOptions === 'object' 
-            ? callbackOrOptions 
-            : typeof options === 'object'
-                ? options
+        callback = 
+            typeof optionsOrCallback === 'function' 
+            ? optionsOrCallback 
+            : typeof callback === 'function'
+                ? callback
                 : undefined;
+
+        const options = 
+            typeof optionsOrCallback === 'object' 
+            ? optionsOrCallback 
+            : undefined;
 
         const promise = this.db.api.get(this.path, options).then(value => {
             value = this.db.types.deserialize(this.path, value);
             const snapshot = new DataSnapshot(this, value);
-            callback && callback(snapshot);
             return snapshot;
         });
 
-        return promise;
+        if (callback) { 
+            promise.then(callback);
+            return; 
+        }
+        else {
+            return promise;
+        }
     }
 
     /**
@@ -7812,21 +7967,17 @@ class DataReference {
      * @returns {Promise<DataSnapshot>} - returns promise that resolves with a snapshot of the data
      */
     once(event, options) {
-
-        switch(event) {
-            case "value": {
-                return this.get(options);
-            }
-            default: {
-                return new Promise((resolve, reject) => {
-                    const callback = (snap) => {
-                        this.off(event, snap); // unsubscribe directly
-                        resolve(snap);
-                    }
-                    this.on(event, callback);
-                })
-            }
+        if (event === "value" && !this.isWildcardPath) {
+            // Shortcut, do not start listening for future events
+            return this.get(options);
         }
+        return new Promise((resolve, reject) => {
+            const callback = (snap) => {
+                this.off(event, snap); // unsubscribe directly
+                resolve(snap);
+            }
+            this.on(event, callback);
+        });
     }
 
     /**
@@ -7853,6 +8004,10 @@ class DataReference {
      * userRef.set({ name: "Popeye the Sailor" })
      */
     push(value = undefined, onComplete = undefined) {
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot push to a path with wildcards and/or variables`);
+        }
+
         const id = ID.generate(); //uuid62.v1({ node: [0x61, 0x63, 0x65, 0x62, 0x61, 0x73] });
         const ref = this.child(id);
         ref.__pushed = true;
@@ -7869,6 +8024,9 @@ class DataReference {
      * Removes this node and all children
      */
     remove() {
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot remove a path with wildcards and/or variables. Use query().remove instead`);
+        }
         if (this.parent === null) {
             throw new Error(`Cannot remove the top node`);
         }
@@ -7880,7 +8038,14 @@ class DataReference {
      * @returns {Promise<boolean>} | returns a promise that resolves with a boolean value
      */
     exists() {
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot push to a path with wildcards and/or variables`);
+        }
         return this.db.api.exists(this.path);
+    }
+
+    get isWildcardPath() {
+        return this.path.indexOf('*') >= 0 || this.path.indexOf('$') >= 0;
     }
 
     query() {
@@ -7888,16 +8053,19 @@ class DataReference {
     }
 
     reflect(type, args) {
+        if (this.pathHasVariables) {
+            throw new Error(`Cannot reflect on a path with wildcards and/or variables`);
+        }
         return this.db.api.reflect(this.path, type, args);
     }
 } 
 
 class DataReferenceQuery {
-    // const q = db.ref("chats").query(); // creates this class
-    // q.where("title", "matches", /\Wdatabase\W/i)
-    // q.get({ exclude: ["*/messages"] })
-    // OR q.remove(); // To remove all matches
-
+    
+    /**
+     * Creates a query on a reference
+     * @param {DataReference} ref 
+     */
     constructor(ref) {
         this.ref = ref;
         this[_private] = {
@@ -7909,12 +8077,15 @@ class DataReferenceQuery {
     }
 
     /**
-     * 
-     * @param {string} key | property to test value of
+     * Applies a filter to the children of the refence being queried. 
+     * If there is an index on the property key being queried, it will be used 
+     * to speed up the query
+     * @param {string|number} key | property to test value of
      * @param {string} op | operator to use
-     * @param {any} compare | value to compare with, or null/undefined to test property existance (in combination with operators eq or neq)
+     * @param {any} compare | value to compare with
+     * @returns {DataReferenceQuery}
      */                
-    where(key, op, compare) {
+    filter(key, op, compare) {
         if ((op === "in" || op === "!in") && (!(compare instanceof Array) || compare.length === 0)) {
             throw `${op} filter for ${key} must supply an Array compare argument containing at least 1 value`;
         }
@@ -7931,17 +8102,40 @@ class DataReferenceQuery {
         return this;
     }
 
-    take(nr) {
-        this[_private].take = nr;
+    /**
+     * @deprecated use .filter instead
+     */
+    where(key, op, compare) {
+        return this.filter(key, op, compare)
+    }
+
+    /**
+     * Limits the number of query results to n
+     * @param {number} n 
+     * @returns {DataReferenceQuery}
+     */
+    take(n) {
+        this[_private].take = n;
         return this;
     }
 
-    skip(nr) {
-        this[_private].skip = nr;
+    /**
+     * Skips the first n query results
+     * @param {number} n 
+     * @returns {DataReferenceQuery}
+     */
+    skip(n) {
+        this[_private].skip = n;
         return this;
     }
 
-    order(key, ascending = true) {
+    /**
+     * Sorts the query results
+     * @param {string} key 
+     * @param {boolean} [ascending=true]
+     * @returns {DataReferenceQuery}
+     */
+    sort(key, ascending = true) {
         if (typeof key !== "string") {
             throw `key must be a string`;
         }
@@ -7950,32 +8144,39 @@ class DataReferenceQuery {
     }
 
     /**
-     * Executes the query
-     * @param {((snapshotsOrReferences:DataSnapshotsArray|DataReferencesArray) => void)|QueryDataRetrievalOptions} callbackOrOptions - (optional) callback or data retrieval options
-     * @param {QueryDataRetrievalOptions?} options - (optional) data retrieval options to include or exclude specific child data, and whether to return snapshots (default) or references only
-     * @returns {Promise<DataSnapshotsArray>|Promise<DataReferencesArray>} returns an Promise that resolves with an array of DataReferences or DataSnapshots
+     * @deprecated use .sort instead
      */
-    get(callbackOrOptions = undefined, options = undefined) {
-        const callback = 
-            typeof callbackOrOptions === 'function' 
-            ? callbackOrOptions 
-            : undefined;
+    order(key, ascending = true) {
+        return this.sort(key, ascending);
+    }
 
-        options = 
-            typeof callbackOrOptions === 'object' 
-            ? callbackOrOptions 
-            : typeof options === 'object'
-                ? options
+    /**
+     * Executes the query
+     * @param {((snapshotsOrReferences:DataSnapshotsArray|DataReferencesArray) => void)|QueryDataRetrievalOptions} [optionsOrCallback] data retrieval options (to include or exclude specific child data, and whether to return snapshots (default) or references only), or callback
+     * @param {(snapshotsOrReferences:DataSnapshotsArray|DataReferencesArray) => void} [callback] callback to use instead of returning a promise
+     * @returns {Promise<DataSnapshotsArray>|Promise<DataReferencesArray>|void} returns an Promise that resolves with an array of DataReferences or DataSnapshots, or void if a callback is used instead
+     */
+    get(optionsOrCallback = undefined, callback = undefined) {
+        callback = 
+            typeof optionsOrCallback === 'function' 
+            ? optionsOrCallback 
+            : typeof callback === 'function'
+                ? callback
                 : undefined;
 
-        if (!options) {
-            options = new QueryDataRetrievalOptions({ snapshots: true }); //, include: undefined, exclude: undefined, child_objects: undefined }
-        }
+        const options = 
+            typeof optionsOrCallback === 'object' 
+            ? optionsOrCallback 
+            : new QueryDataRetrievalOptions({ snapshots: true });
+
         if (typeof options.snapshots === 'undefined') {
             options.snapshots = true;
         }
         const db = this.ref.db;
         return db.api.query(this.ref.path, this[_private], options)
+        .catch(err => {
+            throw new Error(err);
+        })
         .then(results => {
             results.forEach((result, index) => {
                 if (options.snapshots) {
@@ -8000,8 +8201,17 @@ class DataReferenceQuery {
     }
 
     /**
+     * Executes the query and returns references. Short for .get({ snapshots: false })
+     * @param {(references:DataReferencesArray) => void} [callback] callback to use instead of returning a promise
+     * @returns {Promise<DataReferencesArray>|void} returns an Promise that resolves with an array of DataReferences, or void when using a callback
+     */
+    getRefs(callback = undefined) {
+        return this.get({ snapshots: false }, callback);
+    }
+
+    /**
      * Executes the query, removes all matches from the database
-     * @returns {Promise} | returns an Promise that resolves once all matches have been removed
+     * @returns {Promise<void>|void} | returns an Promise that resolves once all matches have been removed, or void if a callback is used
      */
     remove(callback) {
         return this.get({ snapshots: false })
@@ -8051,7 +8261,7 @@ module.exports = {
     DataRetrievalOptions,
     QueryDataRetrievalOptions
 };
-},{"./data-snapshot":51,"./debug":52,"./id":53,"./subscription":56,"./utils":59}],51:[function(require,module,exports){
+},{"./data-snapshot":52,"./debug":53,"./id":54,"./path-info":56,"./subscription":58}],52:[function(require,module,exports){
 const { DataReference } = require('./data-reference');
 const { getPathKeys } = require('./utils');
 
@@ -8094,37 +8304,59 @@ class DataSnapshot {
         }
     }
     
+    /**
+     * @param {string} path 
+     * @returns {DataSnapshot}
+     */
     child(path) {
         // Create new snapshot for child data
         let child = getChild(this, path);
         return new DataSnapshot(this.ref.child(path), child);
     }
 
+    /**
+     * @param {string} path 
+     * @returns {boolean}
+     */
     hasChild(path) {
         return getChild(this, path) !== null;
     }
 
+    /**
+     * @returns {boolean}
+     */
     hasChildren() {
         return getChildren(this).length > 0;
     }
 
+    /**
+     * @returns {number}
+     */
     numChildren() {
         return getChildren(this).length;          
     }
 
-    forEach(action) {
+    /**
+     * Runs a callback function for each child node until the callback returns false
+     * @param {(child: DataSnapshot) => boolean} callback 
+     * @returns {void}
+     */
+    forEach(callback) {
         const value = this.val();
         return getChildren(this).every((key, i) => {
             const snap = new DataSnapshot(this.ref.child(key), value[key]); 
-            return action(snap);
+            return callback(snap);
         });
     }
 
+    /**
+     * @type {string|number}
+     */
     get key() { return this.ref.key; }
 }
 
 module.exports = { DataSnapshot };
-},{"./data-reference":50,"./utils":59}],52:[function(require,module,exports){
+},{"./data-reference":51,"./utils":61}],53:[function(require,module,exports){
 const debug = {
     setLevel(level) {
         this.log = ["log"].indexOf(level) >= 0 ? console.log.bind(console) : ()=>{};
@@ -8135,7 +8367,7 @@ const debug = {
 debug.setLevel("log"); // default
 
 module.exports = debug;
-},{}],53:[function(require,module,exports){
+},{}],54:[function(require,module,exports){
 const cuid = require('cuid');
 // const uuid62 = require('uuid62');
 
@@ -8148,7 +8380,7 @@ class ID {
 }
 
 module.exports = { ID };
-},{"cuid":45}],54:[function(require,module,exports){
+},{"cuid":46}],55:[function(require,module,exports){
 const { AceBaseBase, AceBaseSettings } = require('./acebase-base');
 const { Api } = require('./api');
 const { DataReference, DataReferenceQuery, DataRetrievalOptions, QueryDataRetrievalOptions } = require('./data-reference');
@@ -8160,6 +8392,7 @@ const { EventStream, EventPublisher, EventSubscription } = require('./subscripti
 const Transport = require('./transport');
 const { TypeMappings, TypeMappingOptions } = require('./type-mappings');
 const Utils = require('./utils');
+const { PathInfo } = require('./path-info');
 
 module.exports = {
     AceBaseBase, AceBaseSettings,
@@ -8172,9 +8405,268 @@ module.exports = {
     EventStream, EventPublisher, EventSubscription,
     Transport,
     TypeMappings, TypeMappingOptions,
-    Utils
+    Utils,
+    PathInfo
 };
-},{"./acebase-base":48,"./api":49,"./data-reference":50,"./data-snapshot":51,"./debug":52,"./id":53,"./path-reference":55,"./subscription":56,"./transport":57,"./type-mappings":58,"./utils":59}],55:[function(require,module,exports){
+},{"./acebase-base":49,"./api":50,"./data-reference":51,"./data-snapshot":52,"./debug":53,"./id":54,"./path-info":56,"./path-reference":57,"./subscription":58,"./transport":59,"./type-mappings":60,"./utils":61}],56:[function(require,module,exports){
+
+/**
+ * 
+ * @param {string} path 
+ * @returns {Array<string|number>}
+ */
+function getPathKeys(path) {
+    if (path.length === 0) { return []; }
+    let keys = path.replace(/\[/g, "/[").split("/");
+    keys.forEach((key, index) => {
+        if (key.startsWith("[")) { 
+            keys[index] = parseInt(key.substr(1, key.length - 2)); 
+        }
+    });
+    return keys;
+}
+
+function getPathInfo(path) {
+    if (path.length === 0) {
+        return { parent: null, key: "" };
+    }
+    const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("["));
+    const parentPath = i < 0 ? "" : path.substr(0, i);
+    let key = i < 0 ? path : path.substr(i);
+    if (key.startsWith("[")) { 
+        key = parseInt(key.substr(1, key.length - 2)); 
+    }
+    else if (key.startsWith("/")) {
+        key = key.substr(1); // Chop off leading slash
+    }
+    if (parentPath === path) {
+        parentPath = null;
+    }
+    return {
+        parent: parentPath,
+        key
+    };
+}
+
+/**
+ * 
+ * @param {string} path 
+ * @param {string|number} key 
+ * @returns {string}
+ */
+function getChildPath(path, key) {
+    if (path.length === 0) {
+        if (typeof key === "number") { throw new TypeError("Cannot add array index to root path!"); }
+        return key;
+    }
+    if (typeof key === "number") {
+        return `${path}[${key}]`;
+    }
+    return `${path}/${key}`;
+}
+//const _pathVariableRegex =  /^\$(\{[a-z0-9]+\})$/i;
+
+class PathInfo {
+    /** @returns {PathInfo} */
+    static get(path) {
+        return new PathInfo(path);
+    }
+
+    /** @returns {string} */
+    static getChildPath(path, childKey) {
+        return getChildPath(path, childKey);
+    }
+
+    /** @returns {Array<string|number>} */
+    static getPathKeys(path) {
+        return getPathKeys(path);
+    }
+
+    /**
+     * @param {string} path 
+     */
+    constructor(path) {
+        this.path = path;
+    }
+
+    /** @type {string|number} */
+    get key() {
+        return getPathInfo(this.path).key;
+    }
+
+    /** @type {string} */
+    get parentPath() {
+        return getPathInfo(this.path).parent;
+    }
+
+    /** 
+     * @param {string|number} childKey
+     * @returns {string} 
+     * */
+    childPath(childKey) {
+        return getChildPath(`${this.path}`, childKey);
+    }
+
+    /** @returns {Array<string|number>} */
+    get pathKeys() {
+        return getPathKeys(this.path);
+    }
+
+    /**
+     * If varPath contains variables or wildcards, it will return them with the values found in fullPath
+     * @param {string} varPath 
+     * @param {string} fullPath 
+     * @returns {Array<{ name?: string, value: string|number }>}
+     * @example
+     * PathInfo.extractVariables('users/$uid/posts/$postid', 'users/ewout/posts/post1/title') === [
+     *  { name: '$uid', value: 'ewout' },
+     *  { name: '$postid', value: 'post1' }
+     * ];
+     * 
+     * PathInfo.extractVariables('users/*\/posts/*\/$property', 'users/ewout/posts/post1/title') === [
+     *  { value: 'ewout' },
+     *  { value: 'post1' },
+     *  { name: '$property', value: 'title' }
+     * ]
+     */
+    static extractVariables(varPath, fullPath) {
+        if (varPath.indexOf('*') < 0 && varPath.indexOf('$') < 0) { 
+            return []; 
+        }
+        // if (!this.equals(fullPath)) {
+        //     throw new Error(`path does not match with the path of this PathInfo instance: info.equals(path) === false!`)
+        // }
+        const keys = getPathKeys(varPath);
+        const pathKeys = getPathKeys(fullPath);
+        const variables = [];
+        keys.forEach((key, index) => {
+            const pathKey = pathKeys[index];
+            if (key === '*') {
+                variables.push({ value: pathKey });
+            }
+            else if (typeof key === 'string' && key[0] === '$') {
+                variables.push({ name: key, value: pathKey });
+            }
+        });
+        return variables;
+    }
+
+    /**
+     * If varPath contains variables or wildcards, it will return a path with the variables replaced by the keys found in fullPath.
+     * @param {string} varPath 
+     * @param {string} fullPath 
+     * @returns {string}
+     * @example
+     * PathInfo.fillVariables('users/$uid/posts/$postid', 'users/ewout/posts/post1/title') === 'users/ewout/posts/post1'
+     */
+    static fillVariables(varPath, fullPath) {
+        if (varPath.indexOf('*') < 0 && varPath.indexOf('$') < 0) { 
+            return varPath; 
+        }
+        const keys = getPathKeys(varPath);
+        const pathKeys = getPathKeys(fullPath);
+        let merged = keys.map((key, index) => {
+            if (key === pathKeys[index] || index >= pathKeys.length) {
+                return key;
+            }
+            else if (typeof key === 'string' && (key === '*' || key[0] === '$')) {
+                return pathKeys[index];
+            }
+            else {
+                throw new Error(`Path "${fullPath}" cannot be used to fill variables of path "${this.path}" because they do not match`);
+            }
+        });
+        let mergedPath = '';
+        merged.forEach(key => {
+            if (typeof key === 'number') { 
+                mergedPath += `[${key}]`; 
+            }
+            else { 
+                if (mergedPath.length > 0) { mergedPath += '/'; }
+                mergedPath += key;
+            }
+        });
+        return mergedPath;
+    }
+
+    /**
+     * Checks if a given path matches this path, eg "posts/*\/title" matches "posts/12344/title" and "users/123/name" matches "users/$uid/name"
+     * @param {string} otherPath 
+     * @returns {boolean}
+     */
+    equals(otherPath) {
+        const keys = getPathKeys(this.path);
+        const otherKeys = getPathKeys(otherPath);
+        if (keys.length !== otherKeys.length) { return false; }
+        return keys.every((key, index) => {
+            const otherKey = otherKeys[index];
+            return otherKey === key 
+                || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
+                || (typeof key === 'string' && (key === "*" ||  key[0] === '$'));
+        });
+    }
+
+    /**
+     * Checks if a given path is an ancestor, eg "posts" is an ancestor of "posts/12344/title"
+     * @param {string} otherPath 
+     * @returns {boolean}
+     */
+    isAncestorOf(descendantPath) {
+        if (descendantPath === '' || this.path === descendantPath) { return false; }
+        if (this.path === '') { return true; }
+        const ancestorKeys = getPathKeys(this.path);
+        const descendantKeys = getPathKeys(descendantPath);
+        if (ancestorKeys.length >= descendantKeys.length) { return false; }
+        return ancestorKeys.every((key, index) => {
+            const otherKey = descendantKeys[index];
+            return otherKey === key 
+                || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
+                || (typeof key === 'string' && (key === "*" ||  key[0] === '$'));
+        });
+    }
+
+    /**
+     * Checks if a given path is a descendant, eg "posts/1234/title" is a descendant of "posts"
+     * @param {string} otherPath 
+     * @returns {boolean}
+     */
+    isDescendantOf(ancestorPath) {
+        if (this.path === '' || this.path === ancestorPath) { return false; }
+        if (ancestorPath === '') { return true; }
+        const ancestorKeys = getPathKeys(ancestorPath);
+        const descendantKeys = getPathKeys(this.path);
+        if (ancestorKeys.length >= descendantKeys.length) { return false; }
+        return ancestorKeys.every((key, index) => {
+            const otherKey = descendantKeys[index];
+            return otherKey === key 
+                || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
+                || (typeof key === 'string' && (key === "*" ||  key[0] === '$'));
+        });
+    }
+
+    /**
+     * Checks if a given path is a direct child, eg "posts/1234/title" is a child of "posts/1234"
+     * @param {string} otherPath 
+     * @returns {boolean}
+     */
+    isChildOf(otherPath) {
+        const parentInfo = PathInfo.get(this.parentPath);
+        return parentInfo.equals(otherPath);
+    }
+
+    /**
+     * Checks if a given path is its parent, eg "posts/1234" is the parent of "posts/1234/title"
+     * @param {string} otherPath 
+     * @returns {boolean}
+     */
+    isParentOf(otherPath) {
+        const parentInfo = PathInfo.get(PathInfo.get(otherPath).parentPath);
+        return parentInfo.equals(this.path);
+    }
+}
+
+module.exports = { getPathInfo, getChildPath, getPathKeys, PathInfo };
+},{}],57:[function(require,module,exports){
 class PathReference {
     /**
      * Creates a reference to a path that can be stored in the database. Use this to create cross-references to other data in your database
@@ -8185,14 +8677,67 @@ class PathReference {
     }
 }
 module.exports = { PathReference };
-},{}],56:[function(require,module,exports){
+},{}],58:[function(require,module,exports){
 class EventSubscription {
     /**
      * 
-     * @param {() => void} stop stops the subscription from receiving future events
+     * @param {() => void} stop function that stops the subscription from receiving future events
+     * @param {(callback?: () => void) => Promise<void>} activated function that runs optional callback when subscription is activated, and returns a promise that resolves once activated
      */
     constructor(stop) {
         this.stop = stop;
+        this._internal = { 
+            state: 'init',
+            cancelReason: undefined,
+            /** @type {{ callback?: (activated: boolean, cancelReason?: string) => void, resolve?: () => void, reject?: (reason: any) => void}[]} */
+            activatePromises: []
+        };
+    }
+
+    /**
+     * Notifies when subscription is activated or canceled
+     * @param {callback?: (activated: boolean, cancelReason?: string) => void} [callback] optional callback when subscription is activated or canceled
+     * @returns {Promise<void>|void} if no callback is used, returns a promise that resolves once activated, or rejects when it is denied
+     */
+    activated(callback = undefined) {
+        if (callback) {
+            this._internal.activatePromises.push({ callback });
+            if (this._internal.state === 'active') {
+                callback(true);
+            }
+            else if (this._internal.state === 'canceled') {
+                callback(false, this._internal.cancelReason);
+            }
+        }
+        else {
+            if (this._internal.state === 'active') {
+                return Promise.resolve();
+            }
+            else if (this._internal.state === 'canceled') {
+                return Promise.reject(new Error(this._internal.cancelReason));
+            }
+            return new Promise((resolve, reject) => { 
+                if (this._internal.state === 'active') { return resolve(); }
+                else if (this._internal.state === 'canceled') { return reject(new Error(this._internal.cancelReason)); }
+                this._internal.activatePromises.push({ resolve, reject });
+            });
+        }
+    }
+
+    _setActivationState(activated, cancelReason) {
+        this._internal.cancelReason = cancelReason;
+        this._internal.state = activated ? 'active' : 'canceled';
+        while (this._internal.activatePromises.length > 0) {
+            const p = this._internal.activatePromises.shift();
+            if (activated) { 
+                p.callback && p.callback(true); 
+                p.resolve && p.resolve();
+            }
+            else { 
+                p.callback && p.callback(false, cancelReason);
+                p.reject && p.reject(cancelReason); 
+            }
+        }
     }
 }
 
@@ -8230,23 +8775,33 @@ class EventStream {
             if (typeof callback !== "function") {
                 throw new TypeError("callback must be a function");
             }
-            if (typeof activationCallback === 'function' && typeof activationState !== 'undefined') {
-                if (activationState === true) {
-                    activationCallback(true);
-                }
-                else if (typeof activationState === 'string') {
-                    activationCallback(false, activationState);
-                }
-            }
-            const sub = { 
+
+            const sub = {
                 callback,
-                activationCallback,
-                stop() {
+                activationCallback: function(activated, cancelReason) {
+                    activationCallback && activationCallback(activated, cancelReason);
+                    this.subscription._setActivationState(activated, cancelReason);
+                },
+                // stop() {
+                //     subscribers.splice(subscribers.indexOf(this), 1);
+                // },
+                subscription: new EventSubscription(function() {
                     subscribers.splice(subscribers.indexOf(this), 1);
-                }
+                })
             };
             subscribers.push(sub);
-            return new EventSubscription(sub.stop);
+
+            if (typeof activationState !== 'undefined') {
+                if (activationState === true) {
+                    activationCallback && activationCallback(true);
+                    sub.subscription._setActivationState(true);
+                }
+                else if (typeof activationState === 'string') {
+                    activationCallback && activationCallback(false, activationState);
+                    sub.subscription._setActivationState(false, activationState);
+                }
+            }
+            return sub.subscription;
         };
 
         /**
@@ -8258,7 +8813,8 @@ class EventStream {
                 ? subscribers.filter(sub => sub.callback === callback)
                 : subscribers;
             remove.forEach(sub => {
-                sub.stop();
+                const i = subscribers.indexOf(sub);
+                subscribers.splice(i, 1);
             });
         };
 
@@ -8302,70 +8858,7 @@ class EventStream {
 }
 
 module.exports = { EventStream, EventPublisher, EventSubscription };
-
-// const Observable = require('observable');
-
-// // TODO: Remove observable dependency, replace with own implementation
-// class EventSubscription {
-
-//     constructor() {
-//         const observable = Observable();
-//         const subscribers = [];
-//         let hasValue = false;
-
-//         /**
-//          * Subscribes to new value events
-//          * @param {function} callback | function(val) to run once a new value is published
-//          */
-//         this.subscribe = (callback) => {
-//             if (typeof callback === "function") {
-//                 if (hasValue) {
-//                     const stop = observable(callback);
-//                     subscribers.push({ callback, stop });
-//                 }
-//                 else {
-//                     subscribers.push({ callback })
-//                 }
-//             }
-//             const stop = () => {
-//                 this.stop(callback);
-//             };
-//             return { stop };
-//         };
-
-//         /**
-//          * For publishing side: adds a value that will trigger callbacks to all subscribers
-//          * @param {any} val
-//          */
-//         this.publish = (val) => {
-//             observable(val);
-//             if (!hasValue) {
-//                 hasValue = true;
-//                 subscribers.forEach(sub => {
-//                     const stop = observable(sub.callback);
-//                     sub.stop = stop;
-//                 });
-//             }
-//         };
-
-//         /**
-//          * Stops monitoring new value events
-//          * @param {function} callback | (optional) specific callback to remove. Will remove all callbacks when omitted
-//          */
-//         this.stop = (callback = undefined) => {
-//             const remove = callback 
-//                 ? subscribers.filter(sub => sub.callback === callback)
-//                 : subscribers;
-//             remove.forEach(sub => {
-//                 sub.stop();
-//                 subscribers.splice(subscribers.indexOf(sub));
-//             });
-//         };
-//     }
-// }
-
-// module.exports = { EventSubscription };
-},{}],57:[function(require,module,exports){
+},{}],59:[function(require,module,exports){
 (function (Buffer){
 const { PathReference } = require('./path-reference');
 //const { DataReference } = require('./data-reference');
@@ -8466,8 +8959,9 @@ module.exports = {
     }        
 };
 }).call(this,require("buffer").Buffer)
-},{"./path-reference":55,"./utils":59,"ascii85":44,"buffer":62}],58:[function(require,module,exports){
-const { cloneObject, getPathKeys, getPathInfo } = require('./utils');
+},{"./path-reference":57,"./utils":61,"ascii85":45,"buffer":64}],60:[function(require,module,exports){
+const { cloneObject } = require('./utils');
+const { PathInfo } = require('./path-info');
 
 /**
  * (for internal use) - gets the mapping set for a specific path
@@ -8478,10 +8972,10 @@ const get = (mappings, path) => {
     // path points to the mapped (object container) location
     path = path.replace(/^\/|\/$/g, ""); // trim slashes
     // const keys = path.length > 0 ? path.split("/") : [];
-    const keys = getPathKeys(path);
+    const keys = PathInfo.getPathKeys(path);
     const mappedPath = Object.keys(mappings).find(mpath => {
         // const mkeys = mpath.length > 0 ? mpath.split("/") : [];
-        const mkeys = getPathKeys(mpath);
+        const mkeys = PathInfo.getPathKeys(mpath);
         if (mkeys.length !== keys.length) {
             return false; // Can't be a match
         }
@@ -8505,7 +8999,7 @@ const map = (mappings, path) => {
    // path points to the object location, it's parent should have the mapping
 //    path = path.replace(/^\/|\/$/g, ""); // trim slashes
 //    const targetPath = path.substring(0, path.lastIndexOf("/"));
-    const targetPath = getPathInfo(path).parent;
+    const targetPath = PathInfo.get(path).parentPath;
     if (targetPath === null) { return; }
     return get(mappings, targetPath);
 };
@@ -8524,15 +9018,15 @@ const mapDeep = (mappings, entryPath) => {
     entryPath = entryPath.replace(/^\/|\/$/g, ""); // trim slashes
 
     // Start with current path's parent node
-    const pathInfo = getPathInfo(entryPath);
-    const startPath = pathInfo.parent; //entryPath.substring(0, Math.max(entryPath.lastIndexOf("/"), entryPath.lastIndexOf("[")));
-    const keys = startPath ? getPathKeys(startPath) : [];
+    const pathInfo = PathInfo.get(entryPath);
+    const startPath = pathInfo.parentPath;
+    const keys = startPath ? PathInfo.getPathKeys(startPath) : [];
 
     // Every path that starts with startPath, is a match
     const matches = Object.keys(mappings).reduce((m, mpath) => {
 
         //const mkeys = mpath.length > 0 ? mpath.split("/") : [];
-        const mkeys = getPathKeys(mpath);
+        const mkeys = PathInfo.getPathKeys(mpath);
         if (mkeys.length < keys.length) {
             return m; // Can't be a match
         }
@@ -8575,12 +9069,12 @@ const mapDeep = (mappings, entryPath) => {
  * @returns {any} returns the (de)serialized value
  */
 const process = (mappings, path, obj, action) => {
-    const keys = getPathKeys(path); // path.length > 0 ? path.split("/") : [];
+    const keys = PathInfo.getPathKeys(path); // path.length > 0 ? path.split("/") : [];
     const m = mapDeep(mappings, path);
     const changes = [];
-    m.sort((a,b) => getPathKeys(a.path).length > getPathKeys(b.path).length ? -1 : 1); // Deepest paths first
+    m.sort((a,b) => PathInfo.getPathKeys(a.path).length > PathInfo.getPathKeys(b.path).length ? -1 : 1); // Deepest paths first
     m.forEach(mapping => {
-        const mkeys = getPathKeys(mapping.path); //mapping.path.length > 0 ? mapping.path.split("/") : [];
+        const mkeys = PathInfo.getPathKeys(mapping.path); //mapping.path.length > 0 ? mapping.path.split("/") : [];
         mkeys.push("*");
         const mTrailKeys = mkeys.slice(keys.length);
 
@@ -8691,9 +9185,12 @@ class TypeMappings {
      * Maps objects that are stored in a specific path to a constructor method, 
      * so they can automatically be serialized/deserialized when stored/loaded to/from
      * the database
-     * @param {string} path | path to an object container, eg "users" or "users/${userid}/posts"
-     * @param {function} constructor | constructor to instantiate objects with
-     * @param {TypeMappingOptions} options | instantiate: boolean that specifies if the constructor method should be called using the "new" keyword, or just execute the function. serializer: function that can serialize your object for storing, if your class does not have a .serialize() method
+     * @param {string} path path to an object container, eg "users" or "users/*\/posts"
+     * @param {(obj: any) => object} constructor constructor (deserializer) to instantiate objects with
+     * @param {TypeMappingOptions} [options] instantiate: boolean that specifies if the 
+     * constructor method should be called using the "new" keyword, or just execute the 
+     * function. serializer: function that can serialize your object for storing, if 
+     * your class requires custom serialization, but does not implement a .serialize() method
      */
     bind(path, constructor, options = new TypeMappingOptions({ instantiate: true, serializer: undefined, exclude: undefined, include: undefined })) {
         // Maps objects that are stored in a specific path to a constructor method,
@@ -8758,7 +9255,7 @@ module.exports = {
     TypeMappingOptions
 }
 
-},{"./utils":59}],59:[function(require,module,exports){
+},{"./path-info":56,"./utils":61}],61:[function(require,module,exports){
 const { PathReference } = require('./path-reference');
 
 function numberToBytes(number) {
@@ -8836,55 +9333,6 @@ function cloneObject(original, stack) {
     return clone;
 }
 
-/**
- * 
- * @param {string} path 
- * @returns {Array<string|number>}
- */
-function getPathKeys(path) {
-    if (path.length === 0) { return []; }
-    let keys = path.replace(/\[/g, "/[").split("/");
-    keys.forEach((key, index) => {
-        if (key.startsWith("[")) { 
-            keys[index] = parseInt(key.substr(1, key.length - 2)); 
-        }
-    });
-    return keys;
-}
-
-function getPathInfo(path) {
-    if (path.length === 0) {
-        return { parent: null, key: "" };
-    }
-    const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("["));
-    const parentPath = i < 0 ? "" : path.substr(0, i);
-    let key = i < 0 ? path : path.substr(i);
-    if (key.startsWith("[")) { 
-        key = parseInt(key.substr(1, key.length - 2)); 
-    }
-    else if (key.startsWith("/")) {
-        key = key.substr(1); // Chop off leading slash
-    }
-    if (parentPath === path) {
-        parentPath = null;
-    }
-    return {
-        parent: parentPath,
-        key
-    };
-};
-
-function getChildPath(path, key) {
-    if (path.length === 0) {
-        if (typeof key === "number") { throw new TypeError("Cannot add array index to root path!"); }
-        return key;
-    }
-    if (typeof key === "number") {
-        return `${path}[${key}]`;
-    }
-    return `${path}/${key}`;
-}
-
 function compareValues (oldVal, newVal) {
     const voids = [undefined, null];
     if (oldVal === newVal) { return "identical"; }
@@ -8942,14 +9390,14 @@ module.exports = {
     bytesToNumber,
     concatTypedArrays,
     cloneObject,
-    getPathKeys,
-    getPathInfo,
-    getChildPath,
+    // getPathKeys,
+    // getPathInfo,
+    // getChildPath,
     compareValues,
     getChildValues
 };
 
-},{"./data-snapshot":51,"./path-reference":55}],60:[function(require,module,exports){
+},{"./data-snapshot":52,"./path-reference":57}],62:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -9102,9 +9550,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],61:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 
-},{}],62:[function(require,module,exports){
+},{}],64:[function(require,module,exports){
 /*!
  * The buffer module from node.js, for the browser.
  *
@@ -10883,7 +11331,7 @@ function numberIsNaN (obj) {
   return obj !== obj // eslint-disable-line no-self-compare
 }
 
-},{"base64-js":60,"ieee754":66}],63:[function(require,module,exports){
+},{"base64-js":62,"ieee754":68}],65:[function(require,module,exports){
 module.exports = {
   "100": "Continue",
   "101": "Switching Protocols",
@@ -10949,7 +11397,7 @@ module.exports = {
   "511": "Network Authentication Required"
 }
 
-},{}],64:[function(require,module,exports){
+},{}],66:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -11060,7 +11508,7 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../is-buffer/index.js")})
-},{"../../is-buffer/index.js":68}],65:[function(require,module,exports){
+},{"../../is-buffer/index.js":70}],67:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -11585,7 +12033,7 @@ function functionBindPolyfill(context) {
   };
 }
 
-},{}],66:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = (nBytes * 8) - mLen - 1
@@ -11671,7 +12119,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],67:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -11696,7 +12144,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],68:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 /*!
  * Determine if an object is a Buffer
  *
@@ -11719,9 +12167,9 @@ function isSlowBuffer (obj) {
   return typeof obj.readFloatLE === 'function' && typeof obj.slice === 'function' && isBuffer(obj.slice(0, 0))
 }
 
-},{}],69:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 arguments[4][26][0].apply(exports,arguments)
-},{"dup":26}],70:[function(require,module,exports){
+},{"dup":26}],72:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -11769,7 +12217,7 @@ function nextTick(fn, arg1, arg2, arg3) {
 
 
 }).call(this,require('_process'))
-},{"_process":71}],71:[function(require,module,exports){
+},{"_process":73}],73:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -11955,7 +12403,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],72:[function(require,module,exports){
+},{}],74:[function(require,module,exports){
 (function (global){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -12492,7 +12940,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],73:[function(require,module,exports){
+},{}],75:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -12578,7 +13026,7 @@ var isArray = Array.isArray || function (xs) {
   return Object.prototype.toString.call(xs) === '[object Array]';
 };
 
-},{}],74:[function(require,module,exports){
+},{}],76:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -12665,13 +13113,13 @@ var objectKeys = Object.keys || function (obj) {
   return res;
 };
 
-},{}],75:[function(require,module,exports){
+},{}],77:[function(require,module,exports){
 'use strict';
 
 exports.decode = exports.parse = require('./decode');
 exports.encode = exports.stringify = require('./encode');
 
-},{"./decode":73,"./encode":74}],76:[function(require,module,exports){
+},{"./decode":75,"./encode":76}],78:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -12803,7 +13251,7 @@ Duplex.prototype._destroy = function (err, cb) {
 
   pna.nextTick(cb, err);
 };
-},{"./_stream_readable":78,"./_stream_writable":80,"core-util-is":64,"inherits":67,"process-nextick-args":70}],77:[function(require,module,exports){
+},{"./_stream_readable":80,"./_stream_writable":82,"core-util-is":66,"inherits":69,"process-nextick-args":72}],79:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -12851,7 +13299,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":79,"core-util-is":64,"inherits":67}],78:[function(require,module,exports){
+},{"./_stream_transform":81,"core-util-is":66,"inherits":69}],80:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -13873,7 +14321,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./_stream_duplex":76,"./internal/streams/BufferList":81,"./internal/streams/destroy":82,"./internal/streams/stream":83,"_process":71,"core-util-is":64,"events":65,"inherits":67,"isarray":69,"process-nextick-args":70,"safe-buffer":85,"string_decoder/":90,"util":61}],79:[function(require,module,exports){
+},{"./_stream_duplex":78,"./internal/streams/BufferList":83,"./internal/streams/destroy":84,"./internal/streams/stream":85,"_process":73,"core-util-is":66,"events":67,"inherits":69,"isarray":71,"process-nextick-args":72,"safe-buffer":87,"string_decoder/":92,"util":63}],81:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -14088,7 +14536,7 @@ function done(stream, er, data) {
 
   return stream.push(null);
 }
-},{"./_stream_duplex":76,"core-util-is":64,"inherits":67}],80:[function(require,module,exports){
+},{"./_stream_duplex":78,"core-util-is":66,"inherits":69}],82:[function(require,module,exports){
 (function (process,global,setImmediate){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -14778,7 +15226,7 @@ Writable.prototype._destroy = function (err, cb) {
   cb(err);
 };
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("timers").setImmediate)
-},{"./_stream_duplex":76,"./internal/streams/destroy":82,"./internal/streams/stream":83,"_process":71,"core-util-is":64,"inherits":67,"process-nextick-args":70,"safe-buffer":85,"timers":91,"util-deprecate":95}],81:[function(require,module,exports){
+},{"./_stream_duplex":78,"./internal/streams/destroy":84,"./internal/streams/stream":85,"_process":73,"core-util-is":66,"inherits":69,"process-nextick-args":72,"safe-buffer":87,"timers":93,"util-deprecate":97}],83:[function(require,module,exports){
 'use strict';
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
@@ -14858,7 +15306,7 @@ if (util && util.inspect && util.inspect.custom) {
     return this.constructor.name + ' ' + obj;
   };
 }
-},{"safe-buffer":85,"util":61}],82:[function(require,module,exports){
+},{"safe-buffer":87,"util":63}],84:[function(require,module,exports){
 'use strict';
 
 /*<replacement>*/
@@ -14933,10 +15381,10 @@ module.exports = {
   destroy: destroy,
   undestroy: undestroy
 };
-},{"process-nextick-args":70}],83:[function(require,module,exports){
+},{"process-nextick-args":72}],85:[function(require,module,exports){
 module.exports = require('events').EventEmitter;
 
-},{"events":65}],84:[function(require,module,exports){
+},{"events":67}],86:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
 exports.Stream = exports;
 exports.Readable = exports;
@@ -14945,7 +15393,7 @@ exports.Duplex = require('./lib/_stream_duplex.js');
 exports.Transform = require('./lib/_stream_transform.js');
 exports.PassThrough = require('./lib/_stream_passthrough.js');
 
-},{"./lib/_stream_duplex.js":76,"./lib/_stream_passthrough.js":77,"./lib/_stream_readable.js":78,"./lib/_stream_transform.js":79,"./lib/_stream_writable.js":80}],85:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":78,"./lib/_stream_passthrough.js":79,"./lib/_stream_readable.js":80,"./lib/_stream_transform.js":81,"./lib/_stream_writable.js":82}],87:[function(require,module,exports){
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
 var Buffer = buffer.Buffer
@@ -15009,7 +15457,7 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":62}],86:[function(require,module,exports){
+},{"buffer":64}],88:[function(require,module,exports){
 (function (global){
 var ClientRequest = require('./lib/request')
 var response = require('./lib/response')
@@ -15097,7 +15545,7 @@ http.METHODS = [
 	'UNSUBSCRIBE'
 ]
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./lib/request":88,"./lib/response":89,"builtin-status-codes":63,"url":93,"xtend":96}],87:[function(require,module,exports){
+},{"./lib/request":90,"./lib/response":91,"builtin-status-codes":65,"url":95,"xtend":98}],89:[function(require,module,exports){
 (function (global){
 exports.fetch = isFunction(global.fetch) && isFunction(global.ReadableStream)
 
@@ -15174,7 +15622,7 @@ function isFunction (value) {
 xhr = null // Help gc
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],88:[function(require,module,exports){
+},{}],90:[function(require,module,exports){
 (function (process,global,Buffer){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -15505,7 +15953,7 @@ var unsafeHeaders = [
 ]
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":87,"./response":89,"_process":71,"buffer":62,"inherits":67,"readable-stream":84,"to-arraybuffer":92}],89:[function(require,module,exports){
+},{"./capability":89,"./response":91,"_process":73,"buffer":64,"inherits":69,"readable-stream":86,"to-arraybuffer":94}],91:[function(require,module,exports){
 (function (process,global,Buffer){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -15733,7 +16181,7 @@ IncomingMessage.prototype._onXHRProgress = function () {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":87,"_process":71,"buffer":62,"inherits":67,"readable-stream":84}],90:[function(require,module,exports){
+},{"./capability":89,"_process":73,"buffer":64,"inherits":69,"readable-stream":86}],92:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -16030,7 +16478,7 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":85}],91:[function(require,module,exports){
+},{"safe-buffer":87}],93:[function(require,module,exports){
 (function (setImmediate,clearImmediate){
 var nextTick = require('process/browser.js').nextTick;
 var apply = Function.prototype.apply;
@@ -16109,7 +16557,7 @@ exports.clearImmediate = typeof clearImmediate === "function" ? clearImmediate :
   delete immediateIds[id];
 };
 }).call(this,require("timers").setImmediate,require("timers").clearImmediate)
-},{"process/browser.js":71,"timers":91}],92:[function(require,module,exports){
+},{"process/browser.js":73,"timers":93}],94:[function(require,module,exports){
 var Buffer = require('buffer').Buffer
 
 module.exports = function (buf) {
@@ -16138,7 +16586,7 @@ module.exports = function (buf) {
 	}
 }
 
-},{"buffer":62}],93:[function(require,module,exports){
+},{"buffer":64}],95:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -16872,7 +17320,7 @@ Url.prototype.parseHost = function() {
   if (host) this.hostname = host;
 };
 
-},{"./util":94,"punycode":72,"querystring":75}],94:[function(require,module,exports){
+},{"./util":96,"punycode":74,"querystring":77}],96:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -16890,7 +17338,7 @@ module.exports = {
   }
 };
 
-},{}],95:[function(require,module,exports){
+},{}],97:[function(require,module,exports){
 (function (global){
 
 /**
@@ -16961,7 +17409,7 @@ function config (name) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],96:[function(require,module,exports){
+},{}],98:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;

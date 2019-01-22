@@ -712,7 +712,7 @@ function localstorage() {
 }
 
 }).call(this,require('_process'))
-},{"./debug":10,"_process":73}],10:[function(require,module,exports){
+},{"./debug":10,"_process":74}],10:[function(require,module,exports){
 
 /**
  * This is the common logic for both the Node.js and web browser
@@ -3102,7 +3102,7 @@ WS.prototype.check = function () {
 };
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../transport":13,"component-inherit":8,"debug":9,"engine.io-parser":20,"parseqs":28,"ws":63,"yeast":39}],19:[function(require,module,exports){
+},{"../transport":13,"component-inherit":8,"debug":9,"engine.io-parser":20,"parseqs":28,"ws":64,"yeast":39}],19:[function(require,module,exports){
 (function (global){
 // browser shim for xmlhttprequest module
 
@@ -4101,7 +4101,7 @@ function hasBinary (obj) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":64,"isarray":26}],24:[function(require,module,exports){
+},{"buffer":65,"isarray":26}],24:[function(require,module,exports){
 
 /**
  * Module exports.
@@ -6268,7 +6268,7 @@ module.exports = yeast;
 },{}],40:[function(require,module,exports){
 const { AceBaseBase } = require('acebase-core');
 const { WebApi } = require('./api-web');
-const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
+const { AceBaseClientAuth } = require('./auth');
 
 /**
  * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
@@ -6285,118 +6285,37 @@ class AceBaseClient extends AceBaseBase {
      */
     constructor(host, port, dbname, https = true) {
         super(dbname, {});
-        this.api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, ready => {
-            this.emit("ready");
+        let ready = false;
+        this._connected = false;
+        let api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, evt => {
+            if (evt === 'connect') {
+                this._connected = true;
+                if (!ready) { 
+                    ready = true; 
+                    this.emit('ready');
+                }
+                else {
+                    this.emit('connect');
+                }
+            }
+            else if (evt === 'disconnect') {
+                this._connected = false;
+                this.emit('disconnect');
+            }
         });
-        this.user = null;
-    }
-
-    /**
-     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
-     * @param {string} username Your database username
-     * @param {string} password Your password
-     * @returns {Promise<AceBaseSignInResult>} returns a promise that resolves with an object
-     */
-    signIn(username, password) {
-        /** @type {WebApi} */
-        const api = this.api;
-
-        this.user = null;
-        return api.signIn(username, password)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = details.user;
-            return { success: true, user: details.user, accessToken: details.accessToken };
-        })
-        .catch(err => {
-            return { success: false, reason: err.message };
+        this.auth = new AceBaseClientAuth(api, (event, arg) => {
+            this.emit(event, arg);
         });
     }
 
-    /**
-     * Sign into an account using a previously assigned access token
-     * @param {string} accessToken a previously assigned access token
-     * @returns {Promise<AceBaseSignInResult>} returns a promise that resolves with an object
-     */
-    signInWithToken(accessToken) {
-        /** @type {WebApi} */
-        const api = this.api;
-
-        this.user = null;
-        return api.signInWithToken(accessToken)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = details.user;
-            return { success: true, user: details.user, accessToken: details.accessToken };
-        })
-        .catch(err => {
-            return { success: false, reason: err.message };
-        });
+    get connected() {
+        return this._connected;
     }
 
-    /**
-     * Signs out of the current account
-     * @returns {Promise<AceBaseAuthResult>} returns a promise that resolves with an object
-     * 
-     */
-    signOut() {
-        /** @type {WebApi} */
-        const api = this.api;
-        return api.signOut()
-        .then(() => {
-            this.user = null;
-            return { success: true };
-        })
-        .catch(err => {
-            return { success: false, reason: err.message };
-        });
-    }
-
-    /**
-     * Changes the password of the currrently signed into account
-     * @param {string} oldPassword 
-     * @param {string} newPassword 
-     * @returns {Promise<AceBaseAuthResult>} returns a promise that resolves with an object
-     */
-    changePassword(oldPassword, newPassword) {
-        /** @type {WebApi} */
-        const api = this.api;
-        return api.changePassword(this.user.uid, oldPassword, newPassword)
-        .then(() => {
-            return { success: true };
-        })
-        .catch(err => {
-            return { success: false, reason: err.message };
-        });
-    }
-
-    /**
-     * Creates a new user account with the given details. If successful, you will automatically be 
-     * signed into the account. Note: the request will fail if the server has disabled this option
-     * @param {string} username 
-     * @param {string} password 
-     * @param {string} displayName 
-     * @returns {Promise<AceBaseSignInResult>} returns a promise that resolves with an object
-     */
-    signUp(username, password, displayName) {
-        /** @type {WebApi} */
-        const api = this.api;
-
-        this.user = null;
-        return api.signUp(username, password, displayName)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = details.user;
-            return { success: true, user: details.user, accessToken: details.accessToken };
-        })
-        .catch(err => {
-            return { success: false, reason: err.message };
-        });
-    }
 }
 
 module.exports = { AceBaseClient };
-},{"./api-web":41,"./user":44,"acebase-core":55}],41:[function(require,module,exports){
+},{"./api-web":41,"./auth":42,"acebase-core":56}],41:[function(require,module,exports){
 (function (Buffer){
 const { Api, Transport, debug, ID } = require('acebase-core');
 const http = require('http');
@@ -6404,8 +6323,9 @@ const URL = require('url');
 const connectSocket = require('socket.io-client');
 
 class AceBaseRequestError extends Error {
-    constructor(request, response, message) {
+    constructor(request, response, code, message) {
         super(message);
+        this.code = code;
         this.request = request;
         this.response = response;
     }
@@ -6441,8 +6361,13 @@ const _request = (method, url, postData, accessToken) => {
             res.on('data', chunk => { data += chunk; });
             res.on('end', () => {
                 if (res.statusCode === 200) {
-                    let val = JSON.parse(data);
-                    resolve(val);
+                    if (data[0] === '{') {
+                        let val = JSON.parse(data);
+                        resolve(val);
+                    }
+                    else {
+                        resolve(data);
+                    }
                 }
                 else {
                     const request = options;
@@ -6453,10 +6378,14 @@ const _request = (method, url, postData, accessToken) => {
                         headers: res.headers,
                         body: data
                     };
-                    response.body = data;
-                    return reject(new AceBaseRequestError(request, response, `${res.statusCode} ${res.statusMessage}`));
+                    let code = res.statusCode, message = res.statusMessage;
+                    if (data[0] == '{') {
+                        let err = JSON.parse(data);
+                        if (err.code) { code = err.code; }
+                        if (err.message) { message = err.message; }
+                    }
+                    return reject(new AceBaseRequestError(request, response, code, message));
                 }
-                
             });
         });
         if (postData.length > 0) {
@@ -6486,9 +6415,11 @@ const _websocketRequest = (socket, event, data, accessToken) => {
             }
             else {
                 // Access denied?
-                const err = new Error(response.reason);
-                err.request = request;
-                err.response = response;
+                // const err = new Error(response.reason.message);
+                // err.code = response.reason.code;
+                // err.request = request;
+                // err.response = response;
+                const err = new AceBaseRequestError(request, response, response.reason.code, response.reason.message);
                 reject(err);
             }
         }
@@ -6502,13 +6433,15 @@ const _websocketRequest = (socket, event, data, accessToken) => {
  * Api to connect to a remote AceBase instance over http
  */
 class WebApi extends Api {
-    constructor(dbname = "default", settings, readyCallback) {
+    constructor(dbname = "default", settings, eventCallback) {
         // operations are done through http calls,
         // events are triggered through a websocket
         super();
 
         this.url = settings.url;
         this.dbname = dbname;
+        this._connected = false;
+
         debug.log(`Connecting to AceBase server "${this.url}"`);
         if (!this.url.startsWith('https')) {
             console.error(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`)
@@ -6536,10 +6469,9 @@ class WebApi extends Api {
         let reconnectSubs = null;
 
         socket.on("connect", (data) => {
-            if (readyCallback) {
-                readyCallback();
-                readyCallback = null; // once! :-)
-            }
+            this._connected = true;
+            eventCallback && eventCallback('connect');
+
             // Sign in again
             let signInPromise = Promise.resolve();
             if (accessToken) {
@@ -6558,6 +6490,8 @@ class WebApi extends Api {
         });
 
         socket.on("disconnect", (data) => {
+            this._connected = false;
+            eventCallback && eventCallback('disconnect');
             reconnectSubs = subscriptions;
             subscriptions = {};
         });
@@ -6646,23 +6580,51 @@ class WebApi extends Api {
                     txResolve(this);
                 }
             }
-            socket.on("tx_started", startedCallback);
-            socket.on("tx_completed", completedCallback);
-            socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
+            const connectedCallback = () => {
+                socket.on("tx_started", startedCallback);
+                socket.on("tx_completed", completedCallback);
+                // TODO: socket.on('disconnect', disconnectedCallback);
+                socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
+            };
+            if (this._connected) { connectedCallback(); }
+            else { socket.on('connect', connectedCallback); }
             return new Promise((resolve) => {
                 txResolve = resolve;
             });
         };
 
         this._request = (method, url, data) => {
-            return _request(method, url, data, accessToken)
+            if (this._connected) { 
+                return _request(method, url, data, accessToken)
+                .catch(err => {
+                    throw err;
+                }); 
+            }
+            else {
+                let resolve;
+                let promise = new Promise(r => resolve = r);
+                socket.on('connect', () => {
+                    this._request(method, url, data)
+                    .then(resolve);
+                });
+                return promise;
+            }
+        };
+
+        this.signIn = (username, password) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password })
+            .then(result => {
+                accessToken = result.access_token;
+                socket.emit("signin", accessToken);
+                return { user: result.user, accessToken };
+            })
             .catch(err => {
                 throw err;
             });
         };
 
-        this.signIn = (username, password) => {
-            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password }, accessToken)
+        this.signInWithEmail = (email, password) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'email', email, password })
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
@@ -6674,7 +6636,7 @@ class WebApi extends Api {
         };
 
         this.signInWithToken = (token) => {
-            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token })
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token })
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
@@ -6687,9 +6649,10 @@ class WebApi extends Api {
 
         this.signOut = () => {
             if (!accessToken) { return Promise.resolve(); }
-            return _request("POST", `${this.url}/auth/${this.dbname}/signout`, {}, accessToken)
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, {})
             .then(() => {
-                socket.emit("signout");
+                socket.emit("signout", accessToken);
+                accessToken = null;
             })
             .catch(err => {
                 throw err;
@@ -6698,17 +6661,18 @@ class WebApi extends Api {
 
         this.changePassword = (uid, currentPassword, newPassword) => {
             if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
-            return _request("POST", `${this.url}/auth/${this.dbname}/change_password`, { uid, password: currentPassword, new_password: newPassword }, accessToken)
+            return this._request("POST", `${this.url}/auth/${this.dbname}/change_password`, { uid, password: currentPassword, new_password: newPassword })
             .then(result => {
                 accessToken = result.access_token;
+                return { accessToken };
             })
             .catch(err => {
                 throw err;
             });
         };
     
-        this.signUp = (username, password, displayName) => {
-            return _request("POST", `${this.url}/auth/${this.dbname}/signup`, { username, password, display_name: displayName }, accessToken)
+        this.signUp = (details) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signup`, details)
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
@@ -6718,8 +6682,29 @@ class WebApi extends Api {
                 throw err;
             });
         };
-    }
 
+        this.updateUserDetails = (details) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/update`, details)
+            .then(result => {
+                return { user: result.user };
+            })
+            .catch(err => {
+                throw err;
+            });
+        }
+
+        this.deleteAccount = (uid) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/delete`, { uid })
+            .then(result => {
+                socket.emit("signout", accessToken);
+                accessToken = null;
+                return true;
+            })
+            .catch(err => {
+                throw err;
+            });
+        }
+    }
 
     stats(options = undefined) {
         return this._request("GET", `${this.url}/stats/${this.dbname}`);
@@ -6825,13 +6810,263 @@ class WebApi extends Api {
 
 module.exports = { WebApi };
 }).call(this,require("buffer").Buffer)
-},{"acebase-core":55,"buffer":64,"http":88,"socket.io-client":30,"url":95}],42:[function(require,module,exports){
+},{"acebase-core":56,"buffer":65,"http":89,"socket.io-client":30,"url":96}],42:[function(require,module,exports){
+const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
+const { WebApi } = require('./api-web');
+
+class AceBaseClientAuth {
+
+    /**
+     * 
+     * @param {WebApi} api 
+     */
+    constructor(api, eventCallback) {
+        this.api = api;
+        this.eventCallback = eventCallback;
+
+        this.user = null;
+        this.accessToken = null;
+    }
+
+    /**
+     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * @param {string} username Your database username
+     * @param {string} password Your password
+     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
+     */
+    signIn(username, password) {
+        /** @type {WebApi} */
+        const api = this.api;
+
+        this.user = null;
+        return api.signIn(username, password)
+        .then(details => {
+            this.accessToken = details.accessToken;
+            this.user = new AceBaseUser(details.user);
+            this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken }; // success: true, 
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
+     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * @param {string} email Your email address
+     * @param {string} password Your password
+     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
+     */
+    signInWithEmail(email, password) {
+        /** @type {WebApi} */
+        const api = this.api;
+
+        this.user = null;
+        return api.signInWithEmail(email, password)
+        .then(details => {
+            this.accessToken = details.accessToken;
+            this.user = new AceBaseUser(details.user);
+            this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken }; //success: true, 
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
+     * Sign into an account using a previously assigned access token
+     * @param {string} accessToken a previously assigned access token
+     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
+     */
+    signInWithToken(accessToken) {
+        /** @type {WebApi} */
+        const api = this.api;
+
+        this.user = null;
+        return api.signInWithToken(accessToken)
+        .then(details => {
+            this.accessToken = details.accessToken;
+            this.user = new AceBaseUser(details.user);
+            this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken }; // success: true, 
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
+     * Signs out of the current account
+     * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
+     */
+    signOut() {
+        if (!this.user) {
+            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+        }
+        /** @type {WebApi} */
+        const api = this.api;
+        return api.signOut()
+        .then(() => {
+            this.accessToken = null;
+            let user = this.user;
+            this.user = null;
+            this.eventCallback("signout", { source: 'signout', user });
+            // return { success: true };
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
+     * Changes the password of the currrently signed into account
+     * @param {string} oldPassword 
+     * @param {string} newPassword 
+     * @returns {Promise<{ accessToken: string }>} returns a promise that resolves with a new access token
+     */
+    changePassword(oldPassword, newPassword) {
+        if (!this.user) {
+            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+        }
+        /** @type {WebApi} */
+        const api = this.api;
+        return api.changePassword(this.user.uid, oldPassword, newPassword)
+        .then(result => {
+            this.accessToken = result.accessToken;
+            this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
+            return { accessToken: result.accessToken }; //success: true, 
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    _updateUserDetails(details) {
+        if (!this.user) {
+            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+        }
+        if (typeof details !== 'object') {
+            return Promise.reject({ code: 'invalid_details', message: 'details must be an object' });
+        }
+        /** @type {WebApi} */
+        const api = this.api;
+        return api.updateUserDetails(details)
+        .then(result => {
+            Object.keys(result.user).forEach(key => {
+                this.user[key] = result.user[key];
+            });
+            return { user: this.user }; // success: true
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
+     * Changes the username of the currrently signed into account
+     * @param {string} newUsername 
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+    changeUsername(newUsername) {
+        return this._updateUserDetails({ username: newUsername });
+    }
+
+    /**
+     * Changes the email address of the currrently signed in user
+     * @param {string} newEmail 
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+    changeEmail(newEmail) {
+        return this._updateUserDetails({ email: newEmail });
+    }
+
+    /**
+     * Updates settings of the currrently signed in user. Passed settings will be merged with the user's current settings
+     * @param {{ [key:string]: string|bumber|boolean }} settings - the settings to update
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+    updateUserSettings(settings) {
+        return this._updateUserDetails({ settings });
+    }
+
+    /**
+     * Creates a new user account with the given details. If successful, you will automatically be 
+     * signed into the account. Note: the request will fail if the server has disabled this option
+     * @param {object} details
+     * @param {string} [details.username] 
+     * @param {string} [details.email] 
+     * @param {string} details.password
+     * @param {string} details.displayName
+     * @param {{ [key:string]: string|bumber|boolean }} [details.settings] optional settings 
+     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
+     */
+    signUp(details) {
+        if (!details.username && !details.email) {
+            return Promise.reject({ code: 'invalid_details', message: 'No username or email set' });
+        }
+        if (!details.password) {
+            return Promise.reject({ code: 'invalid_details', message: 'No password given' });
+        }
+        /** @type {WebApi} */
+        const api = this.api;
+
+        if (this.user && this.user.uid !== 'admin') {
+            let user = this.user;
+            this.user = null;
+            this.eventCallback("signout", { source: 'signup', user } );
+        }
+        return api.signUp(details)
+        .then(details => {
+            if (this.user && this.user.uid === 'admin') {
+                return { user: details.user };
+            }
+            else {
+                this.accessToken = details.accessToken;
+                this.user = new AceBaseUser(details.user);
+                this.eventCallback("signin", { source: "signup", user: this.user, accessToken: this.accessToken });
+                return { user: this.user, accessToken: this.accessToken }; //success: true, 
+            }
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
+     * Removes the currently sign into user account and signs out. Note: this will only
+     * remove the database user account, not any data stored in the database by this user. It is
+     * your own responsibility to remove that data.
+     * @returns {Promise<void>}
+     */
+    deleteAccount() {
+        if (!this.user) {
+            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+        }
+        /** @type {WebApi} */
+        const api = this.api;
+        return api.deleteAccount(this.user.uid)
+        .then(result => {
+            this.accessToken = null;
+            let user = this.user;
+            this.user = null;
+            this.eventCallback("signout", { source: 'delete_account', user });
+            // return { success: true };
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+}
+
+module.exports = { AceBaseClientAuth };
+},{"./api-web":41,"./user":45}],43:[function(require,module,exports){
 // To use AceBaseClient in the browser
 // from root dir of package, execute: browserify src/browser.js -o dist/browser.js
 window.AceBase = require('./index');
 window.AceBaseClient = window.AceBase.AceBaseClient;
 
-},{"./index":43}],43:[function(require,module,exports){
+},{"./index":44}],44:[function(require,module,exports){
 const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, TypeMappingOptions } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
 
@@ -6844,16 +7079,29 @@ module.exports = {
     TypeMappings, 
     TypeMappingOptions
 };
-},{"./acebase-client":40,"acebase-core":55}],44:[function(require,module,exports){
+},{"./acebase-client":40,"acebase-core":56}],45:[function(require,module,exports){
 
 class AceBaseUser {
     /**
      * 
-     * @param {{ uid: string, username: string }} user
+     * @param {{ uid: string, username?: string, email?: string, displayName: string, created: Date, last_signin: Date, last_signin_ip: string settings: { [key:string]: string|number|boolean } }} user
      */
     constructor(user) {
-        this.uid = user.uid;
-        this.username = user.username;
+        // /** @type {string} unique id */
+        // this.uid = user.uid;
+        // /** @type {string?} username */
+        // this.username = user.username;
+        // /** @type {string?} email address */
+        // this.email = user.email;
+        // /** @type {string?} display or screen name */
+        // this.displayName = user.displayName;
+        // this.settings = user.settings;
+        // this.created = user.created;
+        // this.last_signin = user.last_signin;
+        // this.last_signin_ip = user.last_signin_ip;
+        // this.prev_signin = user.prev_signin;
+        // this.prev_signin_ip = user.prev_signin_ip;
+        Object.assign(this, user);
     }
 }
 
@@ -6864,12 +7112,12 @@ class AceBaseSignInResult {
      * @param {boolean} result.success
      * @param {AceBaseUser} [result.user]
      * @param {string} [result.accessToken]
-     * @param {string} [result.reason]
+     * @param {{ code: string, message: string }} [result.reason]
      */
     constructor(result) {
         this.success = result.success;
         if (result.success) {
-            this.user = result.success;
+            this.user = result.user;
             this.accessToken = result.accessToken;
         }
         else {
@@ -6883,7 +7131,7 @@ class AceBaseAuthResult {
      * 
      * @param {object} result 
      * @param {boolean} result.success
-     * @param {string} [result.reason]
+     * @param {{ code: string, message: string }} [result.reason]
      */
     constructor(result) {
         this.success = result.success;
@@ -6894,7 +7142,7 @@ class AceBaseAuthResult {
 }
 
 module.exports = { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult };
-},{}],45:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 (function (Buffer){
 /**
  * Copyright 2015 Huan Du. All rights reserved.
@@ -7284,7 +7532,7 @@ defaultCodec.PostScript = new Ascii85({
 defaultCodec.Ascii85 = Ascii85;
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":64}],46:[function(require,module,exports){
+},{"buffer":65}],47:[function(require,module,exports){
 /**
  * cuid.js
  * Collision-resistant UID generator for browsers and node.
@@ -7369,7 +7617,7 @@ cuid.fingerprint = fingerprint;
 
 module.exports = cuid;
 
-},{"./lib/fingerprint.js":47,"./lib/pad.js":48}],47:[function(require,module,exports){
+},{"./lib/fingerprint.js":48,"./lib/pad.js":49}],48:[function(require,module,exports){
 var pad = require('./pad.js');
 
 var env = typeof window === 'object' ? window : self;
@@ -7383,13 +7631,13 @@ module.exports = function fingerprint () {
   return clientId;
 };
 
-},{"./pad.js":48}],48:[function(require,module,exports){
+},{"./pad.js":49}],49:[function(require,module,exports){
 module.exports = function pad (num, size) {
   var s = '000000000' + num;
   return s.substr(s.length - size);
 };
 
-},{}],49:[function(require,module,exports){
+},{}],50:[function(require,module,exports){
 /**
    ________________________________________________________________________________
    
@@ -7526,7 +7774,7 @@ class AceBaseBase extends EventEmitter {
 }
 
 module.exports = { AceBaseBase, AceBaseSettings };
-},{"./data-reference":51,"./debug":53,"./type-mappings":60,"events":67}],50:[function(require,module,exports){
+},{"./data-reference":52,"./debug":54,"./type-mappings":61,"events":68}],51:[function(require,module,exports){
 
 class Api {
     // interface for local and web api's
@@ -7553,7 +7801,7 @@ class Api {
 }
 
 module.exports = { Api };
-},{}],51:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 const { DataSnapshot } = require('./data-snapshot');
 const { EventStream, EventPublisher } = require('./subscription');
 const { ID } = require('./id');
@@ -7749,7 +7997,7 @@ class DataReference {
 
     /**
      * Sets the value a node using a transaction: it runs you callback function with the current value, uses its return value as the new value to store.
-     * @param {function} callback - callback function(currentValue) => newValue: is called with a snapshot of the current value, must return a new value to store in the database
+     * @param {(currentValue: DataSnapshot) => void} callback - callback function(currentValue) => newValue: is called with a snapshot of the current value, must return a new value to store in the database
      * @returns {Promise<DataReference>} returns a promise that resolves with the DataReference once the transaction has been processed
      */
     transaction(callback) {
@@ -7759,7 +8007,14 @@ class DataReference {
         let cb = (currentValue) => {
             currentValue = this.db.types.deserialize(this.path, currentValue);
             const snap = new DataSnapshot(this, currentValue);
-            const newValue = callback(snap);
+            let newValue;
+            try {
+                newValue = callback(snap);
+            }
+            catch(err) {
+                // Make sure an exception thrown in client code cancels the transaction
+                return;
+            }
             if (newValue instanceof Promise) {
                 return newValue.then((val) => {
                     return this.db.types.serialize(this.path, val);
@@ -8261,7 +8516,7 @@ module.exports = {
     DataRetrievalOptions,
     QueryDataRetrievalOptions
 };
-},{"./data-snapshot":52,"./debug":53,"./id":54,"./path-info":56,"./subscription":58}],52:[function(require,module,exports){
+},{"./data-snapshot":53,"./debug":54,"./id":55,"./path-info":57,"./subscription":59}],53:[function(require,module,exports){
 const { DataReference } = require('./data-reference');
 const { getPathKeys } = require('./utils');
 
@@ -8353,10 +8608,33 @@ class DataSnapshot {
      * @type {string|number}
      */
     get key() { return this.ref.key; }
+
+    // /**
+    //  * Convenience method to update this snapshot's value AND commit the changes to the database
+    //  * @param {object} updates 
+    //  */
+    // update(updates) {
+    //     return this.ref.update(updates)
+    //     .then(ref => {
+    //         const isRemoved = updates === null;
+    //         let value = this.val();
+    //         if (!isRemoved && typeof updates === 'object' && typeof value === 'object') {
+    //             Object.assign(value, updates);
+    //         }
+    //         else {
+    //             value = updates;
+    //         }
+    //         this.val = () => { return value; };
+    //         this.exists = () => {
+    //             return value !== null && typeof value !== "undefined"; 
+    //         }
+    //         return this;
+    //     });
+    // }
 }
 
 module.exports = { DataSnapshot };
-},{"./data-reference":51,"./utils":61}],53:[function(require,module,exports){
+},{"./data-reference":52,"./utils":62}],54:[function(require,module,exports){
 const debug = {
     setLevel(level) {
         this.log = ["log"].indexOf(level) >= 0 ? console.log.bind(console) : ()=>{};
@@ -8367,7 +8645,7 @@ const debug = {
 debug.setLevel("log"); // default
 
 module.exports = debug;
-},{}],54:[function(require,module,exports){
+},{}],55:[function(require,module,exports){
 const cuid = require('cuid');
 // const uuid62 = require('uuid62');
 
@@ -8380,7 +8658,7 @@ class ID {
 }
 
 module.exports = { ID };
-},{"cuid":46}],55:[function(require,module,exports){
+},{"cuid":47}],56:[function(require,module,exports){
 const { AceBaseBase, AceBaseSettings } = require('./acebase-base');
 const { Api } = require('./api');
 const { DataReference, DataReferenceQuery, DataRetrievalOptions, QueryDataRetrievalOptions } = require('./data-reference');
@@ -8408,7 +8686,7 @@ module.exports = {
     Utils,
     PathInfo
 };
-},{"./acebase-base":49,"./api":50,"./data-reference":51,"./data-snapshot":52,"./debug":53,"./id":54,"./path-info":56,"./path-reference":57,"./subscription":58,"./transport":59,"./type-mappings":60,"./utils":61}],56:[function(require,module,exports){
+},{"./acebase-base":50,"./api":51,"./data-reference":52,"./data-snapshot":53,"./debug":54,"./id":55,"./path-info":57,"./path-reference":58,"./subscription":59,"./transport":60,"./type-mappings":61,"./utils":62}],57:[function(require,module,exports){
 
 /**
  * 
@@ -8666,7 +8944,7 @@ class PathInfo {
 }
 
 module.exports = { getPathInfo, getChildPath, getPathKeys, PathInfo };
-},{}],57:[function(require,module,exports){
+},{}],58:[function(require,module,exports){
 class PathReference {
     /**
      * Creates a reference to a path that can be stored in the database. Use this to create cross-references to other data in your database
@@ -8677,7 +8955,7 @@ class PathReference {
     }
 }
 module.exports = { PathReference };
-},{}],58:[function(require,module,exports){
+},{}],59:[function(require,module,exports){
 class EventSubscription {
     /**
      * 
@@ -8858,7 +9136,7 @@ class EventStream {
 }
 
 module.exports = { EventStream, EventPublisher, EventSubscription };
-},{}],59:[function(require,module,exports){
+},{}],60:[function(require,module,exports){
 (function (Buffer){
 const { PathReference } = require('./path-reference');
 //const { DataReference } = require('./data-reference');
@@ -8959,7 +9237,7 @@ module.exports = {
     }        
 };
 }).call(this,require("buffer").Buffer)
-},{"./path-reference":57,"./utils":61,"ascii85":45,"buffer":64}],60:[function(require,module,exports){
+},{"./path-reference":58,"./utils":62,"ascii85":46,"buffer":65}],61:[function(require,module,exports){
 const { cloneObject } = require('./utils');
 const { PathInfo } = require('./path-info');
 
@@ -9255,7 +9533,7 @@ module.exports = {
     TypeMappingOptions
 }
 
-},{"./path-info":56,"./utils":61}],61:[function(require,module,exports){
+},{"./path-info":57,"./utils":62}],62:[function(require,module,exports){
 const { PathReference } = require('./path-reference');
 
 function numberToBytes(number) {
@@ -9397,7 +9675,7 @@ module.exports = {
     getChildValues
 };
 
-},{"./data-snapshot":52,"./path-reference":57}],62:[function(require,module,exports){
+},{"./data-snapshot":53,"./path-reference":58}],63:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -9550,9 +9828,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],63:[function(require,module,exports){
-
 },{}],64:[function(require,module,exports){
+
+},{}],65:[function(require,module,exports){
 /*!
  * The buffer module from node.js, for the browser.
  *
@@ -11331,7 +11609,7 @@ function numberIsNaN (obj) {
   return obj !== obj // eslint-disable-line no-self-compare
 }
 
-},{"base64-js":62,"ieee754":68}],65:[function(require,module,exports){
+},{"base64-js":63,"ieee754":69}],66:[function(require,module,exports){
 module.exports = {
   "100": "Continue",
   "101": "Switching Protocols",
@@ -11397,7 +11675,7 @@ module.exports = {
   "511": "Network Authentication Required"
 }
 
-},{}],66:[function(require,module,exports){
+},{}],67:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -11508,7 +11786,7 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../is-buffer/index.js")})
-},{"../../is-buffer/index.js":70}],67:[function(require,module,exports){
+},{"../../is-buffer/index.js":71}],68:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -12033,7 +12311,7 @@ function functionBindPolyfill(context) {
   };
 }
 
-},{}],68:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = (nBytes * 8) - mLen - 1
@@ -12119,7 +12397,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],69:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -12144,7 +12422,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],70:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 /*!
  * Determine if an object is a Buffer
  *
@@ -12167,9 +12445,9 @@ function isSlowBuffer (obj) {
   return typeof obj.readFloatLE === 'function' && typeof obj.slice === 'function' && isBuffer(obj.slice(0, 0))
 }
 
-},{}],71:[function(require,module,exports){
+},{}],72:[function(require,module,exports){
 arguments[4][26][0].apply(exports,arguments)
-},{"dup":26}],72:[function(require,module,exports){
+},{"dup":26}],73:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -12217,7 +12495,7 @@ function nextTick(fn, arg1, arg2, arg3) {
 
 
 }).call(this,require('_process'))
-},{"_process":73}],73:[function(require,module,exports){
+},{"_process":74}],74:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -12403,7 +12681,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],74:[function(require,module,exports){
+},{}],75:[function(require,module,exports){
 (function (global){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -12940,7 +13218,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],75:[function(require,module,exports){
+},{}],76:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -13026,7 +13304,7 @@ var isArray = Array.isArray || function (xs) {
   return Object.prototype.toString.call(xs) === '[object Array]';
 };
 
-},{}],76:[function(require,module,exports){
+},{}],77:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -13113,13 +13391,13 @@ var objectKeys = Object.keys || function (obj) {
   return res;
 };
 
-},{}],77:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
 'use strict';
 
 exports.decode = exports.parse = require('./decode');
 exports.encode = exports.stringify = require('./encode');
 
-},{"./decode":75,"./encode":76}],78:[function(require,module,exports){
+},{"./decode":76,"./encode":77}],79:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -13251,7 +13529,7 @@ Duplex.prototype._destroy = function (err, cb) {
 
   pna.nextTick(cb, err);
 };
-},{"./_stream_readable":80,"./_stream_writable":82,"core-util-is":66,"inherits":69,"process-nextick-args":72}],79:[function(require,module,exports){
+},{"./_stream_readable":81,"./_stream_writable":83,"core-util-is":67,"inherits":70,"process-nextick-args":73}],80:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -13299,7 +13577,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":81,"core-util-is":66,"inherits":69}],80:[function(require,module,exports){
+},{"./_stream_transform":82,"core-util-is":67,"inherits":70}],81:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -14321,7 +14599,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./_stream_duplex":78,"./internal/streams/BufferList":83,"./internal/streams/destroy":84,"./internal/streams/stream":85,"_process":73,"core-util-is":66,"events":67,"inherits":69,"isarray":71,"process-nextick-args":72,"safe-buffer":87,"string_decoder/":92,"util":63}],81:[function(require,module,exports){
+},{"./_stream_duplex":79,"./internal/streams/BufferList":84,"./internal/streams/destroy":85,"./internal/streams/stream":86,"_process":74,"core-util-is":67,"events":68,"inherits":70,"isarray":72,"process-nextick-args":73,"safe-buffer":88,"string_decoder/":93,"util":64}],82:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -14536,7 +14814,7 @@ function done(stream, er, data) {
 
   return stream.push(null);
 }
-},{"./_stream_duplex":78,"core-util-is":66,"inherits":69}],82:[function(require,module,exports){
+},{"./_stream_duplex":79,"core-util-is":67,"inherits":70}],83:[function(require,module,exports){
 (function (process,global,setImmediate){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -15226,7 +15504,7 @@ Writable.prototype._destroy = function (err, cb) {
   cb(err);
 };
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("timers").setImmediate)
-},{"./_stream_duplex":78,"./internal/streams/destroy":84,"./internal/streams/stream":85,"_process":73,"core-util-is":66,"inherits":69,"process-nextick-args":72,"safe-buffer":87,"timers":93,"util-deprecate":97}],83:[function(require,module,exports){
+},{"./_stream_duplex":79,"./internal/streams/destroy":85,"./internal/streams/stream":86,"_process":74,"core-util-is":67,"inherits":70,"process-nextick-args":73,"safe-buffer":88,"timers":94,"util-deprecate":98}],84:[function(require,module,exports){
 'use strict';
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
@@ -15306,7 +15584,7 @@ if (util && util.inspect && util.inspect.custom) {
     return this.constructor.name + ' ' + obj;
   };
 }
-},{"safe-buffer":87,"util":63}],84:[function(require,module,exports){
+},{"safe-buffer":88,"util":64}],85:[function(require,module,exports){
 'use strict';
 
 /*<replacement>*/
@@ -15381,10 +15659,10 @@ module.exports = {
   destroy: destroy,
   undestroy: undestroy
 };
-},{"process-nextick-args":72}],85:[function(require,module,exports){
+},{"process-nextick-args":73}],86:[function(require,module,exports){
 module.exports = require('events').EventEmitter;
 
-},{"events":67}],86:[function(require,module,exports){
+},{"events":68}],87:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
 exports.Stream = exports;
 exports.Readable = exports;
@@ -15393,7 +15671,7 @@ exports.Duplex = require('./lib/_stream_duplex.js');
 exports.Transform = require('./lib/_stream_transform.js');
 exports.PassThrough = require('./lib/_stream_passthrough.js');
 
-},{"./lib/_stream_duplex.js":78,"./lib/_stream_passthrough.js":79,"./lib/_stream_readable.js":80,"./lib/_stream_transform.js":81,"./lib/_stream_writable.js":82}],87:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":79,"./lib/_stream_passthrough.js":80,"./lib/_stream_readable.js":81,"./lib/_stream_transform.js":82,"./lib/_stream_writable.js":83}],88:[function(require,module,exports){
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
 var Buffer = buffer.Buffer
@@ -15457,7 +15735,7 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":64}],88:[function(require,module,exports){
+},{"buffer":65}],89:[function(require,module,exports){
 (function (global){
 var ClientRequest = require('./lib/request')
 var response = require('./lib/response')
@@ -15545,7 +15823,7 @@ http.METHODS = [
 	'UNSUBSCRIBE'
 ]
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./lib/request":90,"./lib/response":91,"builtin-status-codes":65,"url":95,"xtend":98}],89:[function(require,module,exports){
+},{"./lib/request":91,"./lib/response":92,"builtin-status-codes":66,"url":96,"xtend":99}],90:[function(require,module,exports){
 (function (global){
 exports.fetch = isFunction(global.fetch) && isFunction(global.ReadableStream)
 
@@ -15622,7 +15900,7 @@ function isFunction (value) {
 xhr = null // Help gc
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],90:[function(require,module,exports){
+},{}],91:[function(require,module,exports){
 (function (process,global,Buffer){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -15953,7 +16231,7 @@ var unsafeHeaders = [
 ]
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":89,"./response":91,"_process":73,"buffer":64,"inherits":69,"readable-stream":86,"to-arraybuffer":94}],91:[function(require,module,exports){
+},{"./capability":90,"./response":92,"_process":74,"buffer":65,"inherits":70,"readable-stream":87,"to-arraybuffer":95}],92:[function(require,module,exports){
 (function (process,global,Buffer){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -16181,7 +16459,7 @@ IncomingMessage.prototype._onXHRProgress = function () {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":89,"_process":73,"buffer":64,"inherits":69,"readable-stream":86}],92:[function(require,module,exports){
+},{"./capability":90,"_process":74,"buffer":65,"inherits":70,"readable-stream":87}],93:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -16478,7 +16756,7 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":87}],93:[function(require,module,exports){
+},{"safe-buffer":88}],94:[function(require,module,exports){
 (function (setImmediate,clearImmediate){
 var nextTick = require('process/browser.js').nextTick;
 var apply = Function.prototype.apply;
@@ -16557,7 +16835,7 @@ exports.clearImmediate = typeof clearImmediate === "function" ? clearImmediate :
   delete immediateIds[id];
 };
 }).call(this,require("timers").setImmediate,require("timers").clearImmediate)
-},{"process/browser.js":73,"timers":93}],94:[function(require,module,exports){
+},{"process/browser.js":74,"timers":94}],95:[function(require,module,exports){
 var Buffer = require('buffer').Buffer
 
 module.exports = function (buf) {
@@ -16586,7 +16864,7 @@ module.exports = function (buf) {
 	}
 }
 
-},{"buffer":64}],95:[function(require,module,exports){
+},{"buffer":65}],96:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -17320,7 +17598,7 @@ Url.prototype.parseHost = function() {
   if (host) this.hostname = host;
 };
 
-},{"./util":96,"punycode":74,"querystring":77}],96:[function(require,module,exports){
+},{"./util":97,"punycode":75,"querystring":78}],97:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -17338,7 +17616,7 @@ module.exports = {
   }
 };
 
-},{}],97:[function(require,module,exports){
+},{}],98:[function(require,module,exports){
 (function (global){
 
 /**
@@ -17409,7 +17687,7 @@ function config (name) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],98:[function(require,module,exports){
+},{}],99:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -17430,4 +17708,4 @@ function extend() {
     return target
 }
 
-},{}]},{},[42]);
+},{}]},{},[43]);

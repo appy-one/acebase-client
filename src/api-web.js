@@ -4,8 +4,9 @@ const URL = require('url');
 const connectSocket = require('socket.io-client');
 
 class AceBaseRequestError extends Error {
-    constructor(request, response, message) {
+    constructor(request, response, code, message) {
         super(message);
+        this.code = code;
         this.request = request;
         this.response = response;
     }
@@ -41,8 +42,13 @@ const _request = (method, url, postData, accessToken) => {
             res.on('data', chunk => { data += chunk; });
             res.on('end', () => {
                 if (res.statusCode === 200) {
-                    let val = JSON.parse(data);
-                    resolve(val);
+                    if (data[0] === '{') {
+                        let val = JSON.parse(data);
+                        resolve(val);
+                    }
+                    else {
+                        resolve(data);
+                    }
                 }
                 else {
                     const request = options;
@@ -53,10 +59,14 @@ const _request = (method, url, postData, accessToken) => {
                         headers: res.headers,
                         body: data
                     };
-                    response.body = data;
-                    return reject(new AceBaseRequestError(request, response, `${res.statusCode} ${res.statusMessage}`));
+                    let code = res.statusCode, message = res.statusMessage;
+                    if (data[0] == '{') {
+                        let err = JSON.parse(data);
+                        if (err.code) { code = err.code; }
+                        if (err.message) { message = err.message; }
+                    }
+                    return reject(new AceBaseRequestError(request, response, code, message));
                 }
-                
             });
         });
         if (postData.length > 0) {
@@ -86,9 +96,11 @@ const _websocketRequest = (socket, event, data, accessToken) => {
             }
             else {
                 // Access denied?
-                const err = new Error(response.reason);
-                err.request = request;
-                err.response = response;
+                // const err = new Error(response.reason.message);
+                // err.code = response.reason.code;
+                // err.request = request;
+                // err.response = response;
+                const err = new AceBaseRequestError(request, response, response.reason.code, response.reason.message);
                 reject(err);
             }
         }
@@ -102,13 +114,15 @@ const _websocketRequest = (socket, event, data, accessToken) => {
  * Api to connect to a remote AceBase instance over http
  */
 class WebApi extends Api {
-    constructor(dbname = "default", settings, readyCallback) {
+    constructor(dbname = "default", settings, eventCallback) {
         // operations are done through http calls,
         // events are triggered through a websocket
         super();
 
         this.url = settings.url;
         this.dbname = dbname;
+        this._connected = false;
+
         debug.log(`Connecting to AceBase server "${this.url}"`);
         if (!this.url.startsWith('https')) {
             console.error(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`)
@@ -136,10 +150,9 @@ class WebApi extends Api {
         let reconnectSubs = null;
 
         socket.on("connect", (data) => {
-            if (readyCallback) {
-                readyCallback();
-                readyCallback = null; // once! :-)
-            }
+            this._connected = true;
+            eventCallback && eventCallback('connect');
+
             // Sign in again
             let signInPromise = Promise.resolve();
             if (accessToken) {
@@ -158,6 +171,8 @@ class WebApi extends Api {
         });
 
         socket.on("disconnect", (data) => {
+            this._connected = false;
+            eventCallback && eventCallback('disconnect');
             reconnectSubs = subscriptions;
             subscriptions = {};
         });
@@ -246,23 +261,51 @@ class WebApi extends Api {
                     txResolve(this);
                 }
             }
-            socket.on("tx_started", startedCallback);
-            socket.on("tx_completed", completedCallback);
-            socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
+            const connectedCallback = () => {
+                socket.on("tx_started", startedCallback);
+                socket.on("tx_completed", completedCallback);
+                // TODO: socket.on('disconnect', disconnectedCallback);
+                socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
+            };
+            if (this._connected) { connectedCallback(); }
+            else { socket.on('connect', connectedCallback); }
             return new Promise((resolve) => {
                 txResolve = resolve;
             });
         };
 
         this._request = (method, url, data) => {
-            return _request(method, url, data, accessToken)
+            if (this._connected) { 
+                return _request(method, url, data, accessToken)
+                .catch(err => {
+                    throw err;
+                }); 
+            }
+            else {
+                let resolve;
+                let promise = new Promise(r => resolve = r);
+                socket.on('connect', () => {
+                    this._request(method, url, data)
+                    .then(resolve);
+                });
+                return promise;
+            }
+        };
+
+        this.signIn = (username, password) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password })
+            .then(result => {
+                accessToken = result.access_token;
+                socket.emit("signin", accessToken);
+                return { user: result.user, accessToken };
+            })
             .catch(err => {
                 throw err;
             });
         };
 
-        this.signIn = (username, password) => {
-            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password }, accessToken)
+        this.signInWithEmail = (email, password) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'email', email, password })
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
@@ -274,7 +317,7 @@ class WebApi extends Api {
         };
 
         this.signInWithToken = (token) => {
-            return _request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token })
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token })
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
@@ -287,9 +330,10 @@ class WebApi extends Api {
 
         this.signOut = () => {
             if (!accessToken) { return Promise.resolve(); }
-            return _request("POST", `${this.url}/auth/${this.dbname}/signout`, {}, accessToken)
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, {})
             .then(() => {
-                socket.emit("signout");
+                socket.emit("signout", accessToken);
+                accessToken = null;
             })
             .catch(err => {
                 throw err;
@@ -298,17 +342,18 @@ class WebApi extends Api {
 
         this.changePassword = (uid, currentPassword, newPassword) => {
             if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
-            return _request("POST", `${this.url}/auth/${this.dbname}/change_password`, { uid, password: currentPassword, new_password: newPassword }, accessToken)
+            return this._request("POST", `${this.url}/auth/${this.dbname}/change_password`, { uid, password: currentPassword, new_password: newPassword })
             .then(result => {
                 accessToken = result.access_token;
+                return { accessToken };
             })
             .catch(err => {
                 throw err;
             });
         };
     
-        this.signUp = (username, password, displayName) => {
-            return _request("POST", `${this.url}/auth/${this.dbname}/signup`, { username, password, display_name: displayName }, accessToken)
+        this.signUp = (details) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signup`, details)
             .then(result => {
                 accessToken = result.access_token;
                 socket.emit("signin", accessToken);
@@ -318,8 +363,29 @@ class WebApi extends Api {
                 throw err;
             });
         };
-    }
 
+        this.updateUserDetails = (details) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/update`, details)
+            .then(result => {
+                return { user: result.user };
+            })
+            .catch(err => {
+                throw err;
+            });
+        }
+
+        this.deleteAccount = (uid) => {
+            return this._request("POST", `${this.url}/auth/${this.dbname}/delete`, { uid })
+            .then(result => {
+                socket.emit("signout", accessToken);
+                accessToken = null;
+                return true;
+            })
+            .catch(err => {
+                throw err;
+            });
+        }
+    }
 
     stats(options = undefined) {
         return this._request("GET", `${this.url}/stats/${this.dbname}`);

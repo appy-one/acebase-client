@@ -19,7 +19,7 @@ class AceBaseClient extends AceBaseBase {
         super(dbname, {});
         let ready = false;
         this._connected = false;
-        let api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, evt => {
+        this.api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, evt => {
             if (evt === 'connect') {
                 this._connected = true;
                 if (!ready) { 
@@ -35,7 +35,7 @@ class AceBaseClient extends AceBaseBase {
                 this.emit('disconnect');
             }
         });
-        this.auth = new AceBaseClientAuth(api, (event, arg) => {
+        this.auth = new AceBaseClientAuth(this, (event, arg) => {
             this.emit(event, arg);
         });
     }

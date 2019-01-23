@@ -1,14 +1,14 @@
 const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
-const { WebApi } = require('./api-web');
+const { AceBaseClient } = require('./acebase-client');
 
 class AceBaseClientAuth {
 
     /**
      * 
-     * @param {WebApi} api 
+     * @param {AceBaseClient} client 
      */
-    constructor(api, eventCallback) {
-        this.api = api;
+    constructor(client, eventCallback) {
+        this.client = client;
         this.eventCallback = eventCallback;
 
         this.user = null;
@@ -23,7 +23,7 @@ class AceBaseClientAuth {
      */
     signIn(username, password) {
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         this.user = null;
         return api.signIn(username, password)
@@ -46,7 +46,7 @@ class AceBaseClientAuth {
      */
     signInWithEmail(email, password) {
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         this.user = null;
         return api.signInWithEmail(email, password)
@@ -68,7 +68,7 @@ class AceBaseClientAuth {
      */
     signInWithToken(accessToken) {
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         this.user = null;
         return api.signInWithToken(accessToken)
@@ -92,7 +92,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.signOut()
         .then(() => {
             this.accessToken = null;
@@ -117,7 +117,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.changePassword(this.user.uid, oldPassword, newPassword)
         .then(result => {
             this.accessToken = result.accessToken;
@@ -137,7 +137,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'invalid_details', message: 'details must be an object' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.updateUserDetails(details)
         .then(result => {
             Object.keys(result.user).forEach(key => {
@@ -170,7 +170,7 @@ class AceBaseClientAuth {
 
     /**
      * Updates settings of the currrently signed in user. Passed settings will be merged with the user's current settings
-     * @param {{ [key:string]: string|bumber|boolean }} settings - the settings to update
+     * @param {{ [key:string]: string|number|boolean }} settings - the settings to update
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     updateUserSettings(settings) {
@@ -185,7 +185,7 @@ class AceBaseClientAuth {
      * @param {string} [details.email] 
      * @param {string} details.password
      * @param {string} details.displayName
-     * @param {{ [key:string]: string|bumber|boolean }} [details.settings] optional settings 
+     * @param {{ [key:string]: string|number|boolean }} [details.settings] optional settings 
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signUp(details) {
@@ -196,7 +196,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'invalid_details', message: 'No password given' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         if (this.user && this.user.uid !== 'admin') {
             let user = this.user;
@@ -231,7 +231,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.deleteAccount(this.user.uid)
         .then(result => {
             this.accessToken = null;

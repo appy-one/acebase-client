@@ -5,8 +5,8 @@ import * as acebasecore from 'acebase-core';
  */
 export class AceBaseClient extends acebasecore.AceBaseBase {
     constructor(host: string, port: number, dbname: string, https?: boolean);
-    auth: AceBaseClientAuth
-    get connected(): boolean
+    readonly auth: AceBaseClientAuth
+    readonly connected: boolean
 }
 
 export class AceBaseClientAuth {
@@ -82,7 +82,7 @@ export class AceBaseClientAuth {
      * @param {{ [key:string]: string|bumber|boolean }} settings - the settings to update
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
-    updateUserSettings(settings: { [key:string]: string|bumber|boolean }): Promise<{ user: AceBaseUser }>
+    updateUserSettings(settings: { [key:string]: string|number|boolean }): Promise<{ user: AceBaseUser }>
 
     /**
      * Removes the currently sign into user account and signs out. Note: this will only

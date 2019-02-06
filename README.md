@@ -15,7 +15,7 @@ const { AceBaseClient } = require('acebase-client');
 OR, if you want to use the client in the browser, use the following code:
 
 ```html
-<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/acebase-client@0.6.1/dist/browser.js"></script>
+<script type="text/javascript" src="https://cdn.jsdelivr.net/npm/acebase-client@0.7.0/dist/browser.js"></script>
 ```
 
 ## Connect to an AceBase server

@@ -6287,7 +6287,7 @@ class AceBaseClient extends AceBaseBase {
         super(dbname, {});
         let ready = false;
         this._connected = false;
-        let api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, evt => {
+        this.api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, evt => {
             if (evt === 'connect') {
                 this._connected = true;
                 if (!ready) { 
@@ -6303,7 +6303,7 @@ class AceBaseClient extends AceBaseBase {
                 this.emit('disconnect');
             }
         });
-        this.auth = new AceBaseClientAuth(api, (event, arg) => {
+        this.auth = new AceBaseClientAuth(this, (event, arg) => {
             this.emit(event, arg);
         });
     }
@@ -6812,16 +6812,16 @@ module.exports = { WebApi };
 }).call(this,require("buffer").Buffer)
 },{"acebase-core":56,"buffer":65,"http":89,"socket.io-client":30,"url":96}],42:[function(require,module,exports){
 const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
-const { WebApi } = require('./api-web');
+const { AceBaseClient } = require('./acebase-client');
 
 class AceBaseClientAuth {
 
     /**
      * 
-     * @param {WebApi} api 
+     * @param {AceBaseClient} client 
      */
-    constructor(api, eventCallback) {
-        this.api = api;
+    constructor(client, eventCallback) {
+        this.client = client;
         this.eventCallback = eventCallback;
 
         this.user = null;
@@ -6836,7 +6836,7 @@ class AceBaseClientAuth {
      */
     signIn(username, password) {
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         this.user = null;
         return api.signIn(username, password)
@@ -6859,7 +6859,7 @@ class AceBaseClientAuth {
      */
     signInWithEmail(email, password) {
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         this.user = null;
         return api.signInWithEmail(email, password)
@@ -6881,7 +6881,7 @@ class AceBaseClientAuth {
      */
     signInWithToken(accessToken) {
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         this.user = null;
         return api.signInWithToken(accessToken)
@@ -6905,7 +6905,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.signOut()
         .then(() => {
             this.accessToken = null;
@@ -6930,7 +6930,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.changePassword(this.user.uid, oldPassword, newPassword)
         .then(result => {
             this.accessToken = result.accessToken;
@@ -6950,7 +6950,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'invalid_details', message: 'details must be an object' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.updateUserDetails(details)
         .then(result => {
             Object.keys(result.user).forEach(key => {
@@ -6983,7 +6983,7 @@ class AceBaseClientAuth {
 
     /**
      * Updates settings of the currrently signed in user. Passed settings will be merged with the user's current settings
-     * @param {{ [key:string]: string|bumber|boolean }} settings - the settings to update
+     * @param {{ [key:string]: string|number|boolean }} settings - the settings to update
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     updateUserSettings(settings) {
@@ -6998,7 +6998,7 @@ class AceBaseClientAuth {
      * @param {string} [details.email] 
      * @param {string} details.password
      * @param {string} details.displayName
-     * @param {{ [key:string]: string|bumber|boolean }} [details.settings] optional settings 
+     * @param {{ [key:string]: string|number|boolean }} [details.settings] optional settings 
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signUp(details) {
@@ -7009,7 +7009,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'invalid_details', message: 'No password given' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
 
         if (this.user && this.user.uid !== 'admin') {
             let user = this.user;
@@ -7044,7 +7044,7 @@ class AceBaseClientAuth {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         /** @type {WebApi} */
-        const api = this.api;
+        const api = this.client.api;
         return api.deleteAccount(this.user.uid)
         .then(result => {
             this.accessToken = null;
@@ -7060,7 +7060,7 @@ class AceBaseClientAuth {
 }
 
 module.exports = { AceBaseClientAuth };
-},{"./api-web":41,"./user":45}],43:[function(require,module,exports){
+},{"./acebase-client":40,"./user":45}],43:[function(require,module,exports){
 // To use AceBaseClient in the browser
 // from root dir of package, execute: browserify src/browser.js -o dist/browser.js
 window.AceBase = require('./index');
@@ -7692,7 +7692,7 @@ class AceBaseBase extends EventEmitter {
         //     this.emit("ready");
         // });
 
-        this.types = new TypeMappings();
+        this.types = new TypeMappings(this);
     }
 
     /**
@@ -7866,10 +7866,11 @@ class DataReference {
      * @param {AceBase} db
      * @param {string} path 
      */
-    constructor (db, path) {
+    constructor (db, path, vars) {
         if (!path) { path = ""; }
         path = path.replace(/^\/|\/$/g, ""); // Trim slashes
-        const key = path.length === 0 ? "" : path.substr(path.lastIndexOf("/") + 1); //path.match(/(?:^|\/)([a-z0-9_$]+)$/i)[1];
+        const pathInfo = PathInfo.get(path);
+        const key = pathInfo.key; //path.length === 0 ? "" : path.substr(path.lastIndexOf("/") + 1); //path.match(/(?:^|\/)([a-z0-9_$]+)$/i)[1];
         // const query = { 
         //     filters: [],
         //     skip: 0,
@@ -7881,7 +7882,7 @@ class DataReference {
             get path() { return path; },
             get key() { return key; },
             get callbacks() { return callbacks; },
-            vars: []
+            vars: vars || {}
         };
         this.db = db; //Object.defineProperty(this, "db", ...)
     }
@@ -7903,17 +7904,17 @@ class DataReference {
      * @type {DataReference}
      */
     get parent() {
-        const path = PathInfo.get(this.path);
-        if (path.parentPath === null) {
+        const info = PathInfo.get(this.path);
+        if (info.parentPath === null) {
             return null;
         }
-        return new DataReference(this.db, path.parentPath);
+        return new DataReference(this.db, info.parentPath);
     }
 
     /**
      * Contains values of the variables/wildcards used in a subscription path if this reference was 
      * created by an event ("value", "child_added" etc)
-     * @type {object}
+     * @type {{ [name: string]: string|number, wildcards?: Array<string|number> }}
      */
     get vars() {
         return this[_private].vars;
@@ -8061,19 +8062,7 @@ class DataReference {
                     return;
                 }
                 let ref = this.db.ref(path);
-                const vars = PathInfo.extractVariables(this.path, path);
-                ref[_private].vars = vars.reduce((vars, v) => {
-                    if (v.name) {
-                        vars[v.name.slice(1)] = v.value;
-                    }
-                    else if (vars.wildcards) {
-                        vars.wildcards.push(v.value);
-                    }
-                    else {
-                        vars.wildcards = [v.value];
-                    }
-                    return vars;
-                }, {});
+                ref[_private].vars = PathInfo.extractVariables(this.path, path);
                 
                 let callbackObject;
                 if (event.startsWith('notify_')) {
@@ -8790,23 +8779,61 @@ class PathInfo {
         return getPathKeys(this.path);
     }
 
+    // /**
+    //  * If varPath contains variables or wildcards, it will return them with the values found in fullPath
+    //  * @param {string} varPath 
+    //  * @param {string} fullPath 
+    //  * @returns {Array<{ name?: string, value: string|number }>}
+    //  * @example
+    //  * PathInfo.extractVariables('users/$uid/posts/$postid', 'users/ewout/posts/post1/title') === [
+    //  *  { name: '$uid', value: 'ewout' },
+    //  *  { name: '$postid', value: 'post1' }
+    //  * ];
+    //  * 
+    //  * PathInfo.extractVariables('users/*\/posts/*\/$property', 'users/ewout/posts/post1/title') === [
+    //  *  { value: 'ewout' },
+    //  *  { value: 'post1' },
+    //  *  { name: '$property', value: 'title' }
+    //  * ]
+    //  */
+    // static extractVariables(varPath, fullPath) {
+    //     if (varPath.indexOf('*') < 0 && varPath.indexOf('$') < 0) { 
+    //         return []; 
+    //     }
+    //     // if (!this.equals(fullPath)) {
+    //     //     throw new Error(`path does not match with the path of this PathInfo instance: info.equals(path) === false!`)
+    //     // }
+    //     const keys = getPathKeys(varPath);
+    //     const pathKeys = getPathKeys(fullPath);
+    //     const variables = [];
+    //     keys.forEach((key, index) => {
+    //         const pathKey = pathKeys[index];
+    //         if (key === '*') {
+    //             variables.push({ value: pathKey });
+    //         }
+    //         else if (typeof key === 'string' && key[0] === '$') {
+    //             variables.push({ name: key, value: pathKey });
+    //         }
+    //     });
+    //     return variables;
+    // }
+
     /**
      * If varPath contains variables or wildcards, it will return them with the values found in fullPath
      * @param {string} varPath 
      * @param {string} fullPath 
-     * @returns {Array<{ name?: string, value: string|number }>}
+     * @returns {{ [name: string]: string|number, wildcards?: Array<string|number> }}
      * @example
-     * PathInfo.extractVariables('users/$uid/posts/$postid', 'users/ewout/posts/post1/title') === [
-     *  { name: '$uid', value: 'ewout' },
-     *  { name: '$postid', value: 'post1' }
-     * ];
-     * 
-     * PathInfo.extractVariables('users/*\/posts/*\/$property', 'users/ewout/posts/post1/title') === [
-     *  { value: 'ewout' },
-     *  { value: 'post1' },
-     *  { name: '$property', value: 'title' }
-     * ]
-     */
+     * PathInfo.extractVariables('users/$uid/posts/$postid', 'users/ewout/posts/post1/title') === {
+        *  $uid: 'ewout',
+        *  $postid: 'post1'
+        * };
+        * 
+        * PathInfo.extractVariables('users/*\/posts/*\/$property', 'users/ewout/posts/post1/title') === {
+        *  wildcards: ['ewout', 'post1'],
+        *  $property: 'title'
+        * }
+        */
     static extractVariables(varPath, fullPath) {
         if (varPath.indexOf('*') < 0 && varPath.indexOf('$') < 0) { 
             return []; 
@@ -8816,14 +8843,15 @@ class PathInfo {
         // }
         const keys = getPathKeys(varPath);
         const pathKeys = getPathKeys(fullPath);
-        const variables = [];
+        const variables = {};
         keys.forEach((key, index) => {
             const pathKey = pathKeys[index];
             if (key === '*') {
-                variables.push({ value: pathKey });
+                if (!variables.wildcards) { variables.wildcards = []; }
+                variables.wildcards.push(pathKey);
             }
             else if (typeof key === 'string' && key[0] === '$') {
-                variables.push({ name: key, value: pathKey });
+                variables[key] = pathKey;
             }
         });
         return variables;
@@ -9240,6 +9268,9 @@ module.exports = {
 },{"./path-reference":58,"./utils":62,"ascii85":46,"buffer":65}],61:[function(require,module,exports){
 const { cloneObject } = require('./utils');
 const { PathInfo } = require('./path-info');
+const { AceBaseBase } = require('./acebase-base');
+const { DataReference } = require('./data-reference');
+const { DataSnapshot } = require('./data-snapshot');
 
 /**
  * (for internal use) - gets the mapping set for a specific path
@@ -9340,13 +9371,14 @@ const mapDeep = (mappings, entryPath) => {
 
 /**
  * (for internal use) - serializes or deserializes an object using type mappings
+ * @param {AceBaseBase} db
  * @param {TypeMappings} mappings
  * @param {string} path 
  * @param {any} obj
  * @param {string} action | "serialize" or "deserialize"
  * @returns {any} returns the (de)serialized value
  */
-const process = (mappings, path, obj, action) => {
+const process = (db, mappings, path, obj, action) => {
     const keys = PathInfo.getPathKeys(path); // path.length > 0 ? path.split("/") : [];
     const m = mapDeep(mappings, path);
     const changes = [];
@@ -9355,53 +9387,66 @@ const process = (mappings, path, obj, action) => {
         const mkeys = PathInfo.getPathKeys(mapping.path); //mapping.path.length > 0 ? mapping.path.split("/") : [];
         mkeys.push("*");
         const mTrailKeys = mkeys.slice(keys.length);
-
         if (mTrailKeys.length === 0) {
+            const vars = PathInfo.extractVariables(mapping.path, path);
+            const ref = new DataReference(db, path, vars);
             if (action === "serialize") {
                 // serialize this object
-                obj = mapping.type.serialize(obj);
+                obj = mapping.type.serialize(obj, ref);
             }
             else if (action === "deserialize") {
                 // deserialize this object
-                obj = mapping.type.deserialize(obj);
+                const snap = new DataSnapshot(ref, obj);
+                obj = mapping.type.deserialize(snap);
             }
+            return;
         }
 
         // Find all nested objects at this trail path
-        const process = (parent, keys) => {
-            let key = keys[0];
+        const process = (parentPath, parent, keys) => {
+            const key = keys[0];
             let children = [];
-            if (key === "*") {
+            if (key === '*' || key[0] === '$') {
                 // Include all children
-                children = Object.keys(parent).map(key => ({ key, val: parent[key] }));
+                if (parent instanceof Array) {
+                    children = parent.map((val, index) => ({ key: index, val }));
+                }
+                else {
+                    children = Object.keys(parent).map(k => ({ key: k, val: parent[k] }));
+                }
             }
             else {
                 // Get the 1 child
-                let child = parent[key];
-                if (typeof child === "object") {
+                const child = parent[key];
+                if (typeof child === 'object') {
                     children.push({ key, val: child });
                 }
             }
             children.forEach(child => { 
+                const childPath = PathInfo.getChildPath(parentPath, child.key);
+                const vars = PathInfo.extractVariables(mapping.path, childPath);
+                const ref = new DataReference(db, childPath, vars);
+
                 if (keys.length === 1) {
                     // TODO: this alters the existing object, we must build our own copy!
-                    if (action === "serialize") {
+                    if (action === 'serialize') {
                         // serialize this object
                         changes.push({ parent, key: child.key, original: parent[child.key] });
-                        parent[child.key] = mapping.type.serialize(child.val);
+                        parent[child.key] = mapping.type.serialize(child.val, ref);
                     }
-                    else if (action === "deserialize") {
+                    else if (action === 'deserialize') {
                         // deserialize this object
-                        parent[child.key] = mapping.type.deserialize(child.val);
+                        const snap = new DataSnapshot(ref, child.val);
+                        parent[child.key] = mapping.type.deserialize(snap);
                     }
                 }
                 else {
                     // Dig deeper
-                    process(child.val, keys.slice(1)); 
+                    process(childPath, child.val, keys.slice(1)); 
                 }
             });
         };
-        process(obj, mTrailKeys);
+        process(path, obj, mTrailKeys);
     });
     if (action === "serialize") {
         // Clone this serialized object so any types that remained
@@ -9425,32 +9470,22 @@ class TypeMappingOptions {
         if (!options) { 
             options = {}; 
         }
-        if (typeof options.instantiate === "undefined") { 
-            options.instantiate = true; 
-        }
-        if (["function", "undefined"].indexOf(typeof options.serializer ) < 0) { 
-            throw new TypeError(`serializer must be a function. Omit to use default .serialize() method for serialization`);
-        }
-        if (typeof options.exclude !== "undefined" && !(options.exclude instanceof Array)) {
-            throw new TypeError(`exclude must be an array of key names`);
-        }
-        if (typeof options.include !== "undefined" && !(options.include instanceof Array)) {
-            throw new TypeError(`include must be an array of key names`);
-        }
-        if (options.exclude && options.include) {
-            throw new TypeError(`can't use exclude and include at the same time`);
-        }
-        this.instantiate = options.instantiate;
+        /** @type {string | ((ref: DataReference, typedObj: any) => any)} */
         this.serializer = options.serializer;
-        this.exclude = options.exclude;
-        this.include = options.include;
+        /** @type {string | ((snap: DataSnapshot) => any)} */
+        this.creator = options.creator;
     }
 }
 
 const _mappings = Symbol("mappings");
 class TypeMappings {
-    constructor() {
+    /**
+     * 
+     * @param {AceBaseBase} db 
+     */
+    constructor(db) {
         //this._mappings = {};
+        this.db = db;
         this[_mappings] = {};
     }
 
@@ -9460,49 +9495,83 @@ class TypeMappings {
     }
 
     /**
-     * Maps objects that are stored in a specific path to a constructor method, 
-     * so they can automatically be serialized/deserialized when stored/loaded to/from
-     * the database
+     * Maps objects that are stored in a specific path to a class, so they can automatically be 
+     * serialized when stored to, and deserialized (instantiated) when loaded from the database.
      * @param {string} path path to an object container, eg "users" or "users/*\/posts"
-     * @param {(obj: any) => object} constructor constructor (deserializer) to instantiate objects with
-     * @param {TypeMappingOptions} [options] instantiate: boolean that specifies if the 
-     * constructor method should be called using the "new" keyword, or just execute the 
-     * function. serializer: function that can serialize your object for storing, if 
-     * your class requires custom serialization, but does not implement a .serialize() method
+     * @param {(obj: any) => object} type class to bind all child objects of path to
+     * @param {TypeMappingOptions} [options] (optional) You can specify the functions to use to 
+     * serialize and/or instantiate your class. If you do not specificy a creator (constructor) method, 
+     * AceBase will call YourClass.create(obj, ref) method if it exists, or execute: new YourClass(obj, ref).
+     * If you do not specifiy a serializer method, AceBase will call YourClass.prototype.serialize(ref) if it
+     * exists, or tries storing your object's fields unaltered. NOTE: 'this' in your creator function will point 
+     * to YourClass, and 'this' in your serializer function will point to the instance of YourClass.
      */
-    bind(path, constructor, options = new TypeMappingOptions({ instantiate: true, serializer: undefined, exclude: undefined, include: undefined })) {
+    bind(path, type, options = {}) {
         // Maps objects that are stored in a specific path to a constructor method,
         // so they are automatically deserialized
         if (typeof path !== "string") {
             throw new TypeError("path must be a string");
         }
-        if (typeof constructor !== "function") {
+        if (typeof type !== "function") {
             throw new TypeError("constructor must be a function");
+        }
+
+        if (typeof options.serializer === 'undefined') {
+            if (typeof type.prototype.serialize === 'function') {
+                // Use .serialize instance method
+                options.serializer = type.prototype.serialize;
+            }
+        }
+        if (typeof options.serializer === 'string') {
+            if (typeof type.prototype[options.serializer] === 'function') {
+                options.serializer = type.prototype[options.serializer];
+            }
+            else {
+                throw new TypeError(`${type.name}.prototype.${options.serializer} is not a function, cannot use it as serializer`)
+            }
+        }
+        else if (typeof options.serializer !== 'function') {
+            throw new TypeError(`serializer for class ${type.name} must be a function, or the name of a prototype method`);
+        }
+
+        if (typeof options.creator === 'undefined') {
+            if (typeof type.create === 'function') {
+                // Use static .create as creator method
+                options.creator = type.create;
+            }
+        }
+        else if (typeof options.creator === 'string') {
+            if (typeof type[options.creator] === 'function') {
+                options.creator = type[options.creator];
+            }
+            else {
+                throw new TypeError(`${type.name}.${options.creator} is not a function, cannot use it as creator`)
+            }
+        }
+        else if (typeof options.creator !== 'function') {
+            throw new TypeError(`creator for class ${type.name} must be a function, or the name of a static method`);
         }
 
         path = path.replace(/^\/|\/$/g, ""); // trim slashes
         this[_mappings][path] = {
-            constructor,
-            instantiate: options.instantiate,
+            db: this.db,
+            type,
+            creator: options.creator,
             serializer: options.serializer,
-            exclude: options.exclude,
-            include: options.include,
-            deserialize(obj) {
+            deserialize(snap) {
                 // run constructor method
-                if (this.instantiate) {
-                    obj = new this.constructor(obj);
+                let obj;
+                if (this.creator) {
+                    obj = this.creator.call(this.type, snap)
                 }
                 else {
-                    obj = this.constructor(obj);
+                    obj = new this.type(snap);
                 }
                 return obj;
             },
-            serialize(obj) {
-                if (typeof this.serializer === "function") {
-                    obj = this.serializer.call(obj, obj);
-                }
-                else if (typeof obj.serialize === "function") {
-                    obj = obj.serialize();
+            serialize(obj, ref) {
+                if (this.serializer) {
+                    obj = this.serializer.call(obj, ref, obj);
                 }
                 return obj;
             }
@@ -9515,7 +9584,7 @@ class TypeMappings {
      * @param {object} obj | object to serialize
      */
     serialize(path, obj) {
-        return process(this[_mappings], path, obj, "serialize");
+        return process(this.db, this[_mappings], path, obj, "serialize");
     }
 
     /**
@@ -9524,7 +9593,7 @@ class TypeMappings {
      * @param {object} obj | object to deserialize
      */
     deserialize(path, obj) {
-        return process(this[_mappings], path, obj, "deserialize");
+        return process(this.db, this[_mappings], path, obj, "deserialize");
     }
 }
 
@@ -9533,7 +9602,7 @@ module.exports = {
     TypeMappingOptions
 }
 
-},{"./path-info":57,"./utils":62}],62:[function(require,module,exports){
+},{"./acebase-base":50,"./data-reference":52,"./data-snapshot":53,"./path-info":57,"./utils":62}],62:[function(require,module,exports){
 const { PathReference } = require('./path-reference');
 
 function numberToBytes(number) {

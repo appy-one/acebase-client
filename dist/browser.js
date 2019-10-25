@@ -7764,6 +7764,7 @@ class AceBaseBase extends EventEmitter {
              * @param {object} [options] any additional options
              * @param {string} [options.type] special index type, such as 'fulltext', or 'geo'
              * @param {string[]} [options.include] keys to include in the index. Speeds up sorting on these columns when the index is used (and dramatically increases query speed when .take(n) is used in addition)
+             * @param {object} [options.config] additional index-specific configuration settings 
              */
             create: (path, key, options) => {
                 return this.api.createIndex(path, key, options);
@@ -8127,7 +8128,7 @@ class DataReference {
             else if (event === "child_added") {
                 this.get(snap => {
                     const val = snap.val();
-                    if (typeof val !== "object") { return; }
+                    if (val === null || typeof val !== "object") { return; }
                     Object.keys(val).forEach(key => {
                         let childSnap = new DataSnapshot(this.child(key), val[key]);
                         eventPublisher.publish(childSnap);
@@ -8155,11 +8156,11 @@ class DataReference {
             }
             callbacks.splice(callbacks.indexOf(cb), 1);
             callback = cb.ours;
-            cb.subscr.stop(callback);
+            cb.subscr.unsubscribe(callback);
         }
         else {
             callbacks.splice(0, callbacks.length).forEach(cb => {
-                cb.subscr.stop();
+                cb.subscr.unsubscribe();
             });
         }
         this.db.api.unsubscribe(this.path, event, callback);
@@ -8331,16 +8332,20 @@ class DataReferenceQuery {
      */                
     filter(key, op, compare) {
         if ((op === "in" || op === "!in") && (!(compare instanceof Array) || compare.length === 0)) {
-            throw `${op} filter for ${key} must supply an Array compare argument containing at least 1 value`;
+            throw new Error(`${op} filter for ${key} must supply an Array compare argument containing at least 1 value`);
         }
         if ((op === "between" || op === "!between") && (!(compare instanceof Array) || compare.length !== 2)) {
-            throw `${op} filter for ${key} must supply an Array compare argument containing 2 values`;
+            throw new Error(`${op} filter for ${key} must supply an Array compare argument containing 2 values`);
         }
         if ((op === "matches" || op === "!matches") && !(compare instanceof RegExp)) {
-            throw `${op} filter for ${key} must supply a RegExp compare argument`;
+            throw new Error(`${op} filter for ${key} must supply a RegExp compare argument`);
         }
-        if (op === "custom" && typeof compare !== "function") {
-            throw `${op} filter for ${key} must supply a Function compare argument`;
+        // DISABLED 2019/10/23 because it is not fully implemented only works locally
+        // if (op === "custom" && typeof compare !== "function") {
+        //     throw `${op} filter for ${key} must supply a Function compare argument`;
+        // }
+        if ((op === "contains" || op === "!contains") && ((typeof compare === 'object' && !(compare instanceof Array) && !(compare instanceof Date)) || (compare instanceof Array && compare.length === 0))) {
+            throw new Error(`${op} filter for ${key} must supply a simple value or (non-zero length) array compare argument`);
         }
         this[_private].filters.push({ key, op, compare });
         return this;
@@ -8416,6 +8421,11 @@ class DataReferenceQuery {
         if (typeof options.snapshots === 'undefined') {
             options.snapshots = true;
         }
+        options.eventHandler = ev => {
+            if (!this._events || !this._events[ev.event]) { return; }
+            const listeners = this._events[ev.event];
+            listeners.forEach(callback => { try { callback(ev); } catch(e) {} });
+        };
         const db = this.ref.db;
         return db.api.query(this.ref.path, this[_private], options)
         .catch(err => {
@@ -8467,6 +8477,21 @@ class DataReferenceQuery {
             });
         });
     }
+
+    on(event, callback) {
+        if (!this._events) { this._events = {}; };
+        if (!this._events[event]) { this._events[event] = []; }
+        this._events[event].push(callback);
+        return this;
+    }
+
+    off(event, callback) {
+        if (!this._events || !this._events[event]) { return this; }
+        const index = !this._events[event].indexOf(callback);
+        if (!~index) { return this; }
+        this._events[event].splice(index, 1);
+        return this;
+    }
 }
 
 class DataSnapshotsArray extends Array {
@@ -8491,7 +8516,7 @@ class DataReferencesArray extends Array {
      */
     static from(refs) {
         const arr = new DataReferencesArray(refs.length);
-        refs.forEach(ref => arr.push(ref));
+        refs.forEach((ref, i) => arr[i] = ref);
         return arr;
     }
     getPaths() {
@@ -8507,7 +8532,7 @@ module.exports = {
 };
 },{"./data-snapshot":53,"./debug":54,"./id":55,"./path-info":57,"./subscription":59}],53:[function(require,module,exports){
 const { DataReference } = require('./data-reference');
-const { getPathKeys } = require('./utils');
+const { getPathKeys } = require('./path-info');
 
 const getChild = (snapshot, path) => {
     if (!snapshot.exists()) { return null; }
@@ -8549,7 +8574,8 @@ class DataSnapshot {
     }
     
     /**
-     * @param {string} path 
+     * Gets a new snapshot for a child node
+     * @param {string} path child key or path
      * @returns {DataSnapshot}
      */
     child(path) {
@@ -8559,7 +8585,8 @@ class DataSnapshot {
     }
 
     /**
-     * @param {string} path 
+     * Checks if the snapshot's value has a child with the given key or path
+     * @param {string} path child key or path
      * @returns {boolean}
      */
     hasChild(path) {
@@ -8567,6 +8594,7 @@ class DataSnapshot {
     }
 
     /**
+     * Indicates whether the the snapshot's value has any child nodes
      * @returns {boolean}
      */
     hasChildren() {
@@ -8574,6 +8602,7 @@ class DataSnapshot {
     }
 
     /**
+     * The number of child nodes in this snapshot
      * @returns {number}
      */
     numChildren() {
@@ -8581,8 +8610,8 @@ class DataSnapshot {
     }
 
     /**
-     * Runs a callback function for each child node until the callback returns false
-     * @param {(child: DataSnapshot) => boolean} callback 
+     * Runs a callback function for each child node in this snapshot until the callback returns false
+     * @param {(child: DataSnapshot) => boolean} callback function that is called with a snapshot of each child node in this snapshot. Must return a boolean value that indicates whether to continue iterating or not.
      * @returns {void}
      */
     forEach(callback) {
@@ -8623,7 +8652,7 @@ class DataSnapshot {
 }
 
 module.exports = { DataSnapshot };
-},{"./data-reference":52,"./utils":62}],54:[function(require,module,exports){
+},{"./data-reference":52,"./path-info":57}],54:[function(require,module,exports){
 const debug = {
     setLevel(level) {
         this.log = ["log"].indexOf(level) >= 0 ? console.log.bind(console) : ()=>{};
@@ -8820,22 +8849,34 @@ class PathInfo {
 
     /**
      * If varPath contains variables or wildcards, it will return them with the values found in fullPath
-     * @param {string} varPath 
-     * @param {string} fullPath 
-     * @returns {{ [name: string]: string|number, wildcards?: Array<string|number> }}
+     * @param {string} varPath path containing variables such as * and $name
+     * @param {string} fullPath real path to a node
+     * @returns {{ [index: number]: string|number, [variable: string]: string|number }} returns an array-like object with all variable values. All named variables are also set on the array by their name (eg vars.uid and vars.$uid)
      * @example
      * PathInfo.extractVariables('users/$uid/posts/$postid', 'users/ewout/posts/post1/title') === {
-        *  $uid: 'ewout',
-        *  $postid: 'post1'
-        * };
-        * 
-        * PathInfo.extractVariables('users/*\/posts/*\/$property', 'users/ewout/posts/post1/title') === {
-        *  wildcards: ['ewout', 'post1'],
-        *  $property: 'title'
-        * }
-        */
+     *  0: 'ewout',
+     *  1: 'post1',
+     *  uid: 'ewout', // or $uid
+     *  postid: 'post1' // or $postid
+     * };
+     * 
+     * PathInfo.extractVariables('users/*\/posts/*\/$property', 'users/ewout/posts/post1/title') === {
+     *  0: 'ewout',
+     *  1: 'post1',
+     *  2: 'title',
+     *  property: 'title' // or $property
+     * };
+     * 
+     * PathInfo.extractVariables('users/$user/friends[*]/$friend', 'users/dora/friends[4]/diego') === {
+     *  0: 'dora',
+     *  1: 4,
+     *  2: 'diego',
+     *  user: 'dora', // or $user
+     *  friend: 'diego' // or $friend
+     * };
+    */
     static extractVariables(varPath, fullPath) {
-        if (varPath.indexOf('*') < 0 && varPath.indexOf('$') < 0) { 
+        if (!varPath.includes('*') && !varPath.includes('$')) { 
             return []; 
         }
         // if (!this.equals(fullPath)) {
@@ -8843,15 +8884,24 @@ class PathInfo {
         // }
         const keys = getPathKeys(varPath);
         const pathKeys = getPathKeys(fullPath);
-        const variables = {};
+        let count = 0;
+        const variables = {
+            get length() { return count; }
+        };
         keys.forEach((key, index) => {
             const pathKey = pathKeys[index];
             if (key === '*') {
-                if (!variables.wildcards) { variables.wildcards = []; }
-                variables.wildcards.push(pathKey);
+                variables[count++] = pathKey;
             }
             else if (typeof key === 'string' && key[0] === '$') {
+                variables[count++] = pathKey;
+                // Set the $variable property
                 variables[key] = pathKey;
+                // Set friendly property name (without $)
+                const varName = key.slice(1);
+                if (typeof variables[varName] === 'undefined') {
+                    variables[varName] = pathKey;
+                }
             }
         });
         return variables;
@@ -9003,7 +9053,7 @@ class EventSubscription {
     /**
      * Notifies when subscription is activated or canceled
      * @param {callback?: (activated: boolean, cancelReason?: string) => void} [callback] optional callback when subscription is activated or canceled
-     * @returns {Promise<void>|void} if no callback is used, returns a promise that resolves once activated, or rejects when it is denied
+     * @returns {Promise<void>} returns a promise that resolves once activated, or rejects when it is denied (and no callback was supplied)
      */
     activated(callback = undefined) {
         if (callback) {
@@ -9015,19 +9065,32 @@ class EventSubscription {
                 callback(false, this._internal.cancelReason);
             }
         }
-        else {
-            if (this._internal.state === 'active') {
-                return Promise.resolve();
+        // Changed behaviour: now also returns a Promise when the callback is used.
+        // This allows for 1 activated call to both handle: first activation result, 
+        // and any future events using the callback
+
+        // if (this._internal.state === 'active') {
+        //     return Promise.resolve();
+        // }
+        // else if (this._internal.state === 'canceled') {
+        //     if (callback) { 
+        //         // Do not reject when callback is used
+        //         return new Promise(() => {}); 
+        //     }
+        //     return Promise.reject(new Error(this._internal.cancelReason));
+        // }
+        return new Promise((resolve, reject) => { 
+            if (this._internal.state === 'active') { 
+                return resolve(); 
             }
-            else if (this._internal.state === 'canceled') {
-                return Promise.reject(new Error(this._internal.cancelReason));
+            else if (this._internal.state === 'canceled' && !callback) { 
+                return reject(new Error(this._internal.cancelReason)); 
             }
-            return new Promise((resolve, reject) => { 
-                if (this._internal.state === 'active') { return resolve(); }
-                else if (this._internal.state === 'canceled') { return reject(new Error(this._internal.cancelReason)); }
-                this._internal.activatePromises.push({ resolve, reject });
+            this._internal.activatePromises.push({ 
+                resolve, 
+                reject: callback ? () => {} : reject // Don't reject when callback is used: let callback handle this (prevents UnhandledPromiseRejection if only callback is used)
             });
-        }
+        });
     }
 
     _setActivationState(activated, cancelReason) {
@@ -9279,7 +9342,7 @@ const { DataSnapshot } = require('./data-snapshot');
  */
 const get = (mappings, path) => {
     // path points to the mapped (object container) location
-    path = path.replace(/^\/|\/$/g, ""); // trim slashes
+    path = path.replace(/^\/|\/$/g, ''); // trim slashes
     // const keys = path.length > 0 ? path.split("/") : [];
     const keys = PathInfo.getPathKeys(path);
     const mappedPath = Object.keys(mappings).find(mpath => {
@@ -9289,7 +9352,7 @@ const get = (mappings, path) => {
             return false; // Can't be a match
         }
         return mkeys.every((mkey, index) => {
-            if (mkey === "*") { //(mkey.startsWith("${")) {
+            if (mkey === '*' || mkey[0] === '$') {
                 return true; // wildcard
             }
             return mkey === keys[index];
@@ -9324,7 +9387,7 @@ const mapDeep = (mappings, entryPath) => {
     // entryPath: "users/ewout"
     // mappingPath: "users"
     // mappingPath: "users/*/posts"
-    entryPath = entryPath.replace(/^\/|\/$/g, ""); // trim slashes
+    entryPath = entryPath.replace(/^\/|\/$/g, ''); // trim slashes
 
     // Start with current path's parent node
     const pathInfo = PathInfo.get(entryPath);
@@ -9341,15 +9404,15 @@ const mapDeep = (mappings, entryPath) => {
         }
         let isMatch = true;
         if (keys.length === 0 && startPath !== null) {
-            // Only match first node's children if mapping pattern is "*"
-            isMatch = mkeys.length === 1 && mkeys[0] === "*";
+            // Only match first node's children if mapping pattern is "*" or "$variable"
+            isMatch = mkeys.length === 1 && (mkeys[0] === '*' || mkeys[0][0] === '$');
         }
         else {
             mkeys.every((mkey, index) => {
                 if (index >= keys.length) { 
                     return false; // stop .every loop
                 } 
-                else if (mkey === "*" || mkey === keys[index]) {
+                else if (mkey === '*' || mkey[0] === '$' || mkey === keys[index]) {
                     return true; // continue .every loop
                 }
                 else {
@@ -9379,22 +9442,25 @@ const mapDeep = (mappings, entryPath) => {
  * @returns {any} returns the (de)serialized value
  */
 const process = (db, mappings, path, obj, action) => {
+    if (obj === null || typeof obj !== 'object') { 
+        return obj; 
+    }
     const keys = PathInfo.getPathKeys(path); // path.length > 0 ? path.split("/") : [];
     const m = mapDeep(mappings, path);
     const changes = [];
     m.sort((a,b) => PathInfo.getPathKeys(a.path).length > PathInfo.getPathKeys(b.path).length ? -1 : 1); // Deepest paths first
     m.forEach(mapping => {
         const mkeys = PathInfo.getPathKeys(mapping.path); //mapping.path.length > 0 ? mapping.path.split("/") : [];
-        mkeys.push("*");
+        mkeys.push('*');
         const mTrailKeys = mkeys.slice(keys.length);
         if (mTrailKeys.length === 0) {
             const vars = PathInfo.extractVariables(mapping.path, path);
             const ref = new DataReference(db, path, vars);
-            if (action === "serialize") {
+            if (action === 'serialize') {
                 // serialize this object
                 obj = mapping.type.serialize(obj, ref);
             }
-            else if (action === "deserialize") {
+            else if (action === 'deserialize') {
                 // deserialize this object
                 const snap = new DataSnapshot(ref, obj);
                 obj = mapping.type.deserialize(snap);
@@ -9404,6 +9470,9 @@ const process = (db, mappings, path, obj, action) => {
 
         // Find all nested objects at this trail path
         const process = (parentPath, parent, keys) => {
+            if (obj === null || typeof obj !== 'object') { 
+                return obj; 
+            }
             const key = keys[0];
             let children = [];
             if (key === '*' || key[0] === '$') {
@@ -9579,7 +9648,7 @@ class TypeMappings {
     }
 
     /**
-     * Serialzes any child in given object that has a type mapping
+     * Serializes any child in given object that has a type mapping
      * @param {string} path | path to the object's location
      * @param {object} obj | object to serialize
      */
@@ -9639,16 +9708,29 @@ function cloneObject(original, stack) {
     if (original instanceof DataSnapshot) {
         throw new TypeError(`Object to clone is a DataSnapshot (path "${original.ref.path}")`);
     }
-    else if (typeof original !== "object" || original === null || original instanceof Date || original instanceof ArrayBuffer || original instanceof PathReference) {
+    
+    const checkAndFixTypedArray = obj => {
+        if (obj !== null && typeof obj === 'object' 
+            && typeof obj.constructor === 'function' && typeof obj.constructor.name === 'string' 
+            && ['Buffer','Uint8Array','Int8Array','Uint16Array','Int16Array','Uint32Array','Int32Array','BigUint64Array','BigInt64Array'].includes(obj.constructor.name)) 
+        {
+            // FIX for typed array being converted to objects with numeric properties:
+            // Convert Buffer or TypedArray to ArrayBuffer
+            obj = obj.buffer.slice(obj.byteOffset, obj.byteOffset + obj.byteLength);
+        }
+        return obj;
+    };
+    original = checkAndFixTypedArray(original);
+
+    if (typeof original !== "object" || original === null || original instanceof Date || original instanceof ArrayBuffer || original instanceof PathReference) {
         return original;
     }
+
     const cloneValue = (val) => {
-        // if (["string","number","boolean","function","undefined"].indexOf(typeof val) >= 0) {
-        //     return val;
-        // }
         if (stack.indexOf(val) >= 0) {
             throw new ReferenceError(`object contains a circular reference`);
         }
+        val = checkAndFixTypedArray(val);
         if (val === null || val instanceof Date || val instanceof ArrayBuffer || val instanceof PathReference) { // || val instanceof ID
             return val;
         }

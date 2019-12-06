@@ -1,12 +1,13 @@
 {
   "name": "acebase-client",
-  "version": "0.7.1",
+  "version": "0.9.0",
   "description": "Client to connect to remote AceBase JSON database server",
   "main": "./src/index.js",
   "types": "./index.d.ts",
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {
+    "browserify": "browserify src/browser.js -o dist/browser.js && terser dist/browser.js -o dist/browser.min.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -43,7 +44,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "latest",
+    "acebase-core": "~0.9.0",
     "socket.io-client": "*"
   }
 }

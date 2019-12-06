@@ -7062,9 +7062,18 @@ class AceBaseClientAuth {
 module.exports = { AceBaseClientAuth };
 },{"./acebase-client":40,"./user":45}],43:[function(require,module,exports){
 // To use AceBaseClient in the browser
-// from root dir of package, execute: browserify src/browser.js -o dist/browser.js
-window.AceBase = require('./index');
-window.AceBaseClient = window.AceBase.AceBaseClient;
+// from root dir of package, execute: 
+// npm run browserify, which will execute:
+//      browserify src/browser.js -o dist/browser.js
+//      terser dist/browser.js -o dist/browser.min.js
+
+const acebase = require('./index');
+
+window.AceBaseClient = acebase.AceBaseClient;
+if (!window.acebase) {
+    // Prevent clash with acebase browser build
+    window.acebase = acebase; 
+}
 
 },{"./index":44}],44:[function(require,module,exports){
 const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, TypeMappingOptions } = require('acebase-core');
@@ -7143,396 +7152,6 @@ class AceBaseAuthResult {
 
 module.exports = { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult };
 },{}],46:[function(require,module,exports){
-(function (Buffer){
-/**
- * Copyright 2015 Huan Du. All rights reserved.
- * Licensed under the MIT license that can be found in the LICENSE file.
- */
-'use strict';
-
-// Buffer api is changed since v6.0.0. this wrapper is designed to leverage new
-// api features if possible without breaking old node.
-//
-// it's not a completed polyfill implementation. i just do necessary shims for this
-// package only.
-var _BufferFrom = Buffer.from || function() {
-  switch (arguments.length) {
-    case 1: return new Buffer(arguments[0]);
-    case 2: return new Buffer(arguments[0], arguments[1]);
-    case 3: return new Buffer(arguments[0], arguments[1], arguments[2]);
-    default: throw new Exception('unexpected call.');
-  }
-};
-var _BufferAlloc = Buffer.alloc || function(size, fill, encoding) {
-  var buf = new Buffer(size);
-
-  if (fill !== undefined) {
-    if (typeof encoding === "string") {
-      buf.fill(fill, encoding);
-    } else {
-      buf.fill(fill);
-    }
-  }
-
-  return buf;
-};
-var _BufferAllocUnsafe = Buffer.allocUnsafe || function(size) {
-  return new Buffer(size);
-};
-var _NewUint8Array = (function() {
-  if (typeof Uint8Array === 'undefined') {
-    return function(size) {
-      return new Array(size);
-    };
-  } else {
-    return function(size) {
-      return new Uint8Array(size);
-    }
-  }
-})();
-
-var ASCII85_BASE = 85;
-var ASCII85_CODE_START = 33;
-var ASCII85_CODE_END = ASCII85_CODE_START + ASCII85_BASE;
-var ASCII85_NULL = String.fromCharCode(0);
-var ASCII85_NULL_STRING = ASCII85_NULL + ASCII85_NULL + ASCII85_NULL + ASCII85_NULL;
-var ASCII85_ZERO = 'z';
-var ASCII85_ZERO_VALUE = ASCII85_ZERO.charCodeAt(0);
-var ASCII85_PADDING_VALUE = 'u'.charCodeAt(0);
-var ASCII85_ENCODING_GROUP_LENGTH = 4;
-var ASCII85_DECODING_GROUP_LENGTH = 5;
-var ASCII85_BLOCK_START = '<~';
-var ASCII85_BLOCK_START_LENGTH = ASCII85_BLOCK_START.length;
-var ASCII85_BLOCK_START_VALUE = _BufferFrom(ASCII85_BLOCK_START).readUInt16BE(0);
-var ASCII85_BLOCK_END = '~>';
-var ASCII85_BLOCK_END_LENGTH = ASCII85_BLOCK_END.length;
-var ASCII85_BLOCK_END_VALUE = _BufferFrom(ASCII85_BLOCK_END).readUInt16BE(0);
-var ASCII85_GROUP_SPACE = 'y';
-var ASCII85_GROUP_SPACE_VALUE = ASCII85_GROUP_SPACE.charCodeAt(0);
-var ASCII85_GROUP_SPACE_CODE = 0x20202020;
-var ASCII85_GROUP_SPACE_STRING = '    ';
-
-var ASCII85_DEFAULT_ENCODING_TABLE = (function() {
-  var arr = new Array(ASCII85_BASE);
-  var i;
-
-  for (i = 0; i < ASCII85_BASE; i++) {
-    arr[i] = String.fromCharCode(ASCII85_CODE_START + i);
-  }
-
-  return arr;
-})();
-
-var ASCII85_DEFAULT_DECODING_TABLE = (function() {
-  var arr = new Array(1 << 8);
-  var i;
-
-  for (i = 0; i < ASCII85_BASE; i++) {
-    arr[ASCII85_CODE_START + i] = i;
-  }
-
-  return arr;
-})();
-
-/**
- * Create a new Ascii85 codec.
- * @param {Array|Object} [options] is a list of chars for encoding or an option object.
- *
- * Supported options are listed in Ascii85#encode document.
- * @note Only encoding table is supported. Decoding table will be generated automatically
- * based on encoding table.
- */
-function Ascii85(options) {
-  var decodingTable;
-
-  options = options || {};
-  this._options = options;
-
-  // generate encoding and decoding table.
-  if (Array.isArray(options.table)) {
-    decodingTable = [];
-    options.table.forEach(function(v, i) {
-      decodingTable[v.charCodeAt(0)] = i;
-    });
-
-    options.encodingTable = options.table;
-    options.decodingTable = decodingTable;
-  }
-}
-
-var defaultCodec = module.exports = new Ascii85();
-
-/**
- * Encode a binary data to ascii85 string.
- * @param {String|Buffer} data is a string or Buffer.
- * @param {Array|Object} [options] is a list of chars for encoding or an option object.
- *                                 If no options is provided, encode uses standard ascii85
- *                                 char table to encode data.
- *
- * Supported options are following.
- *   - table: Table for encoding. Default is ASCII85_DEFAULT_ENCODING_TABLE.
- *   - delimiter: Add '<~' and '~>' to output. Default is false.
- *   - groupSpace: Support group of all spaces in btoa 4.2. Default is false.
- */
-Ascii85.prototype.encode = function(data, options) {
-  var bytes = _NewUint8Array(5);
-  var buf = data;
-  var defOptions = this._options;
-  var output, offset, table, delimiter, groupSpace, digits, cur, i, j, r, b, len, padding;
-
-  if (typeof buf === "string") {
-    buf = _BufferFrom(buf, 'binary');
-  } else if (!(buf instanceof Buffer)) {
-    buf = _BufferFrom(buf);
-  }
-
-  // prepare options.
-  options = options || {};
-
-  if (Array.isArray(options)) {
-    table = options;
-    delimiter = defOptions.delimiter || false;
-    groupSpace = defOptions.groupSpace || false;
-  } else {
-    table = options.table || defOptions.encodingTable || ASCII85_DEFAULT_ENCODING_TABLE;
-
-    if (options.delimiter === undefined) {
-      delimiter = defOptions.delimiter || false;
-    } else {
-      delimiter = !!options.delimiter;
-    }
-
-    if (options.groupSpace === undefined) {
-      groupSpace = defOptions.groupSpace || false;
-    } else {
-      groupSpace = !!options.groupSpace;
-    }
-  }
-
-  // estimate output length and alloc buffer for it.
-  offset = 0;
-  len = Math.ceil(buf.length * ASCII85_DECODING_GROUP_LENGTH / ASCII85_ENCODING_GROUP_LENGTH) +
-        ASCII85_ENCODING_GROUP_LENGTH +
-        (delimiter? ASCII85_BLOCK_START_LENGTH + ASCII85_BLOCK_END_LENGTH: 0);
-  output = _BufferAllocUnsafe(len);
-
-  if (delimiter) {
-    offset += output.write(ASCII85_BLOCK_START, offset);
-  }
-
-  // iterate over all data bytes.
-  for (i = digits = cur = 0, len = buf.length; i < len; i++) {
-    b = buf.readUInt8(i);
-
-    cur *= 1 << 8;
-    cur += b;
-    digits++;
-
-    if (digits % ASCII85_ENCODING_GROUP_LENGTH) {
-      continue;
-    }
-
-    if (groupSpace && cur === ASCII85_GROUP_SPACE_CODE) {
-      offset += output.write(ASCII85_GROUP_SPACE, offset);
-    } else if (cur) {
-      for (j = ASCII85_ENCODING_GROUP_LENGTH; j >= 0; j--) {
-        r = cur % ASCII85_BASE;
-        bytes[j] = r;
-        cur = (cur - r) / ASCII85_BASE;
-      }
-
-      for (j = 0; j < ASCII85_DECODING_GROUP_LENGTH; j++) {
-        offset += output.write(table[bytes[j]], offset);
-      }
-    } else {
-      offset += output.write(ASCII85_ZERO, offset);
-    }
-
-    cur = 0;
-    digits = 0;
-  }
-
-  // add padding for remaining bytes.
-  if (digits) {
-    if (cur) {
-      padding = ASCII85_ENCODING_GROUP_LENGTH - digits;
-
-      for (i = ASCII85_ENCODING_GROUP_LENGTH - digits; i > 0; i--) {
-        cur *= 1 << 8;
-      }
-
-      for (j = ASCII85_ENCODING_GROUP_LENGTH; j >= 0; j--) {
-        r = cur % ASCII85_BASE;
-        bytes[j] = r;
-        cur = (cur - r) / ASCII85_BASE;
-      }
-
-      for (j = 0; j < ASCII85_DECODING_GROUP_LENGTH; j++) {
-        offset += output.write(table[bytes[j]], offset);
-      }
-
-      offset -= padding;
-    } else {
-      // If remaining bytes are zero, need to insert '!' instead of 'z'.
-      // This is a special case.
-      for (i = 0; i < digits + 1; i++) {
-        offset += output.write(table[0], offset);
-      }
-    }
-  }
-
-  if (delimiter) {
-    offset += output.write(ASCII85_BLOCK_END, offset);
-  }
-
-  return output.slice(0, offset);
-};
-
-/**
- * Decode a string to binary data.
- * @param {String|Buffer} data is a string or Buffer.
- * @param {Array|Object} [table] is a sparse array to map char code and decoded value for decoding.
- *                               Default is standard table.
- */
-Ascii85.prototype.decode = function(str, table) {
-  var defOptions = this._options;
-  var buf = str;
-  var enableZero = true;
-  var enableGroupSpace = true;
-  var output, offset, digits, cur, i, c, t, len, padding;
-
-  table = table || defOptions.decodingTable || ASCII85_DEFAULT_DECODING_TABLE;
-
-  // convert a key/value format char map to code array.
-  if (!Array.isArray(table)) {
-    table = table.table || table;
-
-    if (!Array.isArray(table)) {
-      t = [];
-      Object.keys(table).forEach(function(v) {
-        t[v.charCodeAt(0)] = table[v];
-      });
-      table = t;
-    }
-  }
-
-  enableZero = !table[ASCII85_ZERO_VALUE];
-  enableGroupSpace = !table[ASCII85_GROUP_SPACE_VALUE];
-
-  if (!(buf instanceof Buffer)) {
-    buf = _BufferFrom(buf);
-  }
-
-  // estimate output length and alloc buffer for it.
-  t = 0;
-
-  if (enableZero || enableGroupSpace) {
-    for (i = 0, len = buf.length; i < len; i++) {
-      c = buf.readUInt8(i);
-
-      if (enableZero && c === ASCII85_ZERO_VALUE) {
-        t++;
-      }
-
-      if (enableGroupSpace && c === ASCII85_GROUP_SPACE_VALUE) {
-        t++;
-      }
-    }
-  }
-
-  offset = 0;
-  len = Math.ceil(buf.length * ASCII85_ENCODING_GROUP_LENGTH / ASCII85_DECODING_GROUP_LENGTH) +
-        t * ASCII85_ENCODING_GROUP_LENGTH +
-        ASCII85_DECODING_GROUP_LENGTH;
-  output = _BufferAllocUnsafe(len);
-
-  // if str starts with delimiter ('<~'), it must end with '~>'.
-  if (buf.length >= ASCII85_BLOCK_START_LENGTH + ASCII85_BLOCK_END_LENGTH && buf.readUInt16BE(0) === ASCII85_BLOCK_START_VALUE) {
-    for (i = buf.length - ASCII85_BLOCK_END_LENGTH; i > ASCII85_BLOCK_START_LENGTH; i--) {
-      if (buf.readUInt16BE(i) === ASCII85_BLOCK_END_VALUE) {
-        break;
-      }
-    }
-
-    if (i <= ASCII85_BLOCK_START_LENGTH) {
-      throw new Error('Invalid ascii85 string delimiter pair.');
-    }
-
-    buf = buf.slice(ASCII85_BLOCK_START_LENGTH, i);
-  }
-
-  for (i = digits = cur = 0, len = buf.length; i < len; i++) {
-    c = buf.readUInt8(i);
-
-    if (enableZero && c === ASCII85_ZERO_VALUE) {
-      offset += output.write(ASCII85_NULL_STRING, offset);
-      continue;
-    }
-
-    if (enableGroupSpace && c === ASCII85_GROUP_SPACE_VALUE) {
-      offset += output.write(ASCII85_GROUP_SPACE_STRING, offset);
-      continue;
-    }
-
-    if (table[c] === undefined) {
-      continue;
-    }
-
-    cur *= ASCII85_BASE;
-    cur += table[c];
-    digits++;
-
-    if (digits % ASCII85_DECODING_GROUP_LENGTH) {
-      continue;
-    }
-
-    offset = output.writeUInt32BE(cur, offset);
-    cur = 0;
-    digits = 0;
-  }
-
-  if (digits) {
-    padding = ASCII85_DECODING_GROUP_LENGTH - digits;
-
-    for (i = 0; i < padding; i++) {
-      cur *= ASCII85_BASE;
-      cur += ASCII85_BASE - 1;
-    }
-
-    for (i = 3, len = padding - 1; i > len; i--) {
-      offset = output.writeUInt8((cur >>> (i * 8)) & 0xFF, offset);
-    }
-  }
-
-  return output.slice(0, offset);
-};
-
-/**
- * Ascii85 for ZeroMQ which uses a different codec table.
- */
-defaultCodec.ZeroMQ = new Ascii85({
-  table: [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
-    '.', '-', ':', '+', '=', '^', '!', '/', '*', '?', '&', '<', '>', '(', ')', '[', ']', '{', '}', '@', '%', '$', '#'
-  ]
-});
-
-/**
- * Ascii85 for PostScript which always uses delimiter for encoding.
- */
-defaultCodec.PostScript = new Ascii85({
-  delimiter: true
-});
-
-/**
- * Ascii85 codec constructor.
- */
-defaultCodec.Ascii85 = Ascii85;
-
-}).call(this,require("buffer").Buffer)
-},{"buffer":65}],47:[function(require,module,exports){
 /**
  * cuid.js
  * Collision-resistant UID generator for browsers and node.
@@ -7617,7 +7236,7 @@ cuid.fingerprint = fingerprint;
 
 module.exports = cuid;
 
-},{"./lib/fingerprint.js":48,"./lib/pad.js":49}],48:[function(require,module,exports){
+},{"./lib/fingerprint.js":47,"./lib/pad.js":48}],47:[function(require,module,exports){
 var pad = require('./pad.js');
 
 var env = typeof window === 'object' ? window : self;
@@ -7631,13 +7250,13 @@ module.exports = function fingerprint () {
   return clientId;
 };
 
-},{"./pad.js":49}],49:[function(require,module,exports){
+},{"./pad.js":48}],48:[function(require,module,exports){
 module.exports = function pad (num, size) {
   var s = '000000000' + num;
   return s.substr(s.length - size);
 };
 
-},{}],50:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 /**
    ________________________________________________________________________________
    
@@ -7775,7 +7394,7 @@ class AceBaseBase extends EventEmitter {
 }
 
 module.exports = { AceBaseBase, AceBaseSettings };
-},{"./data-reference":52,"./debug":54,"./type-mappings":61,"events":68}],51:[function(require,module,exports){
+},{"./data-reference":52,"./debug":54,"./type-mappings":61,"events":68}],50:[function(require,module,exports){
 
 class Api {
     // interface for local and web api's
@@ -7802,6 +7421,76 @@ class Api {
 }
 
 module.exports = { Api };
+},{}],51:[function(require,module,exports){
+const c = function(input, length, result) {
+    var i, j, n, b = [0, 0, 0, 0, 0];
+    for(i = 0; i < length; i += 4){
+        n = ((input[i] * 256 + input[i+1]) * 256 + input[i+2]) * 256 + input[i+3];
+        if(!n){
+            result.push("z");
+        }else{
+            for(j = 0; j < 5; b[j++] = n % 85 + 33, n = Math.floor(n / 85));
+        }
+        result.push(String.fromCharCode(b[4], b[3], b[2], b[1], b[0]));
+    }
+}
+
+const ascii85 = {
+    encode: function(arr) {
+        // summary: encodes input data in ascii85 string
+        // input: ArrayLike
+        if (arr instanceof ArrayBuffer) {
+            arr = new Uint8Array(arr, 0, arr.byteLength);
+        }
+        var input = arr;
+        var result = [], remainder = input.length % 4, length = input.length - remainder;
+        c(input, length, result);
+        if(remainder){
+            var t = new Uint8Array(4);
+            t.set(input.slice(length), 0);
+            c(t, 4, result);
+            var x = result.pop();
+            if(x == "z"){ x = "!!!!!"; }
+            result.push(x.substr(0, remainder + 1));
+        }
+        var ret = result.join("");	// String
+        ret = '<~' + ret + '~>';
+        return ret;
+    },
+    decode: function(input) {
+        // summary: decodes the input string back to an ArrayBuffer
+        // input: String: the input string to decode
+        if (!input.startsWith('<~') || !input.endsWith('~>')) {
+            throw new Error('Invalid input string');
+        }
+        input = input.substr(2, input.length-4);
+        var n = input.length, r = [], b = [0, 0, 0, 0, 0], i, j, t, x, y, d;
+        for(i = 0; i < n; ++i) {
+            if(input.charAt(i) == "z"){
+                r.push(0, 0, 0, 0);
+                continue;
+            }
+            for(j = 0; j < 5; ++j){ b[j] = input.charCodeAt(i + j) - 33; }
+            d = n - i;
+            if(d < 5){
+                for(j = d; j < 4; b[++j] = 0);
+                b[d] = 85;
+            }
+            t = (((b[0] * 85 + b[1]) * 85 + b[2]) * 85 + b[3]) * 85 + b[4];
+            x = t & 255;
+            t >>>= 8;
+            y = t & 255;
+            t >>>= 8;
+            r.push(t >>> 8, t & 255, y, x);
+            for(j = d; j < 5; ++j, r.pop());
+            i += 4;
+        }
+        const data = new Uint8Array(r);
+        return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    }
+};
+
+module.exports = ascii85;
 },{}],52:[function(require,module,exports){
 const { DataSnapshot } = require('./data-snapshot');
 const { EventStream, EventPublisher } = require('./subscription');
@@ -8676,7 +8365,7 @@ class ID {
 }
 
 module.exports = { ID };
-},{"cuid":47}],56:[function(require,module,exports){
+},{"cuid":46}],56:[function(require,module,exports){
 const { AceBaseBase, AceBaseSettings } = require('./acebase-base');
 const { Api } = require('./api');
 const { DataReference, DataReferenceQuery, DataRetrievalOptions, QueryDataRetrievalOptions } = require('./data-reference');
@@ -8689,6 +8378,7 @@ const Transport = require('./transport');
 const { TypeMappings, TypeMappingOptions } = require('./type-mappings');
 const Utils = require('./utils');
 const { PathInfo } = require('./path-info');
+const ascii85 = require('./ascii85');
 
 module.exports = {
     AceBaseBase, AceBaseSettings,
@@ -8702,9 +8392,10 @@ module.exports = {
     Transport,
     TypeMappings, TypeMappingOptions,
     Utils,
-    PathInfo
+    PathInfo,
+    ascii85
 };
-},{"./acebase-base":50,"./api":51,"./data-reference":52,"./data-snapshot":53,"./debug":54,"./id":55,"./path-info":57,"./path-reference":58,"./subscription":59,"./transport":60,"./type-mappings":61,"./utils":62}],57:[function(require,module,exports){
+},{"./acebase-base":49,"./api":50,"./ascii85":51,"./data-reference":52,"./data-snapshot":53,"./debug":54,"./id":55,"./path-info":57,"./path-reference":58,"./subscription":59,"./transport":60,"./type-mappings":61,"./utils":62}],57:[function(require,module,exports){
 
 /**
  * 
@@ -8951,6 +8642,7 @@ class PathInfo {
      * @returns {boolean}
      */
     equals(otherPath) {
+        if (this.path === otherPath) { return true; } // they are identical
         const keys = getPathKeys(this.path);
         const otherKeys = getPathKeys(otherPath);
         if (keys.length !== otherKeys.length) { return false; }
@@ -9006,6 +8698,7 @@ class PathInfo {
      * @returns {boolean}
      */
     isChildOf(otherPath) {
+        if (this.path === '') { return false; } // If our path is the root, it's nobody's child...
         const parentInfo = PathInfo.get(this.parentPath);
         return parentInfo.equals(otherPath);
     }
@@ -9016,6 +8709,7 @@ class PathInfo {
      * @returns {boolean}
      */
     isParentOf(otherPath) {
+        if (otherPath === '') { return false; } // If the other path is the root, this path cannot be its parent...
         const parentInfo = PathInfo.get(PathInfo.get(otherPath).parentPath);
         return parentInfo.equals(this.path);
     }
@@ -9195,7 +8889,12 @@ class EventStream {
          */
         const publish = (val) => {
             subscribers.forEach(sub => {
-                sub.callback(val);
+                try {
+                    sub.callback(val);
+                }
+                catch(err) {
+                    debug.error(`Error running subscriber callback: ${err.message}`);
+                }
             });
             return subscribers.length > 0;
         };
@@ -9228,11 +8927,10 @@ class EventStream {
 
 module.exports = { EventStream, EventPublisher, EventSubscription };
 },{}],60:[function(require,module,exports){
-(function (Buffer){
 const { PathReference } = require('./path-reference');
 //const { DataReference } = require('./data-reference');
 const { cloneObject } = require('./utils');
-const ascii85 = require('ascii85');
+const ascii85 = require('./ascii85');
 
 module.exports = {
     deserialize(data) {
@@ -9246,13 +8944,7 @@ module.exports = {
             }
             else if (type === "binary") {
                 // ascii85 encoded binary data
-                const buffer = ascii85.decode(val);
-                const ab = new ArrayBuffer(buffer.length);
-                const view = new Uint8Array(ab);
-                for (var i = 0; i < buffer.length; ++i) {
-                    view[i] = buffer[i];
-                }
-                return ab; //buffer.buffer.slice(buffer.byteOffset, buffer.byteLength);
+                return ascii85.decode(val);
             }
             else if (type === "reference") {
                 return new PathReference(val);
@@ -9307,7 +8999,7 @@ module.exports = {
                 }
                 else if (val instanceof ArrayBuffer) {
                     // Serialize binary data with ascii85
-                    obj[key] = ascii85.encode(Buffer.from(val)).toString();
+                    obj[key] = ascii85.encode(val); //ascii85.encode(Buffer.from(val)).toString();
                     mappings[path] = "binary";
                 }
                 else if (val instanceof PathReference) {
@@ -9327,8 +9019,7 @@ module.exports = {
         };
     }        
 };
-}).call(this,require("buffer").Buffer)
-},{"./path-reference":58,"./utils":62,"ascii85":46,"buffer":65}],61:[function(require,module,exports){
+},{"./ascii85":51,"./path-reference":58,"./utils":62}],61:[function(require,module,exports){
 const { cloneObject } = require('./utils');
 const { PathInfo } = require('./path-info');
 const { AceBaseBase } = require('./acebase-base');
@@ -9671,7 +9362,8 @@ module.exports = {
     TypeMappingOptions
 }
 
-},{"./acebase-base":50,"./data-reference":52,"./data-snapshot":53,"./path-info":57,"./utils":62}],62:[function(require,module,exports){
+},{"./acebase-base":49,"./data-reference":52,"./data-snapshot":53,"./path-info":57,"./utils":62}],62:[function(require,module,exports){
+(function (Buffer){
 const { PathReference } = require('./path-reference');
 
 function numberToBytes(number) {
@@ -9694,6 +9386,162 @@ function bytesToNumber(bytes) {
     const view = new DataView(bin.buffer);
     const nr = view.getFloat64(0);
     return nr;
+}
+
+/**
+ * Converts a string to a utf-8 encoded Uint8Array
+ * @param {string} str 
+ * @returns {Uint8Array}
+ */
+function encodeString(str) {
+    if (typeof TextEncoder !== 'undefined') {
+        // Modern browsers, Node.js v11.0.0+ (or v8.3.0+ with util.TextEncoder)
+        const encoder = new TextEncoder();
+        return encoder.encode(str);
+    }
+    else if (typeof Buffer === 'function') {
+        // Node.js
+        const buf = Buffer.from(str, 'utf-8');
+        return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    }
+    else {
+        // Older browsers. Manually encode
+        let arr = [];
+        for (let i = 0; i < str.length; i++) {
+            let code = str.charCodeAt(i);
+            if (code > 128) {
+                // Attempt simple UTF-8 conversion. See https://en.wikipedia.org/wiki/UTF-8
+                if ((code & 0xd800) === 0xd800) {
+                    // code starts with 1101 10...: this is a 2-part utf-16 char code
+                    const nextCode = str.charCodeAt(i+1);
+                    if ((nextCode & 0xdc00) !== 0xdc00) {
+                        // next code must start with 1101 11...
+                        throw new Error('follow-up utf-16 character does not start with 0xDC00');
+                    }
+                    i++;
+                    const p1 = code & 0x3ff; // Only use last 10 bits
+                    const p2 = nextCode & 0x3ff;
+                    // Create code point from these 2: (see https://en.wikipedia.org/wiki/UTF-16)
+                    code = 0x10000 | (p1 << 10) | p2;
+                }
+                if (code < 2048) {
+                    // Use 2 bytes for 11 bit value, first byte starts with 110xxxxx (0xc0), 2nd byte with 10xxxxxx (0x80)
+                    const b1 = 0xc0 | ((code >> 6) & 0x1f); // 0xc0 = 11000000, 0x1f = 11111
+                    const b2 = 0x80 | (code & 0x3f); // 0x80 = 10000000, 0x3f = 111111
+                    arr.push(b1, b2);
+                }
+                else if (code < 65536) {
+                    // Use 3 bytes for 16-bit value, bits per byte: 4, 6, 6
+                    const b1 = 0xe0 | ((code >> 12) & 0xf); // 0xe0 = 11100000, 0xf = 1111
+                    const b2 = 0x80 | ((code >> 6) & 0x3f); // 0x80 = 10000000, 0x3f = 111111
+                    const b3 = 0x80 | (code & 0x3f);
+                    arr.push(b1, b2, b3);
+                }
+                else if (code < 2097152) {
+                    // Use 4 bytes for 21-bit value, bits per byte: 3, 6, 6, 6
+                    const b1 = 0xf0 | ((code >> 18) & 0x7); // 0xf0 = 11110000, 0x7 = 111
+                    const b2 = 0x80 | ((code >> 12) & 0x3f); // 0x80 = 10000000, 0x3f = 111111
+                    const b3 = 0x80 | ((code >> 6) & 0x3f); // 0x80 = 10000000, 0x3f = 111111
+                    const b4 = 0x80 | (code & 0x3f);
+                    arr.push(b1, b2, b3, b4);                    
+                }
+                else {
+                    throw new Error(`Cannot convert character ${str.charAt(i)} (code ${code}) to utf-8`)
+                }
+            }
+            else {
+                arr.push(code < 128 ? code : 63); // 63 = ?
+            }
+        }
+        return new Uint8Array(arr);
+    }
+}
+
+/**
+ * Converts a utf-8 encoded buffer to string
+ * @param {ArrayBuffer|Buffer|Uint8Array|number[]} buffer 
+ * @returns {string}
+ */
+function decodeString(buffer) {
+    if (typeof TextDecoder !== 'undefined') {
+        // Modern browsers, Node.js v11.0.0+ (or v8.3.0+ with util.TextDecoder)
+        const decoder = new TextDecoder();
+        if (buffer instanceof Uint8Array) {
+            return decoder.decode(buffer);
+        }
+        const buf = Uint8Array.from(buffer);
+        return decoder.decode(buf);
+    }
+    else if (typeof Buffer === 'function') {
+        // Node.js
+        if (buffer instanceof Buffer) { 
+            return buffer.toString('utf-8'); 
+        }
+        else if (buffer instanceof Array) {
+            const typedArray = Uint8Array.from(buffer);
+            const buf = Buffer.from(typedArray.buffer, typedArray.byteOffset, typedArray.byteOffset + typedArray.byteLength);
+            return buf.toString('utf-8');
+        }
+        else if ('buffer' in buffer && buffer['buffer'] instanceof ArrayBuffer) {
+            const buf = Buffer.from(buffer['buffer'], buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+            return buf.toString('utf-8');
+        }
+        else {
+            throw new Error(`Unsupported buffer argument`);
+        }
+    }
+    else {
+        // Older browsers. Manually decode!
+        if (!(buffer instanceof Uint8Array) && 'buffer' in buffer && buffer['buffer'] instanceof ArrayBuffer) {
+            // Convert TypedArray to Uint8Array
+            buffer = new Uint8Array(buffer['buffer'], buffer.byteOffset, buffer.byteLength);
+        }
+        if (buffer instanceof Buffer || buffer instanceof Array || buffer instanceof Uint8Array) {
+            let str = '';
+            for (let i = 0; i < buffer.length; i++) {
+                let code = buffer[i];
+                if (code > 128) {
+                    // Decode Unicode character
+                    if ((code & 0xf0) === 0xf0) {
+                        // 4 byte char
+                        const b1 = code, b2 = buffer[i+1], b3 = buffer[i+2], b4 = buffer[i+3];
+                        code = ((b1 & 0x7) << 18) | ((b2 & 0x3f) << 12) | ((b3 & 0x3f) << 6) | (b4 & 0x3f);
+                        i += 3;
+                    }
+                    else if ((code & 0xe0) === 0xe0) {
+                        // 3 byte char
+                        const b1 = code, b2 = buffer[i+1], b3 = buffer[i+2];
+                        code = ((b1 & 0xf) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+                        i += 2;
+                    }
+                    else if ((code & 0xc0) === 0xc0) {
+                        // 2 byte char
+                        const b1 = code, b2 = buffer[i+1];
+                        code = ((b1 & 0x1f) << 6) | (b2 & 0x3f);
+                        i++;
+                    }
+                    else {
+                        throw new Error(`invalid utf-8 data`);
+                    }
+                }
+                if (code >= 65536) {
+                    // Split into 2-part utf-16 char codes
+                    code ^= 0x10000;
+                    const p1 = 0xd800 | (code >> 10);
+                    const p2 = 0xdc00 | (code & 0x3ff);
+                    str += String.fromCharCode(p1);
+                    str += String.fromCharCode(p2);
+                }
+                else {
+                    str += String.fromCharCode(code);
+                }
+            }
+            return str;
+        }
+        else {
+            throw new Error(`Unsupported buffer argument`);
+        }
+    }
 }
 
 function concatTypedArrays(a, b) {
@@ -9823,10 +9671,13 @@ module.exports = {
     // getPathInfo,
     // getChildPath,
     compareValues,
-    getChildValues
+    getChildValues,
+    encodeString,
+    decodeString
 };
 
-},{"./data-snapshot":53,"./path-reference":58}],63:[function(require,module,exports){
+}).call(this,require("buffer").Buffer)
+},{"./data-snapshot":53,"./path-reference":58,"buffer":65}],63:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength

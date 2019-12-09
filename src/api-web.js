@@ -12,11 +12,11 @@ class AceBaseRequestError extends Error {
     }
 }
 
-const _request = (method, url, postData, accessToken) => {
+const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
     return new Promise((resolve, reject) => {
         let endpoint = URL.parse(url);
 
-        if (typeof postData === 'undefined') {
+        if (typeof postData === 'undefined' || postData === null) {
             postData = '';
         }
         else if (typeof postData === 'object') {
@@ -39,7 +39,12 @@ const _request = (method, url, postData, accessToken) => {
         const req = http.request(options, res => {
             res.setEncoding("utf8");
             let data = '';
-            res.on('data', chunk => { data += chunk; });
+            if (typeof dataReceivedCallback === 'function') {
+                res.on('data', dataReceivedCallback);
+            }
+            else {
+                res.on('data', chunk => { data += chunk; });
+            }
             res.on('end', () => {
                 if (res.statusCode === 200) {
                     if (data[0] === '{') {
@@ -274,9 +279,9 @@ class WebApi extends Api {
             });
         };
 
-        this._request = (method, url, data) => {
+        this._request = (method, url, data, dataReceivedCallback) => {
             if (this._connected) { 
-                return _request(method, url, data, accessToken)
+                return _request(method, url, data, accessToken, dataReceivedCallback)
                 .catch(err => {
                     throw err;
                 }); 
@@ -481,11 +486,24 @@ class WebApi extends Api {
             if (query.length > 0) {
                 url += `&${query.join('&')}`;
             }
-        }        
+        }
         return this._request("GET", url)
         .catch(err => {
             throw err;
         }); 
+    }
+
+    export(path, stream, options = { format: 'json' }) {
+        options = options || {};
+        options.format = 'json';
+        let url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}`;
+        return this._request("GET", url, null, chunk => stream.write(chunk))
+        // .then(json => {
+        //     return stream.write(json);
+        // })
+        .catch(err => {
+            throw err;
+        });
     }
 }
 

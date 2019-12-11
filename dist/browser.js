@@ -6331,11 +6331,11 @@ class AceBaseRequestError extends Error {
     }
 }
 
-const _request = (method, url, postData, accessToken) => {
+const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
     return new Promise((resolve, reject) => {
         let endpoint = URL.parse(url);
 
-        if (typeof postData === 'undefined') {
+        if (typeof postData === 'undefined' || postData === null) {
             postData = '';
         }
         else if (typeof postData === 'object') {
@@ -6358,7 +6358,12 @@ const _request = (method, url, postData, accessToken) => {
         const req = http.request(options, res => {
             res.setEncoding("utf8");
             let data = '';
-            res.on('data', chunk => { data += chunk; });
+            if (typeof dataReceivedCallback === 'function') {
+                res.on('data', dataReceivedCallback);
+            }
+            else {
+                res.on('data', chunk => { data += chunk; });
+            }
             res.on('end', () => {
                 if (res.statusCode === 200) {
                     if (data[0] === '{') {
@@ -6593,9 +6598,9 @@ class WebApi extends Api {
             });
         };
 
-        this._request = (method, url, data) => {
+        this._request = (method, url, data, dataReceivedCallback) => {
             if (this._connected) { 
-                return _request(method, url, data, accessToken)
+                return _request(method, url, data, accessToken, dataReceivedCallback)
                 .catch(err => {
                     throw err;
                 }); 
@@ -6800,11 +6805,24 @@ class WebApi extends Api {
             if (query.length > 0) {
                 url += `&${query.join('&')}`;
             }
-        }        
+        }
         return this._request("GET", url)
         .catch(err => {
             throw err;
         }); 
+    }
+
+    export(path, stream, options = { format: 'json' }) {
+        options = options || {};
+        options.format = 'json';
+        let url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}`;
+        return this._request("GET", url, null, chunk => stream.write(chunk))
+        // .then(json => {
+        //     return stream.write(json);
+        // })
+        .catch(err => {
+            throw err;
+        });
     }
 }
 
@@ -7741,7 +7759,7 @@ class DataReference {
         /** @type {EventPublisher} */
         let eventPublisher = null;
         const eventStream = new EventStream(publisher => { eventPublisher = publisher });
-        
+
         // Map OUR callback to original callback, so .off can remove the right callback
         let cb = { 
             subscr: eventStream,
@@ -7779,12 +7797,15 @@ class DataReference {
         this[_private].callbacks.push(cb);
 
         let authorized = this.db.api.subscribe(this.path, event, cb.ours);
+        const allSubscriptionsStoppedCallback = () => {
+            this.db.api.unsubscribe(this.path, event, cb.ours);
+        };
         if (authorized instanceof Promise) {
             // Web API now returns a promise that resolves if the request is allowed
             // and rejects when access is denied by the set security rules
             authorized.then(() => {
                 // Access granted
-                eventPublisher.start();
+                eventPublisher.start(allSubscriptionsStoppedCallback);
             })
             .catch(err => {
                 // Access denied?
@@ -7800,7 +7821,7 @@ class DataReference {
         }
         else {
             // Local API, always authorized
-            eventPublisher.start();
+            eventPublisher.start(allSubscriptionsStoppedCallback);
         }
 
         if (callback && !this.isWildcardPath) {
@@ -7991,6 +8012,10 @@ class DataReference {
             throw new Error(`Cannot reflect on a path with wildcards and/or variables`);
         }
         return this.db.api.reflect(this.path, type, args);
+    }
+
+    export(stream, options = { format: 'json' }) {
+        return this.db.api.export(this.path, stream, options);
     }
 } 
 
@@ -8762,17 +8787,6 @@ class EventSubscription {
         // Changed behaviour: now also returns a Promise when the callback is used.
         // This allows for 1 activated call to both handle: first activation result, 
         // and any future events using the callback
-
-        // if (this._internal.state === 'active') {
-        //     return Promise.resolve();
-        // }
-        // else if (this._internal.state === 'canceled') {
-        //     if (callback) { 
-        //         // Do not reject when callback is used
-        //         return new Promise(() => {}); 
-        //     }
-        //     return Promise.reject(new Error(this._internal.cancelReason));
-        // }
         return new Promise((resolve, reject) => { 
             if (this._internal.state === 'active') { 
                 return resolve(); 
@@ -8826,7 +8840,9 @@ class EventStream {
      */
     constructor(eventPublisherCallback) {
         const subscribers = [];
+        let noMoreSubscribersCallback;
         let activationState;
+        const _stoppedState = 'stopped (no more subscribers)';
 
         /**
          * Subscribe to new value events in the stream
@@ -8838,6 +8854,9 @@ class EventStream {
             if (typeof callback !== "function") {
                 throw new TypeError("callback must be a function");
             }
+            else if (activationState === _stoppedState) {
+                throw new Error("stream can't be used anymore because all subscribers were stopped");
+            }
 
             const sub = {
                 callback,
@@ -8848,8 +8867,9 @@ class EventStream {
                 // stop() {
                 //     subscribers.splice(subscribers.indexOf(this), 1);
                 // },
-                subscription: new EventSubscription(function() {
+                subscription: new EventSubscription(function stop() {
                     subscribers.splice(subscribers.indexOf(this), 1);
+                    checkActiveSubscribers();
                 })
             };
             subscribers.push(sub);
@@ -8867,6 +8887,13 @@ class EventStream {
             return sub.subscription;
         };
 
+        const checkActiveSubscribers = () => {
+            if (subscribers.length === 0) {
+                noMoreSubscribersCallback && noMoreSubscribersCallback();
+                activationState = _stoppedState;
+            }
+        };
+
         /**
          * Stops monitoring new value events
          * @param {function} callback | (optional) specific callback to remove. Will remove all callbacks when omitted
@@ -8879,8 +8906,14 @@ class EventStream {
                 const i = subscribers.indexOf(sub);
                 subscribers.splice(i, 1);
             });
+            checkActiveSubscribers();
         };
 
+        this.stop = () => {
+            // Stop (remove) all subscriptions
+            subscribers.splice(0);
+            checkActiveSubscribers();
+        }
 
         /**
          * For publishing side: adds a value that will trigger callbacks to all subscribers
@@ -8902,8 +8935,9 @@ class EventStream {
         /**
          * For publishing side: let subscribers know their subscription is activated. Should be called only once
          */
-        const start = () => {
+        const start = (allSubscriptionsStoppedCallback) => {
             activationState = true;
+            noMoreSubscribersCallback = allSubscriptionsStoppedCallback;
             subscribers.forEach(sub => {
                 sub.activationCallback && sub.activationCallback(true);
             });

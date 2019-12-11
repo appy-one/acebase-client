@@ -24,7 +24,8 @@ Use the following code the connect to an AceBase webserver:
 
 ```javascript
 const dbname = 'mydb';
-const db = new AceBaseClient(dbname, "localhost", 5757);
+const https = false;
+const db = new AceBaseClient("localhost", 5757, dbname, https);
 db.ready(() => {
     console.log("Connected successfully");
 });

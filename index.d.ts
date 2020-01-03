@@ -1,12 +1,29 @@
 import * as acebasecore from 'acebase-core';
 
+export interface AceBaseClientConnectionSettings {
+    dbname: string
+    host: string
+    port: number
+    https?: boolean
+    autoConnect?: boolean
+    cache?: { db: acebasecore.AceBaseBase }
+    logLevel?: 'verbose'|'log'|'warn'|'error'
+}
+
 /**
  * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
  */
 export class AceBaseClient extends acebasecore.AceBaseBase {
+    constructor(settings: AceBaseClientConnectionSettings);
+    /**
+     * DEPRECATED: Use new AceBaseClient(settings: AceBaseClientConnectionSettings) constructor
+     * @deprecated use new constructor
+     */
     constructor(host: string, port: number, dbname: string, https?: boolean);
     readonly auth: AceBaseClientAuth
     readonly connected: boolean
+    connect(): void
+    disconnect(): void
 }
 
 export class AceBaseClientAuth {

@@ -461,7 +461,7 @@ class WebApi extends Api {
                     eventCallback && eventCallback('sync_change_error', change);
                     // Delete the change and cached data
                     cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                    cacheApi.set(`${this.dbname}/cache/${data.path}`, null);
+                    cacheApi.set(`${this.dbname}/cache/${change.data.path}`, null);
                 });
             });
             totalPendingChanges = updates.length;

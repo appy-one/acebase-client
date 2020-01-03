@@ -6266,9 +6266,38 @@ yeast.decode = decode;
 module.exports = yeast;
 
 },{}],40:[function(require,module,exports){
-const { AceBaseBase } = require('acebase-core');
+const { AceBaseBase, DebugLogger } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
+
+class AceBaseClientConnectionSettings {
+
+    /**
+     * Settings to connect to a remote AceBase server
+     * @param {object} settings 
+     * @param {string} settings.dbname Name of the database you want to access
+     * @param {string} settings.host Host name, eg "localhost", or "mydb.domain.com"
+     * @param {number} settings.port Port number the server is running on
+     * @param {boolean} [settings.https=true] Use SSL (https) to access the server or not. Default: true
+     * @param {boolean} [settings.autoConnect=true] Automatically connect to the server, or wait until .connect is called
+     * @param {object} [settings.cache] Settings for local cache
+     * @param {AceBase} [settings.cache.db] AceBase database instance to use for local cache
+     * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
+     * 
+     */
+    constructor(settings) {
+        this.dbname = settings.dbname;
+        this.host = settings.host;
+        this.port = settings.port;
+        this.https = typeof settings.https === 'boolean' ? settings.https : true;
+        this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' && settings.cache.db.constructor.name.startsWith('AceBase') ? {} : null;
+        this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
+        if (this.cache) {
+            this.cache.db = settings.cache.db;
+        }
+    }
+}
 
 /**
  * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
@@ -6278,24 +6307,78 @@ class AceBaseClient extends AceBaseBase {
 
     /**
      * Create a client to access an AceBase server
-     * @param {string} host Host name, eg "localhost", or "mydb.domain.com"
-     * @param {number} port Port number the server is running on
-     * @param {string} dbname Name of the database you want to access
-     * @param {boolean} https Use SSL (https) to access the server or not. Default: true
+     * @param {AceBaseClientConnectionSettings} settings
      */
-    constructor(host, port, dbname, https = true) {
-        super(dbname, {});
+    constructor(settings) {
+        if (typeof settings !== 'object') {
+            // Use old constructor signature: host, port, dbname, https = true
+            settings = {};
+            settings.host = arguments[0];
+            settings.port = arguments[1];
+            settings.dbname = arguments[2];
+            settings.https = arguments[3];
+        }
+        if (!(settings instanceof AceBaseClientConnectionSettings)) {
+            settings = new AceBaseClientConnectionSettings(settings);
+        }
+        super(settings.dbname, {});
         let ready = false;
         this._connected = false;
-        this.api = new WebApi(dbname, { url: `http${https ? 's' : ''}://${host}:${port}` }, evt => {
+        this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.blue); // `[ ${settings.dbname} ]`
+
+        if (settings.cache) {
+            const cacheDb = settings.cache.db;
+            const syncPendingChanges = () => {
+                if (!this._connected) {
+                    // Retry once connected
+                    return this.once('connect', syncPendingChanges);
+                }
+                return this.api.sync((eventName, args) => {
+                    this.debug.log(eventName, args || '');
+                    this.emit('cache_sync_event', { name: eventName, args });
+                })
+                .catch(err => {
+                    // Sync failed for some reason
+                    if (!this._connected) {
+                        syncPendingChanges(); // Retries once connected
+                    }
+                });
+            }
+            const remoteConnectPromise = promiseTimeout(
+                1000, 
+                new Promise(resolve => this.once('connect', resolve)), 
+                'remote connection'
+            );
+            cacheDb.ready(() => {
+                // Cache database is ready. Is remote database ready?
+                return remoteConnectPromise
+                .catch(err => {
+                    // If the connect promise timed out, we'll emit the ready event and use the cache.
+                    // Any other error should halt execution
+                    if (!(err instanceof PromiseTimeoutError)) {
+                        this.debug.error(`Error: ${err.message}`);
+                        throw err;
+                    }
+                })
+                .then(() => {
+                    return syncPendingChanges();
+                })
+                .then(() => {
+                    this.emit('ready');
+                });
+            });
+        }
+
+        this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, cache: settings.cache }, evt => {
             if (evt === 'connect') {
                 this._connected = true;
-                if (!ready) { 
-                    ready = true; 
-                    this.emit('ready');
-                }
-                else {
-                    this.emit('connect');
+                this.emit('connect');
+                if (!ready) {
+                    ready = true;
+                    // If no local cache is used, we can emit the ready event now.
+                    if (!settings.cache) {
+                        this.emit('ready');
+                    }
                 }
             }
             else if (evt === 'disconnect') {
@@ -6312,12 +6395,44 @@ class AceBaseClient extends AceBaseBase {
         return this._connected;
     }
 
+    connect() {
+        this.api.connect();
+    }
+
+    disconnect() {
+        this.api.disconnect();
+    }
+
 }
 
-module.exports = { AceBaseClient };
+class PromiseTimeoutError extends Error {}
+function promiseTimeout(ms, promise, comment) {
+    let id;
+    if (!promise) { promise = new Promise(() => { /* never resolves */}); }
+    let timeout = new Promise((resolve, reject) => {
+      id = setTimeout(() => {
+        reject(new PromiseTimeoutError(`Promise timed out after ${ms}ms: ${comment}`))
+      }, ms)
+    })
+  
+    return Promise.race([
+      promise,
+      timeout
+    ])
+    .then((result) => {
+      clearTimeout(id)
+  
+      /**
+       * ... we also need to pass the result back
+       */
+      return result
+    })
+}
+
+module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
 },{"./api-web":41,"./auth":42,"acebase-core":56}],41:[function(require,module,exports){
 (function (Buffer){
-const { Api, Transport, debug, ID } = require('acebase-core');
+const { Api, Transport, DebugLogger, ID } = require('acebase-core');
 const http = require('http');
 const URL = require('url');
 const connectSocket = require('socket.io-client');
@@ -6435,86 +6550,100 @@ const _websocketRequest = (socket, event, data, accessToken) => {
 }
 
 /**
- * Api to connect to a remote AceBase instance over http
+ * Api to connect to a remote AceBase server over http(s)
  */
 class WebApi extends Api {
+
     constructor(dbname = "default", settings, eventCallback) {
         // operations are done through http calls,
         // events are triggered through a websocket
         super();
 
         this.url = settings.url;
+        const autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.dbname = dbname;
         this._connected = false;
+        this._cache = settings.cache;
+        this.debug = settings.debug;
 
-        debug.log(`Connecting to AceBase server "${this.url}"`);
+        this.debug.log(`Connecting to AceBase server "${this.url}"`);
         if (!this.url.startsWith('https')) {
-            console.error(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`)
+            this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.red)
         }
 
         let subscriptions = {};
         let accessToken;
-        const socket = this.socket = connectSocket(this.url);
-        
-        socket.on("connect_error", (data) => {
-            debug.error(`Websocket connection error: ${data}`);
-            //debug.error(data);
-        });
 
-        socket.on("connect_timeout", (data) => {
-            debug.error(`Websocket connection timeout`);
-            //debug.error(data);
-        });
-
-        // socket.on("disconnect", (data) => {
-        //     // Try to reconnect. Should do this in a retry loop
-        //     socket.connect();
-        // });
-
-        let reconnectSubs = null;
-
-        socket.on("connect", (data) => {
-            this._connected = true;
-            eventCallback && eventCallback('connect');
-
-            // Sign in again
-            let signInPromise = Promise.resolve();
-            if (accessToken) {
-                signInPromise = this.signInWithToken(accessToken);
+        this.connect = () => {
+            if (typeof this.socket === 'object') {
+                this.socket.disconnect();
             }
-            signInPromise.then(() => {
-                // Resubscribe to any active subscriptions
-                if (reconnectSubs === null) { return; }
-                Object.keys(reconnectSubs).forEach(path => {
-                    reconnectSubs[path].forEach(subscr => {
-                        this.subscribe(subscr.path, subscr.event, subscr.callback);
-                    });
-                });
-                reconnectSubs = null;
+            const socket = this.socket = connectSocket(this.url);
+
+            socket.on("connect_error", (data) => {
+                this.debug.error(`Websocket connection error: ${data}`);
             });
-        });
 
-        socket.on("disconnect", (data) => {
-            this._connected = false;
-            eventCallback && eventCallback('disconnect');
-            reconnectSubs = subscriptions;
-            subscriptions = {};
-        });
+            socket.on("connect_timeout", (data) => {
+                this.debug.error(`Websocket connection timeout`);
+            });
 
-        socket.on("data-event", data => {
-            const pathSubs = subscriptions[data.subscr_path];
-            if (!pathSubs) {
-                // weird. we are not subscribed on this path?
-                debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
-                return;
-            }
-            pathSubs.forEach(subscr => {
-                if (subscr.event === data.event) {
-                    let val = Transport.deserialize(data.val);
-                    subscr.callback(null, data.path, val.current, val.previous);
+            let reconnectSubs = null;
+
+            socket.on("connect", (data) => {
+                this._connected = true;
+                eventCallback && eventCallback('connect');
+
+                // Sign in again
+                let signInPromise = Promise.resolve();
+                if (accessToken) {
+                    signInPromise = this.signInWithToken(accessToken);
                 }
+                signInPromise.then(() => {
+                    // Resubscribe to any active subscriptions
+                    if (reconnectSubs === null) { return; }
+                    Object.keys(reconnectSubs).forEach(path => {
+                        reconnectSubs[path].forEach(subscr => {
+                            this.subscribe(subscr.path, subscr.event, subscr.callback);
+                        });
+                    });
+                    reconnectSubs = null;
+                });
             });
-        });
+
+            socket.on("disconnect", (data) => {
+                this._connected = false;
+                eventCallback && eventCallback('disconnect');
+                reconnectSubs = subscriptions;
+                subscriptions = {};
+            });
+
+            socket.on("data-event", data => {
+                const pathSubs = subscriptions[data.subscr_path];
+                if (!pathSubs) {
+                    // weird. we are not subscribed on this path?
+                    this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
+                    return;
+                }
+                pathSubs.forEach(subscr => {
+                    if (subscr.event === data.event) {
+                        let val = Transport.deserialize(data.val);
+                        subscr.callback(null, data.path, val.current, val.previous);
+                    }
+                });
+            });
+        };
+
+        if (autoConnect) {
+            this.connect();
+        }
+
+        this.disconnect = () => {
+            if (typeof this.socket === 'object') {
+                this.socket.disconnect();
+                this.socket = null;
+            }
+        }
 
         this.subscribe = (path, event, callback) => {
             let pathSubs = subscriptions[path];
@@ -6525,7 +6654,7 @@ class WebApi extends Api {
             if (serverAlreadyNotifying) {
                 return Promise.resolve();
             }
-            return _websocketRequest(socket, "subscribe", { path, event }, accessToken);
+            return _websocketRequest(this.socket, "subscribe", { path, event }, accessToken);
         };
 
         this.unsubscribe = (path, event = undefined, callback = undefined) => {
@@ -6550,12 +6679,12 @@ class WebApi extends Api {
                 // Unsubscribe from all events on path
                 delete subscriptions[path];
                 // socket.emit("unsubscribe", { path, access_token: accessToken });
-                return _websocketRequest(socket, "unsubscribe", { path, access_token: accessToken }, accessToken);
+                return _websocketRequest(this.socket, "unsubscribe", { path, access_token: accessToken }, accessToken);
             }
             else if (pathSubs.reduce((c, subscr) => c + (subscr.event === event ? 1 : 0), 0) === 0) {
                 // No callbacks left for specific event
                 // socket.emit("unsubscribe", { path, event, access_token: accessToken });
-                return _websocketRequest(socket, "unsubscribe", { path: path, event, access_token: accessToken }, accessToken);
+                return _websocketRequest(this.socket, "unsubscribe", { path: path, event, access_token: accessToken }, accessToken);
             }
         };
 
@@ -6563,12 +6692,12 @@ class WebApi extends Api {
             const id = ID.generate();
             const startedCallback = (data) => {
                 if (data.id === id) {
-                    socket.off("tx_started", startedCallback);
+                    this.socket.off("tx_started", startedCallback);
                     const currentValue = Transport.deserialize(data.value);
                     const val = callback(currentValue);
                     const finish = (val) => {
                         const newValue = Transport.serialize(val);
-                        socket.emit("transaction", { action: "finish", id: id, path, value: newValue, access_token: accessToken });
+                        this.socket.emit("transaction", { action: "finish", id: id, path, value: newValue, access_token: accessToken });
                     };
                     if (val instanceof Promise) {
                         val.then(finish);
@@ -6581,18 +6710,18 @@ class WebApi extends Api {
             let txResolve;
             const completedCallback = (data) => {
                 if (data.id === id) {
-                    socket.off("tx_completed", completedCallback);
+                    this.socket.off("tx_completed", completedCallback);
                     txResolve(this);
                 }
             }
             const connectedCallback = () => {
-                socket.on("tx_started", startedCallback);
-                socket.on("tx_completed", completedCallback);
+                this.socket.on("tx_started", startedCallback);
+                this.socket.on("tx_completed", completedCallback);
                 // TODO: socket.on('disconnect', disconnectedCallback);
-                socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
+                this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
             };
             if (this._connected) { connectedCallback(); }
-            else { socket.on('connect', connectedCallback); }
+            else { this.socket.on('connect', connectedCallback); }
             return new Promise((resolve) => {
                 txResolve = resolve;
             });
@@ -6608,7 +6737,7 @@ class WebApi extends Api {
             else {
                 let resolve;
                 let promise = new Promise(r => resolve = r);
-                socket.on('connect', () => {
+                this.socket.on('connect', () => {
                     this._request(method, url, data)
                     .then(resolve);
                 });
@@ -6620,7 +6749,7 @@ class WebApi extends Api {
             return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password })
             .then(result => {
                 accessToken = result.access_token;
-                socket.emit("signin", accessToken);
+                this.socket.emit("signin", accessToken);
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -6632,7 +6761,7 @@ class WebApi extends Api {
             return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'email', email, password })
             .then(result => {
                 accessToken = result.access_token;
-                socket.emit("signin", accessToken);
+                this.socket.emit("signin", accessToken);
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -6644,7 +6773,7 @@ class WebApi extends Api {
             return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token })
             .then(result => {
                 accessToken = result.access_token;
-                socket.emit("signin", accessToken);
+                this.socket.emit("signin", accessToken);
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -6656,7 +6785,7 @@ class WebApi extends Api {
             if (!accessToken) { return Promise.resolve(); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, {})
             .then(() => {
-                socket.emit("signout", accessToken);
+                this.socket.emit("signout", accessToken);
                 accessToken = null;
             })
             .catch(err => {
@@ -6680,7 +6809,7 @@ class WebApi extends Api {
             return this._request("POST", `${this.url}/auth/${this.dbname}/signup`, details)
             .then(result => {
                 accessToken = result.access_token;
-                socket.emit("signin", accessToken);
+                this.socket.emit("signin", accessToken);
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -6701,7 +6830,7 @@ class WebApi extends Api {
         this.deleteAccount = (uid) => {
             return this._request("POST", `${this.url}/auth/${this.dbname}/delete`, { uid })
             .then(result => {
-                socket.emit("signout", accessToken);
+                this.socket.emit("signout", accessToken);
                 accessToken = null;
                 return true;
             })
@@ -6715,24 +6844,155 @@ class WebApi extends Api {
         return this._request("GET", `${this.url}/stats/${this.dbname}`);
     }
 
-    set(path, value) {
-        const data = JSON.stringify(Transport.serialize(value));
-        return this._request("PUT", `${this.url}/data/${this.dbname}/${path}`, data)
+    sync(eventCallback) {
+        // Sync cache
+        if (!this._connected) {
+            return Promise.reject(new Error(`remote database is not connected`));
+        }
+        if (!this._cache) {
+            return Promise.reject(new Error(`no cache database is used`));
+        }
+        if (!this._cache.db.isReady) {
+            return Promise.reject(new Error(`cache database is not ready yet`));
+        }
+
+        const handleStatsUpdateError = err => {
+            this.debug.error(`Failed to update cache db stats:`, err);
+        }
+        let totalPendingChanges = 0;
+        const cacheApi = this._cache.db.api;
+        return cacheApi.get(`${this.dbname}/pending`) //cacheDb.ref('pending_changes').get()
+        .then(pendingChanges => {
+            eventCallback && eventCallback('sync_start');            
+            cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
+            if (pendingChanges === null) {
+                return; // No updates
+            }
+            const updates = Object.keys(pendingChanges).map(id => {
+                const change = pendingChanges[id];
+                let promise;
+                if (change.type === 'update') { 
+                    promise = this.update(change.path, change.data, { allow_cache: false });
+                }
+                else if (change.type === 'set') { 
+                    promise = this.set(change.path, change.data, { allow_cache: false });
+                }
+                else {
+                    throw new Error(`unsupported change type "${change.type}"`);
+                }
+                return promise
+                .then(() => {
+                    delete pendingChanges[id];
+                    cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                })
+                .catch(err => {
+                    // Updating remote db failed
+                    if (!this._connected) {
+                        // Connection was broken, should retry later
+                        throw err;
+                    }
+                    // We are connected, so the change is not allowed or otherwise denied.
+                    eventCallback && eventCallback('sync_change_error', change);
+                    // Delete the change and cached data
+                    cacheApi.set(`${this.dbname}/pending/${id}`, null);
+                    cacheApi.set(`${this.dbname}/cache/${data.path}`, null);
+                });
+            });
+            totalPendingChanges = updates.length;
+            return Promise.all(updates);
+        })
+        .then(() => {
+            cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
+            eventCallback && eventCallback('sync_done');
+            return totalPendingChanges;
+        })
         .catch(err => {
+            // 1 or more pending changes could not be processed.
+            if (typeof err === 'string') { 
+                err = { code: 'unknown', message: err, stack: 'n/a' }; 
+            }
+            cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+            eventCallback && eventCallback('sync_error', err);
             throw err;
         });
     }
 
-    update(path, updates) {
+    set(path, value, options = { allow_cache: true }) {
+        const allowCache = options && options.allow_cache === true;
+        // let cacheUpdates;
+        // if (allowCache && this._cache) {
+        //     cacheUpdates = this._processCacheUpdate('set', path, value);
+        //     if (!this._connected) { 
+        //         // Don't try updating remote db if the websocket isn't connected
+        //         return cacheUpdates.promise;
+        //     }
+        // }
+        const cache = {
+            use: this._cache && allowCache,
+            updateValue: () => { return this._cache.db.api.set(`${this.dbname}/cache/${path}`, value); },
+            addPending: () => { const id = ID.generate(); return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value }); }
+        };
+        if (cache.use && !this._connected) {
+            // Not connected, update cache database only
+            return Promise.all([
+                cache.updateValue(),
+                cache.addPending()
+            ]);
+        }
+        const data = JSON.stringify(Transport.serialize(value));
+        return this._request("PUT", `${this.url}/data/${this.dbname}/${path}`, data)
+        .then(() => {
+            // return cacheUpdates && cacheUpdates.commit();
+            return cache.use && cache.updateValue();
+        })
+        .catch(err => {
+            // if (this._connected) {
+            //     cacheUpdates && cacheUpdates.rollback();
+            // }
+            if (cache.use && !this._connected) {
+                // It failed because we're not connected
+                return cache.addPending();
+            }
+            throw err;
+        });
+    }
+
+    update(path, updates, options = { allow_cache: true }) {
+        const allowCache = options && options.allow_cache === true;
+        const cache = {
+            use: this._cache && allowCache,
+            updateValue: () => { return this._cache.db.api.update(`${this.dbname}/cache/${path}`, updates); },
+            addPending: () => { const id = ID.generate(); return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'update', path, data: updates }); }
+        };
+        if (cache.use && !this._connected) {
+            // Not connected, update cache database only
+            return Promise.all([
+                cache.updateValue(),
+                cache.addPending()
+            ]);
+        }        
         const data = JSON.stringify(Transport.serialize(updates));
         return this._request("POST", `${this.url}/data/${this.dbname}/${path}`, data)
+        .then(res => {
+            return cache.use && cache.updateValue();
+        })
         .catch(err => {
+            if (cache.use && !this._connected) {
+                // It failed because we're not connected
+                return cache.addPending();
+            }            
             throw err;
         });
     }
   
-    get(path, options = undefined) {
+    get(path, options = { allow_cache: true }) {
+        const allowCache = options && options.allow_cache === true;
+        if (allowCache && !this._connected && this._cache) {
+            // We're offline. Try loading from cache
+            return this._cache.db.api.get(`${this.dbname}/cache/${path}`, options);
+        }
         let url = `${this.url}/data/${this.dbname}/${path}`;
+        let filtered = false;
         if (options) {
             let query = [];
             if (options.exclude instanceof Array) { 
@@ -6745,20 +7005,38 @@ class WebApi extends Api {
                 query.push(`child_objects=${options.child_objects}`);
             }
             if (query.length > 0) {
+                filtered = true;
                 url += `?${query.join('&')}`;
             }
         }
         return this._request("GET", url)
         .then(data => {
             let val = Transport.deserialize(data);
-            return val;                
+            if (this._cache) {
+                // Update cache without waiting
+                // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
+                // TODO: do update if no nested filters are used.
+                // if (filtered) {
+                //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
+                // }
+                // else if (!filtered) { 
+                if (!filtered) {
+                    this._cache.db.api.set(`${this.dbname}/cache/${path}`, val);
+                }
+            }
+            return val;
         })
         .catch(err => {
             throw err;
         });
     }
 
-    exists(path) {
+    exists(path, options = { allow_cache: true }) {
+        const allowCache = options && options.allow_cache === true;
+        if (allowCache && !this._connected && this._cache) {
+            // Not connected, peek cache
+            return this._cache.db.api.exists(`${this.dbname}/cache/${path}`);
+        }
         return this._request("GET", `${this.url}/exists/${this.dbname}/${path}`)
         .then(res => res.exists)
         .catch(err => {
@@ -6766,7 +7044,12 @@ class WebApi extends Api {
         });
     }
 
-    query(path, query, options = { snapshots: false }) {
+    query(path, query, options = { snapshots: false, allow_cache: true }) {
+        const allowCache = options && options.allow_cache === true;
+        if (allowCache && !this._connected && this._cache) {
+            // Not connected, query cache db
+            return this._cache.db.api.query(`${this.dbname}/cache/${path}`, query, options);
+        }
         const data = JSON.stringify(Transport.serialize({
             query,
             options
@@ -6817,9 +7100,6 @@ class WebApi extends Api {
         options.format = 'json';
         let url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}`;
         return this._request("GET", url, null, chunk => stream.write(chunk))
-        // .then(json => {
-        //     return stream.write(json);
-        // })
         .catch(err => {
             throw err;
         });
@@ -7293,7 +7573,6 @@ module.exports = function pad (num, size) {
 const { EventEmitter } = require('events');
 const { DataReference, DataReferenceQuery } = require('./data-reference');
 const { TypeMappings } = require('./type-mappings');
-const debug = require('./debug');
 
 class AceBaseSettings {
     constructor(options) {
@@ -7316,9 +7595,6 @@ class AceBaseBase extends EventEmitter {
         super();
 
         if (!options) { options = {}; }
-        if (options.logLevel) {
-            debug.setLevel(options.logLevel);
-        }
 
         this.once("ready", () => {
             this._ready = true;
@@ -7353,6 +7629,10 @@ class AceBaseBase extends EventEmitter {
             });
             return promise;
         }
+    }
+
+    get isReady() {
+        return this._ready === true;
     }
 
     /**
@@ -7412,7 +7692,7 @@ class AceBaseBase extends EventEmitter {
 }
 
 module.exports = { AceBaseBase, AceBaseSettings };
-},{"./data-reference":52,"./debug":54,"./type-mappings":61,"events":68}],50:[function(require,module,exports){
+},{"./data-reference":52,"./type-mappings":61,"events":68}],50:[function(require,module,exports){
 
 class Api {
     // interface for local and web api's
@@ -7612,7 +7892,8 @@ class DataReference {
      * @type {DataReference}
      */
     get parent() {
-        const info = PathInfo.get(this.path);
+        let currentPath = PathInfo.fillVariables2(this.path, this.vars);
+        const info = PathInfo.get(currentPath);
         if (info.parentPath === null) {
             return null;
         }
@@ -7622,7 +7903,7 @@ class DataReference {
     /**
      * Contains values of the variables/wildcards used in a subscription path if this reference was 
      * created by an event ("value", "child_added" etc)
-     * @type {{ [name: string]: string|number, wildcards?: Array<string|number> }}
+     * @type {{ [index: number]: string|number, [variable: string]: string|number }}
      */
     get vars() {
         return this[_private].vars;
@@ -7635,7 +7916,9 @@ class DataReference {
      */
     child(childPath) {
         childPath = childPath.replace(/^\/|\/$/g, "");
-        return new DataReference(this.db, `${this.path}/${childPath}`);
+        const currentPath = PathInfo.fillVariables2(this.path, this.vars);
+        const targetPath = PathInfo.getChildPath(currentPath, childPath);
+        return new DataReference(this.db, targetPath); //  `${this.path}/${childPath}`
     }
     
     /**
@@ -7655,22 +7938,24 @@ class DataReference {
             throw new TypeError(`Cannot store value undefined`);
         }
         value = this.db.types.serialize(this.path, value);
-        // let flags;
-        // if (this.__pushed) {
-        //     flags = { pushed: true };
-        // }
-        const promise = this.db.api.set(this.path, value);
-        if (typeof onComplete === 'function') {
-            promise.then(res => {
-                onComplete(null, this);
-            })
-            .catch(err => {
+        return this.db.api.set(this.path, value)
+        .then(res => {
+            if (typeof onComplete === 'function') {
+                try { onComplete(null, this);} catch(err) { console.error(`Error in onComplete callback:`, err); }
+            }
+        })
+        .catch(err => {
+            if (typeof onComplete === 'function') {
                 try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
-            });
-        }
-        else {
-            return promise.then(res => this);
-        }
+            }
+            else {
+                // throw again
+                throw err;
+            }
+        })
+        .then(() => {
+            return this;
+        });
     }
 
     /**
@@ -7691,17 +7976,22 @@ class DataReference {
             updates = this.db.types.serialize(this.path, updates);
             promise = this.db.api.update(this.path, updates);
         }
-        if (typeof onComplete === 'function') {
-            promise.then(() => {
-                onComplete(null, this);
-            })
-            .catch(err => {
+        return promise.then(() => {
+            if (typeof onComplete === 'function') {
+                try { onComplete(null, this); } catch(err) { console.error(`Error in onComplete callback:`, err); }
+            }
+        })
+        .catch(err => {
+            if (typeof onComplete === 'function') {
                 try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
-            });
-        }
-        else {
-            return promise.then(() => this);
-        }
+            }
+            else {
+                throw err;
+            }
+        })
+        .then(() => {
+            return this;
+        })
     }
 
     /**
@@ -7751,6 +8041,9 @@ class DataReference {
      * @returns {EventStream} returns an EventStream
      */
     on(event, callback, cancelCallbackOrContext, context) {
+        if (this.path === '' && ['value','notify_value','child_changed','notify_child_changed'].includes(event)) {
+            console.warn(`WARNING: Listening for value and child_changed events on the root node is a bad practice`);
+        }
         const cancelCallback = typeof cancelCallbackOrContext === 'function' && cancelCallbackOrContext;
         context = typeof cancelCallbackOrContext === 'object' ? cancelCallbackOrContext : context
 
@@ -8367,16 +8660,23 @@ class DataSnapshot {
 
 module.exports = { DataSnapshot };
 },{"./data-reference":52,"./path-info":57}],54:[function(require,module,exports){
-const debug = {
-    setLevel(level) {
-        this.log = ["log"].indexOf(level) >= 0 ? console.log.bind(console) : ()=>{};
-        this.warn = ["log", "warn"].indexOf(level) >= 0 ? console.warn.bind(console) : ()=>{};
-        this.error = ["log", "warn", "error"].indexOf(level) >= 0 ? console.error.bind(console) : ()=>{};
+class DebugLogger {
+    constructor(level = "log", prefix = '') {
+        this.prefix = prefix;
+        this.setLevel(level);
     }
-};
-debug.setLevel("log"); // default
+    setLevel(level) {
+        const prefix = this.prefix ? this.prefix : '';
+        this.level = level;
+        this.verbose = ["verbose"].includes(level) ? console.log.bind(console, prefix) : () => {};
+        this.log = ["verbose", "log"].includes(level) ? console.log.bind(console, prefix) : () => {};
+        this.warn = ["verbose", "log", "warn"].includes(level) ? console.warn.bind(console, prefix) : () => {};
+        this.error = ["verbose", "log", "warn", "error"].includes(level) ? console.error.bind(console, prefix) : () => {};
+        this.write = console.log.bind(console);
+    }
+}
 
-module.exports = debug;
+module.exports = DebugLogger;
 },{}],55:[function(require,module,exports){
 const cuid = require('cuid');
 // const uuid62 = require('uuid62');
@@ -8395,7 +8695,7 @@ const { AceBaseBase, AceBaseSettings } = require('./acebase-base');
 const { Api } = require('./api');
 const { DataReference, DataReferenceQuery, DataRetrievalOptions, QueryDataRetrievalOptions } = require('./data-reference');
 const { DataSnapshot } = require('./data-snapshot');
-const debug = require('./debug');
+const DebugLogger = require('./debug');
 const { ID } = require('./id');
 const { PathReference } = require('./path-reference');
 const { EventStream, EventPublisher, EventSubscription } = require('./subscription');
@@ -8410,7 +8710,7 @@ module.exports = {
     Api,
     DataReference, DataReferenceQuery, DataRetrievalOptions, QueryDataRetrievalOptions,
     DataSnapshot,
-    debug,
+    DebugLogger,
     ID,
     PathReference,
     EventStream, EventPublisher, EventSubscription,
@@ -8659,6 +8959,31 @@ class PathInfo {
             }
         });
         return mergedPath;
+    }
+
+    /**
+     * Replaces all variables in a path with the values in the vars argument
+     * @param {string} varPath path containing variables
+     * @param {object} variables variables object such as one gotten from PathInfo.extractVariables
+     */
+    static fillVariables2(varPath, vars) {
+        if (typeof vars !== 'object' || Object.keys(vars).length === 0) {
+            return varPath; // Nothing to fill
+        }
+        let pathKeys = getPathKeys(varPath);
+        let n = 0;
+        const targetPath = pathKeys.reduce((path, key) => { 
+            if (key === '*' || key.startsWith('$')) {
+                key = vars[n++];
+            }
+            if (typeof key === 'number') {
+                return `${path}[${key}]`;
+            }
+            else {
+                return `${path}/${key}`;
+            }
+        }, '');
+        return targetPath;
     }
 
     /**
@@ -8949,7 +9274,7 @@ class EventStream {
         const cancel = (reason) => {
             activationState = reason;
             subscribers.forEach(sub => {
-                sub.activationCallback && sub.activationCallback(false, reason || 'unknown reason');
+                sub.activationCallback && sub.activationCallback(false, reason || new Error('unknown reason'));
             });
             subscribers.splice(); // Clear all
         }

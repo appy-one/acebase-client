@@ -6539,7 +6539,9 @@ const _websocketRequest = (socket, event, data, accessToken) => {
                 // err.code = response.reason.code;
                 // err.request = request;
                 // err.response = response;
-                const err = new AceBaseRequestError(request, response, response.reason.code, response.reason.message);
+                const code = typeof response.reason === 'object' ? response.reason.code : response.reason;
+                const message = typeof response.reason === 'object' ? response.reason.message : `request failed: ${code}`;
+                const err = new AceBaseRequestError(request, response, code, message);
                 reject(err);
             }
         }
@@ -6564,6 +6566,7 @@ class WebApi extends Api {
         this.dbname = dbname;
         this._connected = false;
         this._cache = settings.cache;
+        this._realtimeQueries = {};
         this.debug = settings.debug;
 
         this.debug.log(`Connecting to AceBase server "${this.url}"`);
@@ -6632,6 +6635,22 @@ class WebApi extends Api {
                     }
                 });
             });
+
+            socket.on("query-event", data => {
+                data = Transport.deserialize(data);
+                const query = this._realtimeQueries[data.query_id];
+                let keepMonitoring = true;
+                try {
+                    keepMonitoring = query.options.eventHandler(data);
+                }
+                catch(err) {
+                    keepMonitoring = false;
+                }
+                if (keepMonitoring === false) {
+                    delete this._realtimeQueries[data.query_id];
+                    socket.emit("query_unsubscribe", { query_id: data.query_id });
+                }
+            })
         };
 
         if (autoConnect) {
@@ -6746,9 +6765,13 @@ class WebApi extends Api {
         };
 
         this.signIn = (username, password) => {
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password })
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password, client_id: this.socket.id })
             .then(result => {
                 accessToken = result.access_token;
+                // Make sure the connected websocket server knows who we are as well. 
+                // (this is currently not necessary because the server does not support clustering yet, 
+                // but future versions might be connected to a different instance than the one that 
+                // handled the signin http request just now)
                 this.socket.emit("signin", accessToken);
                 return { user: result.user, accessToken };
             })
@@ -6758,10 +6781,10 @@ class WebApi extends Api {
         };
 
         this.signInWithEmail = (email, password) => {
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'email', email, password })
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'email', email, password, client_id: this.socket.id })
             .then(result => {
                 accessToken = result.access_token;
-                this.socket.emit("signin", accessToken);
+                this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -6770,10 +6793,10 @@ class WebApi extends Api {
         };
 
         this.signInWithToken = (token) => {
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token })
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token, client_id: this.socket.id })
             .then(result => {
                 accessToken = result.access_token;
-                this.socket.emit("signin", accessToken);
+                this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -6783,9 +6806,9 @@ class WebApi extends Api {
 
         this.signOut = () => {
             if (!accessToken) { return Promise.resolve(); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, {})
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, { client_id: this.socket.id })
             .then(() => {
-                this.socket.emit("signout", accessToken);
+                this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
                 accessToken = null;
             })
             .catch(err => {
@@ -6895,7 +6918,7 @@ class WebApi extends Api {
                     eventCallback && eventCallback('sync_change_error', change);
                     // Delete the change and cached data
                     cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                    cacheApi.set(`${this.dbname}/cache/${data.path}`, null);
+                    cacheApi.set(`${this.dbname}/cache/${change.data.path}`, null);
                 });
             });
             totalPendingChanges = updates.length;
@@ -7044,16 +7067,44 @@ class WebApi extends Api {
         });
     }
 
-    query(path, query, options = { snapshots: false, allow_cache: true }) {
+    /**
+     * 
+     * @param {string} path 
+     * @param {object} query 
+     * @param {Array<{ key: string, op: string, compare: any}>} query.filters
+     * @param {number} query.skip number of results to skip, useful for paging
+     * @param {number} query.take max number of results to return
+     * @param {Array<{ key: string, ascending: boolean }>} query.order
+     * @param {object} [options]
+     * @param {boolean} [options.snapshots=false] whether to return matching data, or paths to matching nodes only
+     * @param {string[]} [options.include] when using snapshots, keys or relative paths to include in result data
+     * @param {string[]} [options.exclude] when using snapshots, keys or relative paths to exclude from result data
+     * @param {boolean} [options.child_objects] when using snapshots, whether to include child objects in result data
+     * @param {(event: { name: string, [key]: any }) => void} [options.eventHandler]
+     * @param {object} [options.monitor] NEW (BETA) monitor changes
+     * @param {boolean} [options.monitor.add=false] monitor new matches (either because they were added, or changed and now match the query)
+     * @param {boolean} [options.monitor.change=false] monitor changed children that still match this query
+     * @param {boolean} [options.monitor.remove=false] monitor children that don't match this query anymore
+     * @ param {(event:string, path: string, value?: any) => boolean} [options.monitor.callback] NEW (BETA) callback with subscription to enable monitoring of new matches
+     * @returns {Promise<object[]|string[]>} returns a promise that resolves with matching data or paths
+     */
+    query(path, query, options = { snapshots: false, allow_cache: true, eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
         const allowCache = options && options.allow_cache === true;
         if (allowCache && !this._connected && this._cache) {
             // Not connected, query cache db
             return this._cache.db.api.query(`${this.dbname}/cache/${path}`, query, options);
         }
-        const data = JSON.stringify(Transport.serialize({
+        const request = {
             query,
             options
-        }));
+        };
+        if (options.monitor === true || (typeof options.monitor === 'object' && (options.monitor.add || options.monitor.change || options.monitor.remove))) {
+            console.assert(typeof options.eventHandler === 'function', `no eventHandler specified to handle realtime changes`);
+            request.query_id = ID.generate();
+            request.client_id = this.socket.id;
+            this._realtimeQueries[request.query_id] = { query, options };
+        }
+        const data = JSON.stringify(Transport.serialize(request));
         return this._request("POST", `${this.url}/query/${this.dbname}/${path}`, data)
         .then(data => {
             let results = Transport.deserialize(data);
@@ -7061,7 +7112,7 @@ class WebApi extends Api {
         })
         .catch(err => {
             throw err;
-        });        
+        });
     }
 
     createIndex(path, key, options) {
@@ -7833,7 +7884,7 @@ class DataRetrievalOptions {
 class QueryDataRetrievalOptions extends DataRetrievalOptions {
     /**
      * Options for data retrieval, allows selective loading of object properties
-     * @param {{ snapshots?: boolean, include?: Array<string|number>, exclude?: Array<string|number>, child_objects?: boolean }} options 
+     * @param {QueryDataRetrievalOptions} [options]
      */
     constructor(options) {
         super(options);
@@ -8429,10 +8480,36 @@ class DataReferenceQuery {
             options.snapshots = true;
         }
         options.eventHandler = ev => {
-            if (!this._events || !this._events[ev.event]) { return; }
-            const listeners = this._events[ev.event];
+            if (!this._events || !this._events[ev.name]) { return false; }
+            const listeners = this._events[ev.name];
+            if (typeof listeners !== 'object' || listeners.length === 0) { return false; }
+            if (['add','change','remove'].includes(ev.name)) {
+                const ref = new DataReference(this.ref.db, ev.path);
+                const eventData = { name: ev.name };
+                if (options.snapshots && ev.name !== 'remove') {
+                    const val = db.types.deserialize(ev.path, ev.value);
+                    eventData.snapshot = new DataSnapshot(ref, val, false);
+                }
+                else {
+                    eventData.ref = ref;
+                }
+                ev = eventData;
+            }
             listeners.forEach(callback => { try { callback(ev); } catch(e) {} });
         };
+        // Check if there are event listeners set for realtime changes
+        options.monitor = { add: false, change: false, remove: false };
+        if (this._events) {
+            if (this._events['add'] && this._events['add'].length > 0) {
+                options.monitor.add = true;
+            }
+            if (this._events['change'] && this._events['change'].length > 0) {
+                options.monitor.change = true;
+            }
+            if (this._events['remove'] && this._events['remove'].length > 0) {
+                options.monitor.remove = true;
+            }
+        }
         const db = this.ref.db;
         return db.api.query(this.ref.path, this[_private], options)
         .catch(err => {
@@ -8485,6 +8562,15 @@ class DataReferenceQuery {
         });
     }
 
+    /**
+     * Subscribes to an event. Supported events are:
+     *  "stats": receive information about query performance.
+     *  "hints": receive query or index optimization hints
+     *  "add", "change", "remove": receive real-time query result changes
+     * @param {string} event - Name of the event to subscribe to
+     * @param {(event: object) => void} callback - Callback function
+     * @returns {DataReferenceQuery} returns reference to this query
+     */
     on(event, callback) {
         if (!this._events) { this._events = {}; };
         if (!this._events[event]) { this._events[event] = []; }
@@ -8492,8 +8578,23 @@ class DataReferenceQuery {
         return this;
     }
 
+    /**
+     * Unsubscribes from a previously added event(s)
+     * @param {string} [event] Name of the event
+     * @param {Function} [callback] callback function to remove
+     * @returns {DataReferenceQuery} returns reference to this query
+     */
     off(event, callback) {
-        if (!this._events || !this._events[event]) { return this; }
+        if (!this._events) { return this; }
+        if (typeof event === 'undefined') {
+            this._events = {};
+            return this;
+        }
+        if (!this._events[event]) { return this; }
+        if (typeof callback === 'undefined') {
+            delete this._events[event];
+            return this;
+        }
         const index = !this._events[event].indexOf(callback);
         if (!~index) { return this; }
         this._events[event].splice(index, 1);
@@ -9308,6 +9409,9 @@ module.exports = {
             else if (type === "reference") {
                 return new PathReference(val);
             }
+            else if (type === "regexp") {
+                return new RegExp(val.pattern, val.flags);
+            }
             return val;          
         };
         if (typeof data.map === "string") {
@@ -9364,6 +9468,11 @@ module.exports = {
                 else if (val instanceof PathReference) {
                     obj[key] = val.path;
                     mappings[path] = "reference";
+                }
+                else if (val instanceof RegExp) {
+                    // Queries using the 'matches' filter with a regular expression can now also be used on remote db's
+                    obj[key] = { pattern: val.source, flags: val.flags };
+                    mappings[path] = "regexp";
                 }
                 else if (typeof val === "object" && val !== null) {
                     process(val, mappings, path);
@@ -9929,7 +10038,7 @@ function cloneObject(original, stack) {
     };
     original = checkAndFixTypedArray(original);
 
-    if (typeof original !== "object" || original === null || original instanceof Date || original instanceof ArrayBuffer || original instanceof PathReference) {
+    if (typeof original !== "object" || original === null || original instanceof Date || original instanceof ArrayBuffer || original instanceof PathReference || original instanceof RegExp) {
         return original;
     }
 
@@ -9938,7 +10047,7 @@ function cloneObject(original, stack) {
             throw new ReferenceError(`object contains a circular reference`);
         }
         val = checkAndFixTypedArray(val);
-        if (val === null || val instanceof Date || val instanceof ArrayBuffer || val instanceof PathReference) { // || val instanceof ID
+        if (val === null || val instanceof Date || val instanceof ArrayBuffer || val instanceof PathReference || val instanceof RegExp) { // || val instanceof ID
             return val;
         }
         else if (val instanceof Array) {

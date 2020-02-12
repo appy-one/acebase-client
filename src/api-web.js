@@ -135,88 +135,95 @@ class WebApi extends Api {
         this._realtimeQueries = {};
         this.debug = settings.debug;
 
-        this.debug.log(`Connecting to AceBase server "${this.url}"`);
-        if (!this.url.startsWith('https')) {
-            this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.red)
-        }
-
         let subscriptions = {};
         let accessToken;
 
         this.connect = () => {
             if (typeof this.socket === 'object') {
                 this.socket.disconnect();
+                this.socket = null;
             }
-            const socket = this.socket = connectSocket(this.url);
 
-            socket.on("connect_error", (data) => {
-                this.debug.error(`Websocket connection error: ${data}`);
-            });
+            this.debug.log(`Connecting to AceBase server "${this.url}"`);
+            if (!this.url.startsWith('https')) {
+                this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.red)
+            }
+    
+            return new Promise((resolve, reject) => {
+                const socket = this.socket = connectSocket(this.url);
 
-            socket.on("connect_timeout", (data) => {
-                this.debug.error(`Websocket connection timeout`);
-            });
-
-            let reconnectSubs = null;
-
-            socket.on("connect", (data) => {
-                this._connected = true;
-                eventCallback && eventCallback('connect');
-
-                // Sign in again
-                let signInPromise = Promise.resolve();
-                if (accessToken) {
-                    signInPromise = this.signInWithToken(accessToken);
-                }
-                signInPromise.then(() => {
-                    // Resubscribe to any active subscriptions
-                    if (reconnectSubs === null) { return; }
-                    Object.keys(reconnectSubs).forEach(path => {
-                        reconnectSubs[path].forEach(subscr => {
-                            this.subscribe(subscr.path, subscr.event, subscr.callback);
-                        });
-                    });
-                    reconnectSubs = null;
+                socket.on("connect_error", (data) => {
+                    this.debug.error(`Websocket connection error: ${data}`);
+                    reject(new Error(`connect_error: ${data}`));
                 });
-            });
 
-            socket.on("disconnect", (data) => {
-                this._connected = false;
-                eventCallback && eventCallback('disconnect');
-                reconnectSubs = subscriptions;
-                subscriptions = {};
-            });
+                socket.on("connect_timeout", (data) => {
+                    this.debug.error(`Websocket connection timeout`);
+                    reject(new Error(`connect_timeout`));
+                });
 
-            socket.on("data-event", data => {
-                const pathSubs = subscriptions[data.subscr_path];
-                if (!pathSubs) {
-                    // weird. we are not subscribed on this path?
-                    this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
-                    return;
-                }
-                pathSubs.forEach(subscr => {
-                    if (subscr.event === data.event) {
-                        let val = Transport.deserialize(data.val);
-                        subscr.callback(null, data.path, val.current, val.previous);
+                let reconnectSubs = null;
+
+                socket.on("connect", (data) => {
+                    this._connected = true;
+                    eventCallback && eventCallback('connect');
+
+                    // Sign in again
+                    let signInPromise = Promise.resolve();
+                    if (accessToken) {
+                        signInPromise = this.signInWithToken(accessToken);
+                    }
+                    signInPromise.then(() => {
+                        // Resubscribe to any active subscriptions
+                        if (reconnectSubs === null) { return; }
+                        Object.keys(reconnectSubs).forEach(path => {
+                            reconnectSubs[path].forEach(subscr => {
+                                this.subscribe(subscr.path, subscr.event, subscr.callback);
+                            });
+                        });
+                        reconnectSubs = null;
+                        resolve();
+                    });
+                });
+
+                socket.on("disconnect", (data) => {
+                    this._connected = false;
+                    eventCallback && eventCallback('disconnect');
+                    reconnectSubs = subscriptions;
+                    subscriptions = {};
+                });
+
+                socket.on("data-event", data => {
+                    const pathSubs = subscriptions[data.subscr_path];
+                    if (!pathSubs) {
+                        // weird. we are not subscribed on this path?
+                        this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
+                        return;
+                    }
+                    pathSubs.forEach(subscr => {
+                        if (subscr.event === data.event) {
+                            let val = Transport.deserialize(data.val);
+                            subscr.callback(null, data.path, val.current, val.previous);
+                        }
+                    });
+                });
+
+                socket.on("query-event", data => {
+                    data = Transport.deserialize(data);
+                    const query = this._realtimeQueries[data.query_id];
+                    let keepMonitoring = true;
+                    try {
+                        keepMonitoring = query.options.eventHandler(data);
+                    }
+                    catch(err) {
+                        keepMonitoring = false;
+                    }
+                    if (keepMonitoring === false) {
+                        delete this._realtimeQueries[data.query_id];
+                        socket.emit("query_unsubscribe", { query_id: data.query_id });
                     }
                 });
             });
-
-            socket.on("query-event", data => {
-                data = Transport.deserialize(data);
-                const query = this._realtimeQueries[data.query_id];
-                let keepMonitoring = true;
-                try {
-                    keepMonitoring = query.options.eventHandler(data);
-                }
-                catch(err) {
-                    keepMonitoring = false;
-                }
-                if (keepMonitoring === false) {
-                    delete this._realtimeQueries[data.query_id];
-                    socket.emit("query_unsubscribe", { query_id: data.query_id });
-                }
-            })
         };
 
         if (autoConnect) {

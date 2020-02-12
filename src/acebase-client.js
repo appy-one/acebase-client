@@ -128,7 +128,7 @@ class AceBaseClient extends AceBaseBase {
     }
 
     connect() {
-        this.api.connect();
+        return this.api.connect();
     }
 
     disconnect() {

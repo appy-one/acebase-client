@@ -22,7 +22,7 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
     constructor(host: string, port: number, dbname: string, https?: boolean);
     readonly auth: AceBaseClientAuth
     readonly connected: boolean
-    connect(): void
+    connect(): Promise<void>
     disconnect(): void
 }
 

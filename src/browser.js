@@ -1,13 +1,14 @@
-// To use AceBaseClient in the browser
-// from root dir of package, execute: 
-// npm run browserify, which will execute:
-//      browserify src/browser.js -o dist/browser.js
-//      terser dist/browser.js -o dist/browser.min.js
+/*
+    * This file is used to generate a browser bundle,
+    (re)generate it with: npm run browserify
+    Note to self: if browserify fails, temp remove the "browser" property from package.json and run again.
 
-const acebase = require('./index');
+    * To use AceBaseClient in the browser:
+    const db = new AceBaseClient({ dbname: 'dbname', host: 'localhost', port: 3000, https: false });
+*/
 
-window.AceBaseClient = acebase.AceBaseClient;
-if (!window.acebase) {
-    // Prevent clash with acebase browser build
-    window.acebase = acebase; 
-}
+const acebaseclient = require('./index');
+
+window.acebaseclient = acebaseclient;
+window.AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
+module.exports = acebaseclient;

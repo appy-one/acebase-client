@@ -23,9 +23,7 @@ OR, if you want to use the client in the browser, use the following code:
 Use the following code the connect to an AceBase webserver:
 
 ```javascript
-const dbname = 'mydb';
-const https = false;
-const db = new AceBaseClient("localhost", 5757, dbname, https);
+const db = new AceBaseClient({ host: "localhost", port: 5757, dbname: 'mydb', https: false });
 db.ready(() => {
     console.log("Connected successfully");
 });

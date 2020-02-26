@@ -1,4 +1,4 @@
-(function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.acebaseclient = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
 module.exports = after
 
 function after(count, callback, err_cb) {
@@ -7417,20 +7417,20 @@ class AceBaseClientAuth {
 
 module.exports = { AceBaseClientAuth };
 },{"./acebase-client":40,"./user":45}],43:[function(require,module,exports){
-// To use AceBaseClient in the browser
-// from root dir of package, execute: 
-// npm run browserify, which will execute:
-//      browserify src/browser.js -o dist/browser.js
-//      terser dist/browser.js -o dist/browser.min.js
+/*
+    * This file is used to generate a browser bundle,
+    (re)generate it with: npm run browserify
+    Note to self: if browserify fails, temp remove the "browser" property from package.json and run again.
 
-const acebase = require('./index');
+    * To use AceBaseClient in the browser:
+    const db = new AceBaseClient({ dbname: 'dbname', host: 'localhost', port: 3000, https: false });
+*/
 
-window.AceBaseClient = acebase.AceBaseClient;
-if (!window.acebase) {
-    // Prevent clash with acebase browser build
-    window.acebase = acebase; 
-}
+const acebaseclient = require('./index');
 
+window.acebaseclient = acebaseclient;
+window.AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
+module.exports = acebaseclient;
 },{"./index":44}],44:[function(require,module,exports){
 const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, TypeMappingOptions } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
@@ -18192,4 +18192,5 @@ function extend() {
     return target
 }
 
-},{}]},{},[43]);
+},{}]},{},[43])(43)
+});

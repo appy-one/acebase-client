@@ -1,6 +1,6 @@
 {
   "name": "acebase-client",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Client to connect to remote AceBase JSON database server",
   "main": "./src/index.js",
   "browser": "./dist/browser.js",
@@ -8,7 +8,7 @@
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {
-    "browserify": "browserify src/browser.js -o dist/browser.js && terser dist/browser.js -o dist/browser.min.js",
+    "browserify": "browserify src/browser.js -o dist/browser.js --standalone acebaseclient && terser dist/browser.js -o dist/browser.min.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

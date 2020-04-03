@@ -12,6 +12,8 @@ class AceBaseRequestError extends Error {
     }
 }
 
+const NOT_CONNECTED_ERROR_MESSAGE = 'remote database is not connected'; //'AceBaseClient is not connected';
+
 const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
     return new Promise((resolve, reject) => {
         let endpoint = URL.parse(url);
@@ -128,9 +130,10 @@ class WebApi extends Api {
         super();
 
         this.url = settings.url;
-        const autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.dbname = dbname;
         this._connected = false;
+        this._connecting = false;
         this._cache = settings.cache;
         this._realtimeQueries = {};
         this.debug = settings.debug;
@@ -138,12 +141,11 @@ class WebApi extends Api {
         let subscriptions = {};
         let accessToken;
 
-        this.connect = () => {
+        this.connect = () => {            
             if (typeof this.socket === 'object') {
-                this.socket.disconnect();
-                this.socket = null;
+                this.disconnect();
             }
-
+            this._connecting = true;
             this.debug.log(`Connecting to AceBase server "${this.url}"`);
             if (!this.url.startsWith('https')) {
                 this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.red)
@@ -152,12 +154,20 @@ class WebApi extends Api {
             return new Promise((resolve, reject) => {
                 const socket = this.socket = connectSocket(this.url);
 
+                socket.on("reconnect_attempt", () => {
+                    this._connecting = true;
+                });
+
                 socket.on("connect_error", (data) => {
+                    // New connection failed to establish
+                    this._connected = false;
                     this.debug.error(`Websocket connection error: ${data}`);
                     reject(new Error(`connect_error: ${data}`));
                 });
 
                 socket.on("connect_timeout", (data) => {
+                    // New connection failed to establish
+                    this._connected = false;
                     this.debug.error(`Websocket connection timeout`);
                     reject(new Error(`connect_timeout`));
                 });
@@ -165,6 +175,7 @@ class WebApi extends Api {
                 let reconnectSubs = null;
 
                 socket.on("connect", (data) => {
+                    this._connecting = false;
                     this._connected = true;
                     eventCallback && eventCallback('connect');
 
@@ -175,8 +186,7 @@ class WebApi extends Api {
                     }
                     signInPromise.then(() => {
                         // Resubscribe to any active subscriptions
-                        if (reconnectSubs === null) { return; }
-                        Object.keys(reconnectSubs).forEach(path => {
+                        reconnectSubs !== null && Object.keys(reconnectSubs).forEach(path => {
                             reconnectSubs[path].forEach(subscr => {
                                 this.subscribe(subscr.path, subscr.event, subscr.callback);
                             });
@@ -187,6 +197,7 @@ class WebApi extends Api {
                 });
 
                 socket.on("disconnect", (data) => {
+                    // Existing connection was broken, by us or network
                     this._connected = false;
                     eventCallback && eventCallback('disconnect');
                     reconnectSubs = subscriptions;
@@ -226,7 +237,7 @@ class WebApi extends Api {
             });
         };
 
-        if (autoConnect) {
+        if (this._autoConnect) {
             this.connect();
         }
 
@@ -235,6 +246,8 @@ class WebApi extends Api {
                 this.socket.disconnect();
                 this.socket = null;
             }
+            this._connected = false;
+            this._connecting = false;
         }
 
         this.subscribe = (path, event, callback) => {
@@ -324,20 +337,43 @@ class WebApi extends Api {
                 return _request(method, url, data, accessToken, dataReceivedCallback)
                 .catch(err => {
                     throw err;
-                }); 
+                });
             }
             else {
-                let resolve;
-                let promise = new Promise(r => resolve = r);
-                this.socket.on('connect', () => {
-                    this._request(method, url, data)
-                    .then(resolve);
-                });
+                // We're not connected. We can wait for the connection to be established,
+                // or fail the request now. Because we have now implemented caching, live requests
+                // are only executed if they are not allowed to use cached responses. Wait for a
+                // connection to be established (max 1s), then retry or fail
+
+                if (!this._connecting) {
+                    // We're currently not trying to connect. Fail now
+                    return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+                }
+
+                let resolve, reject, 
+                    promise = new Promise((rs, rj) => { resolve = rs; reject = rj; }),
+                    state = 'wait',
+                    timeout = setTimeout(() => {
+                        if (state !== 'wait') { return; }
+                        state = 'timeout';
+                        this.socket.off('connect', callback); // Cancel connect wait
+                        reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+                    }, 1000),
+                    callback = () => {
+                        if (state !== 'wait') { return; }
+                        state = 'connected';
+                        clearTimeout(timeout); // Cancel timeout
+                        this._request(method, url, data)
+                        .then(resolve)
+                        .catch(reject);
+                    };
+                this.socket.on('connect', callback); // wait for connection
                 return promise;
             }
         };
 
         this.signIn = (username, password) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password, client_id: this.socket.id })
             .then(result => {
                 accessToken = result.access_token;
@@ -354,6 +390,7 @@ class WebApi extends Api {
         };
 
         this.signInWithEmail = (email, password) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'email', email, password, client_id: this.socket.id })
             .then(result => {
                 accessToken = result.access_token;
@@ -366,6 +403,7 @@ class WebApi extends Api {
         };
 
         this.signInWithToken = (token) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token, client_id: this.socket.id })
             .then(result => {
                 accessToken = result.access_token;
@@ -379,6 +417,7 @@ class WebApi extends Api {
 
         this.signOut = () => {
             if (!accessToken) { return Promise.resolve(); }
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, { client_id: this.socket.id })
             .then(() => {
                 this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
@@ -391,6 +430,7 @@ class WebApi extends Api {
 
         this.changePassword = (uid, currentPassword, newPassword) => {
             if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/change_password`, { uid, password: currentPassword, new_password: newPassword })
             .then(result => {
                 accessToken = result.access_token;
@@ -402,6 +442,7 @@ class WebApi extends Api {
         };
     
         this.signUp = (details) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signup`, details)
             .then(result => {
                 accessToken = result.access_token;
@@ -414,6 +455,7 @@ class WebApi extends Api {
         };
 
         this.updateUserDetails = (details) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/update`, details)
             .then(result => {
                 return { user: result.user };
@@ -424,6 +466,7 @@ class WebApi extends Api {
         }
 
         this.deleteAccount = (uid) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/delete`, { uid })
             .then(result => {
                 this.socket.emit("signout", accessToken);
@@ -443,7 +486,7 @@ class WebApi extends Api {
     sync(eventCallback) {
         // Sync cache
         if (!this._connected) {
-            return Promise.reject(new Error(`remote database is not connected`));
+            return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
         }
         if (!this._cache) {
             return Promise.reject(new Error(`no cache database is used`));

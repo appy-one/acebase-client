@@ -1,5 +1,6 @@
 const { Api, Transport, DebugLogger, ID } = require('acebase-core');
 const http = require('http');
+const https = require('https');
 const URL = require('url');
 const connectSocket = require('socket.io-client');
 
@@ -38,7 +39,8 @@ const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
         if (accessToken) {
             options.headers['Authorization'] = `Bearer ${accessToken}`;
         }
-        const req = http.request(options, res => {
+        const client = options.protocol === 'https:' ? https : http;
+        const req = client.request(options, res => {
             res.setEncoding("utf8");
             let data = '';
             if (typeof dataReceivedCallback === 'function') {
@@ -142,7 +144,7 @@ class WebApi extends Api {
         let accessToken;
 
         this.connect = () => {            
-            if (typeof this.socket === 'object') {
+            if (this.socket !== null && typeof this.socket === 'object') {
                 this.disconnect();
             }
             this._connecting = true;
@@ -242,7 +244,7 @@ class WebApi extends Api {
         }
 
         this.disconnect = () => {
-            if (typeof this.socket === 'object') {
+            if (this.socket !== null && typeof this.socket === 'object') {
                 this.socket.disconnect();
                 this.socket = null;
             }
@@ -425,7 +427,7 @@ class WebApi extends Api {
             })
             .catch(err => {
                 throw err;
-            });
+            });            
         };
 
         this.changePassword = (uid, currentPassword, newPassword) => {

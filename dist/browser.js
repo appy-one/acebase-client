@@ -6291,11 +6291,8 @@ class AceBaseClientConnectionSettings {
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
-        this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' && settings.cache.db.constructor.name.startsWith('AceBase') ? {} : null;
+        this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
-        if (this.cache) {
-            this.cache.db = settings.cache.db;
-        }
     }
 }
 
@@ -7066,6 +7063,8 @@ class WebApi extends Api {
             // We're offline. Try loading from cache
             return this._cache.db.api.get(`${this.dbname}/cache/${path}`, options);
         }
+
+        // Get from server
         let url = `${this.url}/data/${this.dbname}/${path}`;
         let filtered = false;
         if (options) {
@@ -7096,7 +7095,11 @@ class WebApi extends Api {
                 // }
                 // else if (!filtered) { 
                 if (!filtered) {
-                    this._cache.db.api.set(`${this.dbname}/cache/${path}`, val);
+                    const cachePath = `${this.dbname}/cache/${path}`;
+                    this._cache.db.api.set(cachePath, val)
+                    .catch(err => {
+                        this.debug.error(`Error caching data for "/${path}"`, err)
+                    });
                 }
             }
             return val;
@@ -8250,6 +8253,27 @@ class DataReference {
                         useCallback && callback(childSnap);
                     });
                 });
+            }
+            else if (event === "notify_child_added") {
+                // Use the reflect API to get current children. 
+                // NOTE: This does not work with AceBaseServer <= v0.9.7, only when signed in as admin
+                const step = 100;
+                let limit = step, skip = 0;
+                const more = () => {
+                    this.db.api.reflect(this.path, "children", { limit, skip })
+                    .then(children => {
+                        children.list.forEach(child => {
+                            const childRef = this.child(child.key);
+                            eventPublisher.publish(childRef);
+                            useCallback && callback(childRef);
+                        })
+                        if (children.more) {
+                            skip += step;
+                            more();
+                        }
+                    });
+                };
+                more();
             }
         }
 

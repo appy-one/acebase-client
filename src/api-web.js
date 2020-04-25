@@ -632,6 +632,8 @@ class WebApi extends Api {
             // We're offline. Try loading from cache
             return this._cache.db.api.get(`${this.dbname}/cache/${path}`, options);
         }
+
+        // Get from server
         let url = `${this.url}/data/${this.dbname}/${path}`;
         let filtered = false;
         if (options) {
@@ -662,7 +664,11 @@ class WebApi extends Api {
                 // }
                 // else if (!filtered) { 
                 if (!filtered) {
-                    this._cache.db.api.set(`${this.dbname}/cache/${path}`, val);
+                    const cachePath = `${this.dbname}/cache/${path}`;
+                    this._cache.db.api.set(cachePath, val)
+                    .catch(err => {
+                        this.debug.error(`Error caching data for "/${path}"`, err)
+                    });
                 }
             }
             return val;

@@ -23,11 +23,8 @@ class AceBaseClientConnectionSettings {
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
-        this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' && settings.cache.db.constructor.name.startsWith('AceBase') ? {} : null;
+        this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
-        if (this.cache) {
-            this.cache.db = settings.cache.db;
-        }
     }
 }
 

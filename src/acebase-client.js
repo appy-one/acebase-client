@@ -57,10 +57,16 @@ class AceBaseClient extends AceBaseBase {
 
         if (settings.cache) {
             const cacheDb = settings.cache.db;
+            let syncRunning = false;
             const syncPendingChanges = () => {
+                if (syncRunning) { 
+                    // Already syncing
+                    return; 
+                }
+                syncRunning = true;
                 if (!this._connected) {
                     // Retry once connected
-                    return this.once('connect', syncPendingChanges);
+                    return; // this.once('connect', syncPendingChanges);
                 }
                 return this.api.sync((eventName, args) => {
                     this.debug.log(eventName, args || '');
@@ -68,11 +74,23 @@ class AceBaseClient extends AceBaseBase {
                 })
                 .catch(err => {
                     // Sync failed for some reason
-                    if (!this._connected) {
-                        syncPendingChanges(); // Retries once connected
-                    }
+                    console.error(`Failed to synchronize:`, err);
+                    // if (!this._connected) {
+                    //     syncPendingChanges(); // Retries once connected
+                    // }
+                }).then(() => {
+                    syncRunning = false;
                 });
             }
+            let syncTimeout = 0;
+            this.on('connect', () => {
+                syncTimeout && clearTimeout(syncTimeout);
+                syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow sign in first
+            });
+            this.on('signin', () => {
+                syncTimeout && clearTimeout(syncTimeout);
+                syncPendingChanges();
+            });
             const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
             cacheDb.ready(() => {
                 // Cache database is ready. Is remote database ready?

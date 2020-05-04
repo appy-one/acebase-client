@@ -516,7 +516,11 @@ class WebApi extends Api {
                     promise = this.update(change.path, change.data, { allow_cache: false });
                 }
                 else if (change.type === 'set') { 
+                    if (!change.data) { change.data = null; } // Before type 'remove' was implemented
                     promise = this.set(change.path, change.data, { allow_cache: false });
+                }
+                else if (change.type === 'remove') {
+                    promise = this.set(change.path, null, { allow_cache: false });
                 }
                 else {
                     throw new Error(`unsupported change type "${change.type}"`);
@@ -571,7 +575,11 @@ class WebApi extends Api {
         const cache = {
             use: this._cache && allowCache,
             updateValue: () => { return this._cache.db.api.set(`${this.dbname}/cache/${path}`, value); },
-            addPending: () => { const id = ID.generate(); return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value }); }
+            addPending: () => { 
+                const id = ID.generate(); 
+                const op = value === null ? { type: 'remove', path } : { type: 'set', path, data: value };
+                return this._cache.db.api.set(`${this.dbname}/pending/${id}`, op); 
+            }
         };
         if (cache.use && !this._connected) {
             // Not connected, update cache database only

@@ -73,14 +73,14 @@ class AceBaseClient extends AceBaseBase {
                     }
                 });
             }
-            const remoteConnectPromise = promiseTimeout(
-                1000, 
-                new Promise(resolve => this.once('connect', resolve)), 
-                'remote connection'
-            );
+            const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
             cacheDb.ready(() => {
                 // Cache database is ready. Is remote database ready?
-                return remoteConnectPromise
+                return promiseTimeout(
+                    1000, 
+                    remoteConnectPromise, 
+                    'remote connection'
+                )
                 .catch(err => {
                     // If the connect promise timed out, we'll emit the ready event and use the cache.
                     // Any other error should halt execution

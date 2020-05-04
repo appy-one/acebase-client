@@ -6341,14 +6341,14 @@ class AceBaseClient extends AceBaseBase {
                     }
                 });
             }
-            const remoteConnectPromise = promiseTimeout(
-                1000, 
-                new Promise(resolve => this.once('connect', resolve)), 
-                'remote connection'
-            );
+            const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
             cacheDb.ready(() => {
                 // Cache database is ready. Is remote database ready?
-                return remoteConnectPromise
+                return promiseTimeout(
+                    1000, 
+                    remoteConnectPromise, 
+                    'remote connection'
+                )
                 .catch(err => {
                     // If the connect promise timed out, we'll emit the ready event and use the cache.
                     // Any other error should halt execution
@@ -6949,6 +6949,9 @@ class WebApi extends Api {
                 else if (change.type === 'set') { 
                     promise = this.set(change.path, change.data, { allow_cache: false });
                 }
+                else if (change.type === 'remove') {
+                    promise = this.set(change.path, null, { allow_cache: false });
+                }
                 else {
                     throw new Error(`unsupported change type "${change.type}"`);
                 }
@@ -7002,7 +7005,11 @@ class WebApi extends Api {
         const cache = {
             use: this._cache && allowCache,
             updateValue: () => { return this._cache.db.api.set(`${this.dbname}/cache/${path}`, value); },
-            addPending: () => { const id = ID.generate(); return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value }); }
+            addPending: () => { 
+                const id = ID.generate(); 
+                const op = value === null ? { type: 'remove', path } : { type: 'set', path, data: value };
+                return this._cache.db.api.set(`${this.dbname}/pending/${id}`, op); 
+            }
         };
         if (cache.use && !this._connected) {
             // Not connected, update cache database only

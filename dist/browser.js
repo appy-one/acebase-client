@@ -6947,6 +6947,7 @@ class WebApi extends Api {
                     promise = this.update(change.path, change.data, { allow_cache: false });
                 }
                 else if (change.type === 'set') { 
+                    if (!change.data) { change.data = null; } // Before type 'remove' was implemented
                     promise = this.set(change.path, change.data, { allow_cache: false });
                 }
                 else if (change.type === 'remove') {

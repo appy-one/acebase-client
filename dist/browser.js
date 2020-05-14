@@ -6866,17 +6866,17 @@ class WebApi extends Api {
             });
         };
 
-        this.signOut = () => {
+        this.signOut = (everywhere = false) => {
             if (!accessToken) { return Promise.resolve(); }
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, { client_id: this.socket.id })
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, { client_id: this.socket.id, everywhere })
             .then(() => {
                 this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
                 accessToken = null;
             })
             .catch(err => {
                 throw err;
-            });            
+            });
         };
 
         this.changePassword = (uid, currentPassword, newPassword) => {
@@ -6892,12 +6892,30 @@ class WebApi extends Api {
             });
         };
     
-        this.signUp = (details) => {
+        this.forgotPassword = (email) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            return this._request("POST", `${this.url}/auth/${this.dbname}/forgot_password`, { email })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.resetPassword = (resetCode, newPassword) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            return this._request("POST", `${this.url}/auth/${this.dbname}/reset_password`, { code: resetCode, password: newPassword })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.signUp = (details, signIn = true) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signup`, details)
             .then(result => {
-                accessToken = result.access_token;
-                this.socket.emit("signin", accessToken);
+                if (signIn) {
+                    accessToken = result.access_token;
+                    this.socket.emit("signin", accessToken);
+                }
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -6916,12 +6934,14 @@ class WebApi extends Api {
             });
         }
 
-        this.deleteAccount = (uid) => {
+        this.deleteAccount = (uid, signOut = true) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/delete`, { uid })
             .then(result => {
-                this.socket.emit("signout", accessToken);
-                accessToken = null;
+                if (signOut) {
+                    this.socket.emit("signout", accessToken);
+                    accessToken = null;
+                }
                 return true;
             })
             .catch(err => {
@@ -7265,11 +7285,8 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signIn(username, password) {
-        /** @type {WebApi} */
-        const api = this.client.api;
-
         this.user = null;
-        return api.signIn(username, password)
+        return this.client.api.signIn(username, password)
         .then(details => {
             this.accessToken = details.accessToken;
             this.user = new AceBaseUser(details.user);
@@ -7288,11 +7305,8 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signInWithEmail(email, password) {
-        /** @type {WebApi} */
-        const api = this.client.api;
-
         this.user = null;
-        return api.signInWithEmail(email, password)
+        return this.client.api.signInWithEmail(email, password)
         .then(details => {
             this.accessToken = details.accessToken;
             this.user = new AceBaseUser(details.user);
@@ -7310,11 +7324,8 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signInWithToken(accessToken) {
-        /** @type {WebApi} */
-        const api = this.client.api;
-
         this.user = null;
-        return api.signInWithToken(accessToken)
+        return this.client.api.signInWithToken(accessToken)
         .then(details => {
             this.accessToken = details.accessToken;
             this.user = new AceBaseUser(details.user);
@@ -7328,15 +7339,14 @@ class AceBaseClientAuth {
 
     /**
      * Signs out of the current account
+     * @param {boolean} [everywhere=false] whether to sign out all clients, or only this one
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
-    signOut() {
+    signOut(everywhere) {
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
-        /** @type {WebApi} */
-        const api = this.client.api;
-        return api.signOut()
+        return this.client.api.signOut(everywhere)
         .then(() => {
             this.accessToken = null;
             let user = this.user;
@@ -7359,9 +7369,7 @@ class AceBaseClientAuth {
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
-        /** @type {WebApi} */
-        const api = this.client.api;
-        return api.changePassword(this.user.uid, oldPassword, newPassword)
+        return this.client.api.changePassword(this.user.uid, oldPassword, newPassword)
         .then(result => {
             this.accessToken = result.accessToken;
             this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
@@ -7372,6 +7380,25 @@ class AceBaseClientAuth {
         // });
     }
 
+    /**
+     * Requests a password reset for the account with specified email address
+     * @param {string} email
+     * @returns {Promise<void>} returns a promise that resolves once the request has been processed
+     */
+    forgotPassword(email) {
+        return this.client.api.forgotPassword(email);
+    }
+
+    /**
+     * Requests a password to be changed using a previously acquired reset code, sent to the email address with forgotPassword
+     * @param {string} resetCode
+     * @param {string} newPassword
+     * @returns {Promise<void>} returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
+     */
+    resetPassword(resetCode, newPassword) {
+        return this.client.api.resetPassword(resetCode, newPassword);
+    }
+
     _updateUserDetails(details) {
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
@@ -7379,9 +7406,7 @@ class AceBaseClientAuth {
         if (typeof details !== 'object') {
             return Promise.reject({ code: 'invalid_details', message: 'details must be an object' });
         }
-        /** @type {WebApi} */
-        const api = this.client.api;
-        return api.updateUserDetails(details)
+        return this.client.api.updateUserDetails(details)
         .then(result => {
             Object.keys(result.user).forEach(key => {
                 this.user[key] = result.user[key];
@@ -7438,54 +7463,57 @@ class AceBaseClientAuth {
         if (!details.password) {
             return Promise.reject({ code: 'invalid_details', message: 'No password given' });
         }
-        /** @type {WebApi} */
-        const api = this.client.api;
-
-        if (this.user && this.user.uid !== 'admin') {
+        const isAdmin = this.user && this.user.uid === 'admin';
+        if (this.user && !isAdmin) {
+            // Sign out of current account
             let user = this.user;
             this.user = null;
             this.eventCallback("signout", { source: 'signup', user } );
         }
-        return api.signUp(details)
+        return this.client.api.signUp(details, !isAdmin)
         .then(details => {
-            if (this.user && this.user.uid === 'admin') {
+            if (isAdmin) {
                 return { user: details.user };
             }
             else {
+                // Sign into new account
                 this.accessToken = details.accessToken;
                 this.user = new AceBaseUser(details.user);
                 this.eventCallback("signin", { source: "signup", user: this.user, accessToken: this.accessToken });
                 return { user: this.user, accessToken: this.accessToken }; //success: true, 
             }
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**
-     * Removes the currently sign into user account and signs out. Note: this will only
+     * Removes the currently signed in user account and signs out. Note: this will only
      * remove the database user account, not any data stored in the database by this user. It is
      * your own responsibility to remove that data.
+     * @param {string} [uid] for admin user only: remove account with uid
      * @returns {Promise<void>}
      */
-    deleteAccount() {
+    deleteAccount(uid) {
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
-        /** @type {WebApi} */
-        const api = this.client.api;
-        return api.deleteAccount(this.user.uid)
+        if (uid && this.user.uid !== 'admin') {
+            return Promise.reject({ code: 'not_admin', message: 'Cannot remove other accounts than signed into account, unless you are admin' });
+        }
+        const deleteUid = uid || this.user.uid;
+        if (deleteUid === 'admin') {
+            return Promise.reject({ code: 'not_allowed', message: 'Cannot remove admin user' });
+        }
+        const signOut = this.user.uid !== 'admin';
+        return this.client.api.deleteAccount(deleteUid, signOut)
         .then(result => {
-            this.accessToken = null;
-            let user = this.user;
-            this.user = null;
-            this.eventCallback("signout", { source: 'delete_account', user });
-            // return { success: true };
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+            if (signOut) {
+                // Sign out of the account
+                this.accessToken = null;
+                let user = this.user;
+                this.user = null;
+                this.eventCallback("signout", { source: 'delete_account', user });
+            }
+        });
     }
 }
 
@@ -10207,7 +10235,7 @@ function compareValues (oldVal, newVal) {
     else if (voids.indexOf(oldVal) >= 0 && voids.indexOf(newVal) < 0) { return "added"; }
     else if (voids.indexOf(oldVal) < 0 && voids.indexOf(newVal) >= 0) { return "removed"; }
     else if (typeof oldVal !== typeof newVal) { return "changed"; }
-    else if (typeof oldVal === "object") { 
+    else if (typeof oldVal === "object" && !(oldVal instanceof Date)) {
         // Do key-by-key comparison of objects
         const isArray = oldVal instanceof Array;
         const oldKeys = isArray 

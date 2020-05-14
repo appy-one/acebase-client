@@ -417,17 +417,17 @@ class WebApi extends Api {
             });
         };
 
-        this.signOut = () => {
+        this.signOut = (everywhere = false) => {
             if (!accessToken) { return Promise.resolve(); }
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, { client_id: this.socket.id })
+            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, { client_id: this.socket.id, everywhere })
             .then(() => {
                 this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
                 accessToken = null;
             })
             .catch(err => {
                 throw err;
-            });            
+            });
         };
 
         this.changePassword = (uid, currentPassword, newPassword) => {
@@ -443,12 +443,30 @@ class WebApi extends Api {
             });
         };
     
-        this.signUp = (details) => {
+        this.forgotPassword = (email) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            return this._request("POST", `${this.url}/auth/${this.dbname}/forgot_password`, { email })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.resetPassword = (resetCode, newPassword) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            return this._request("POST", `${this.url}/auth/${this.dbname}/reset_password`, { code: resetCode, password: newPassword })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.signUp = (details, signIn = true) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/signup`, details)
             .then(result => {
-                accessToken = result.access_token;
-                this.socket.emit("signin", accessToken);
+                if (signIn) {
+                    accessToken = result.access_token;
+                    this.socket.emit("signin", accessToken);
+                }
                 return { user: result.user, accessToken };
             })
             .catch(err => {
@@ -467,12 +485,14 @@ class WebApi extends Api {
             });
         }
 
-        this.deleteAccount = (uid) => {
+        this.deleteAccount = (uid, signOut = true) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/delete`, { uid })
             .then(result => {
-                this.socket.emit("signout", accessToken);
-                accessToken = null;
+                if (signOut) {
+                    this.socket.emit("signout", accessToken);
+                    accessToken = null;
+                }
                 return true;
             })
             .catch(err => {

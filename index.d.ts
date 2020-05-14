@@ -55,9 +55,10 @@ export class AceBaseClientAuth {
 
     /**
      * Signs out of the current account
+     * @param {boolean} everywhere whether to sign out all clients, or only this one
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
-    signOut(): Promise<void>;
+    signOut(everywhere?: boolean): Promise<void>;
 
     /**
      * Changes the password of the currrently signed into account
@@ -66,6 +67,21 @@ export class AceBaseClientAuth {
      * @returns {Promise<{ accessToken: string }>} returns a promise that resolves with a new access token
      */
     changePassword(oldPassword: string, newPassword: string): Promise<{ accessToken: string }>;
+
+    /**
+     * Requests a password reset for the account with specified email address
+     * @param {string} email
+     * @returns returns a promise that resolves once the request has been processed
+     */
+    forgotPassword(email: string): Promise<void>;
+    
+    /**
+     * Requests a password to be changed using a previously acquired reset code, sent to the email address with forgotPassword
+     * @param {string} resetCode
+     * @param {string} newPassword
+     * @returns returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
+     */
+    resetPassword(resetCode, newPassword): Promise<void>;
 
     /**
      * Creates a new user account with the given details. If successful, you will automatically be
@@ -102,12 +118,13 @@ export class AceBaseClientAuth {
     updateUserSettings(settings: { [key:string]: string|number|boolean }): Promise<{ user: AceBaseUser }>
 
     /**
-     * Removes the currently sign into user account and signs out. Note: this will only
+     * Removes the currently signed in user account and signs out. Note: this will only
      * remove the database user account, not any data stored in the database by this user. It is
      * your own responsibility to remove that data.
+     * @param uid for admin user only: remove account with uid
      * @returns {Promise<void>}
      */
-    deleteAccount(): Promise<void>
+    deleteAccount(uid?: string): Promise<void>
 
 }
 

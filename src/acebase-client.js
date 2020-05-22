@@ -65,8 +65,7 @@ class AceBaseClient extends AceBaseBase {
                 }
                 syncRunning = true;
                 if (!this._connected) {
-                    // Retry once connected
-                    return; // this.once('connect', syncPendingChanges);
+                    return; // We'll retry once connected
                 }
                 return this.api.sync((eventName, args) => {
                     this.debug.log(eventName, args || '');
@@ -75,9 +74,6 @@ class AceBaseClient extends AceBaseBase {
                 .catch(err => {
                     // Sync failed for some reason
                     console.error(`Failed to synchronize:`, err);
-                    // if (!this._connected) {
-                    //     syncPendingChanges(); // Retries once connected
-                    // }
                 }).then(() => {
                     syncRunning = false;
                 });
@@ -85,7 +81,7 @@ class AceBaseClient extends AceBaseBase {
             let syncTimeout = 0;
             this.on('connect', () => {
                 syncTimeout && clearTimeout(syncTimeout);
-                syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow sign in first
+                syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow client to sign in first
             });
             this.on('signin', () => {
                 syncTimeout && clearTimeout(syncTimeout);
@@ -106,9 +102,6 @@ class AceBaseClient extends AceBaseBase {
                         this.debug.error(`Error: ${err.message}`);
                         throw err;
                     }
-                })
-                .then(() => {
-                    return syncPendingChanges();
                 })
                 .then(() => {
                     this.emit('ready');

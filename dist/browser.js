@@ -6333,8 +6333,7 @@ class AceBaseClient extends AceBaseBase {
                 }
                 syncRunning = true;
                 if (!this._connected) {
-                    // Retry once connected
-                    return; // this.once('connect', syncPendingChanges);
+                    return; // We'll retry once connected
                 }
                 return this.api.sync((eventName, args) => {
                     this.debug.log(eventName, args || '');
@@ -6343,9 +6342,6 @@ class AceBaseClient extends AceBaseBase {
                 .catch(err => {
                     // Sync failed for some reason
                     console.error(`Failed to synchronize:`, err);
-                    // if (!this._connected) {
-                    //     syncPendingChanges(); // Retries once connected
-                    // }
                 }).then(() => {
                     syncRunning = false;
                 });
@@ -6353,7 +6349,7 @@ class AceBaseClient extends AceBaseBase {
             let syncTimeout = 0;
             this.on('connect', () => {
                 syncTimeout && clearTimeout(syncTimeout);
-                syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow sign in first
+                syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow client to sign in first
             });
             this.on('signin', () => {
                 syncTimeout && clearTimeout(syncTimeout);
@@ -6374,9 +6370,6 @@ class AceBaseClient extends AceBaseBase {
                         this.debug.error(`Error: ${err.message}`);
                         throw err;
                     }
-                })
-                .then(() => {
-                    return syncPendingChanges();
                 })
                 .then(() => {
                     this.emit('ready');
@@ -6447,7 +6440,7 @@ function promiseTimeout(ms, promise, comment) {
 module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
 },{"./api-web":41,"./auth":42,"acebase-core":56}],41:[function(require,module,exports){
 (function (Buffer){
-const { Api, Transport, DebugLogger, ID } = require('acebase-core');
+const { Api, Transport, DebugLogger, ID, PathInfo } = require('acebase-core');
 const http = require('http');
 const https = require('https');
 const URL = require('url');
@@ -6575,7 +6568,7 @@ const _websocketRequest = (socket, event, data, accessToken) => {
  */
 class WebApi extends Api {
 
-    constructor(dbname = "default", settings, eventCallback) {
+    constructor(dbname = "default", settings, callback) {
         // operations are done through http calls,
         // events are triggered through a websocket
         super();
@@ -6588,6 +6581,18 @@ class WebApi extends Api {
         this._cache = settings.cache;
         this._realtimeQueries = {};
         this.debug = settings.debug;
+        this._connectHooks = [];
+        const eventCallback = (name, ...args) => {
+            if (name === 'connect') {
+                const callbacks = this._connectHooks;
+                this._connectHooks = [];
+                callbacks.forEach(callback => {
+                    try { callback(); }
+                    catch(err) {}
+                });
+            }
+            callback(name, ...args);
+        };
 
         let subscriptions = {};
         let accessToken;
@@ -6609,6 +6614,29 @@ class WebApi extends Api {
                     this._connecting = true;
                 });
 
+                socket.on("reconnect_error", (err) => {
+                    this._connecting = false;
+                });
+
+                socket.on("reconnect_failed", (err) => {
+                    // Reconnecting failed
+                    const scheduleRetry = () => {
+                        // Try connecting again in a minute
+                        setTimeout(() => { this.connect().catch(err => { scheduleRetry(); }); }, 60 * 1000);
+                    };
+                    if (typeof window !== 'undefined') {
+                        // Monitor browser online event
+                        const listener = () => {
+                            window.removeEventListener('online', listener);
+                            scheduleRetry();
+                        }
+                        window.addEventListener('online', listener);
+                    }
+                    else {
+                        scheduleRetry();
+                    }
+                });
+
                 socket.on("connect_error", (data) => {
                     // New connection failed to establish
                     this._connected = false;
@@ -6623,27 +6651,42 @@ class WebApi extends Api {
                     reject(new Error(`connect_timeout`));
                 });
 
-                let reconnectSubs = null;
-
                 socket.on("connect", (data) => {
                     this._connecting = false;
                     this._connected = true;
-                    eventCallback && eventCallback('connect');
+                    // eventCallback && eventCallback('connect');
 
-                    // Sign in again
+                    // Sign in
                     let signInPromise = Promise.resolve();
                     if (accessToken) {
+                        // User must be signed in again (NOTE: this does not trigger "signin" event)
                         signInPromise = this.signInWithToken(accessToken);
                     }
                     signInPromise.then(() => {
-                        // Resubscribe to any active subscriptions
-                        reconnectSubs !== null && Object.keys(reconnectSubs).forEach(path => {
-                            reconnectSubs[path].forEach(subscr => {
-                                this.subscribe(subscr.path, subscr.event, subscr.callback);
+                        // (re)subscribe to any active subscriptions
+                        const subscribePromises = [];
+                        Object.keys(subscriptions).forEach(path => {
+                            const events = [];
+                            subscriptions[path].forEach(subscr => {
+                                if (this._cache) {
+                                    // Remove cache db subscription
+                                    console.assert(typeof subscr.cacheCallback !== 'undefined', 'When subscription was added, we were not connected so cacheCallback must have been set');
+                                    this._cache.db.api.unsubscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
+                                }
+                                const serverAlreadyNotifying = events.includes(subscr.event);
+                                if (!serverAlreadyNotifying) {
+                                    events.push(subscr.event);
+                                    // this.subscribe(subscr.path, subscr.event, subscr.callback);
+                                    const promise = _websocketRequest(this.socket, "subscribe", { path, event: subscr.event }, accessToken);
+                                    subscribePromises.push(promise);
+                                }
                             });
                         });
-                        reconnectSubs = null;
-                        resolve();
+                        return Promise.all(subscribePromises);
+                    })
+                    .then(() => {
+                        eventCallback && eventCallback('connect'); // Safe to let client know we're connected
+                        resolve(); // Resolve the .connect() promise
                     });
                 });
 
@@ -6651,8 +6694,16 @@ class WebApi extends Api {
                     // Existing connection was broken, by us or network
                     this._connected = false;
                     eventCallback && eventCallback('disconnect');
-                    reconnectSubs = subscriptions;
-                    subscriptions = {};
+                    if (this._cache) {
+                        // Set events on cache db so they will fire until we're reconnected again
+                        // console.log('Moving event subscriptions to cache db');
+                        Object.keys(subscriptions).forEach(path => {
+                            subscriptions[path].forEach(subscr => {
+                                subscr.cacheCallback = (err, path, newValue, oldValue) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue);
+                                this._cache.db.api.subscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
+                            });
+                        });
+                    }
                 });
 
                 socket.on("data-event", data => {
@@ -6701,11 +6752,18 @@ class WebApi extends Api {
             this._connecting = false;
         }
 
-        this.subscribe = (path, event, callback) => {
+        this.subscribe = (path, event, callback) => {            
             let pathSubs = subscriptions[path];
             if (!pathSubs) { pathSubs = subscriptions[path] = []; }
             let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event);
-            pathSubs.push({ path, event, callback });
+            const subscr = { path, event, callback };
+            pathSubs.push(subscr);
+
+            if (this._cache && !this._connected) {
+                // Events are currently handled by cache db
+                subscr.cacheCallback = (err, path, newValue, oldValue) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue);
+                return this._cache.db.api.subscribe(`${this.dbname}/cache/${path}`, event, subscr.cacheCallback);
+            }
 
             if (serverAlreadyNotifying) {
                 return Promise.resolve();
@@ -6716,32 +6774,50 @@ class WebApi extends Api {
         this.unsubscribe = (path, event = undefined, callback = undefined) => {
             let pathSubs = subscriptions[path];
             if (!pathSubs) { return; }
+
+            const unsubscribeFrom = (subscriptions) => {
+                subscriptions.forEach(subscr => {
+                    pathSubs.splice(pathSubs.indexOf(subscr), 1);
+                    if (this._cache && !this._connected) {
+                        // Events are currently handled by cache db, also remove those
+                        console.assert(typeof subscr.cacheCallback !== 'undefined', 'When subscription was added, we were not connected so cacheCallback must have been set');
+                        this._cache.db.api.unsubscribe(`${this.dbname}/cache/${path}`, subscr.event, subscr.cacheCallback);
+                    }
+                });
+            };
+
             if (!event) {
                 // Unsubscribe from all events
-                pathSubs = [];
+                // pathSubs = [];
+                unsubscribeFrom(pathSubs);
             }
             else if (!callback) {
                 // Unsubscribe from specific event
-                const remove = pathSubs.filter(subscr => subscr.event === event);
-                remove.forEach(subscr => pathSubs.splice(pathSubs.indexOf(subscr), 1));
+                const subscriptions = pathSubs.filter(subscr => subscr.event === event);
+                unsubscribeFrom(subscriptions);
             }
             else {
                 // Unsubscribe from a specific callback
-                const remove = pathSubs.filter(subscr => subscr.event === event && subscr.callback === callback);
-                remove.forEach(subscr => pathSubs.splice(pathSubs.indexOf(subscr), 1));
+                const subscriptions = pathSubs.filter(subscr => subscr.event === event && subscr.callback === callback);
+                unsubscribeFrom(subscriptions);
             }
 
             if (pathSubs.length === 0) {
-                // Unsubscribe from all events on path
+                // Unsubscribed from all events on path
                 delete subscriptions[path];
                 // socket.emit("unsubscribe", { path, access_token: accessToken });
-                return _websocketRequest(this.socket, "unsubscribe", { path, access_token: accessToken }, accessToken);
+                if (this._connected) {
+                    return _websocketRequest(this.socket, "unsubscribe", { path, access_token: accessToken }, accessToken);
+                }
             }
             else if (pathSubs.reduce((c, subscr) => c + (subscr.event === event ? 1 : 0), 0) === 0) {
                 // No callbacks left for specific event
                 // socket.emit("unsubscribe", { path, event, access_token: accessToken });
-                return _websocketRequest(this.socket, "unsubscribe", { path: path, event, access_token: accessToken }, accessToken);
+                if (this._connected) {
+                    return _websocketRequest(this.socket, "unsubscribe", { path: path, event, access_token: accessToken }, accessToken);
+                }
             }
+            return Promise.resolve();
         };
 
         this.transaction = (path, callback) => {
@@ -6763,7 +6839,9 @@ class WebApi extends Api {
                     }
                 }
             }
-            let txResolve;
+            let txResolve, txPromise = new Promise((resolve) => {
+                txResolve = resolve;
+            });;
             const completedCallback = (data) => {
                 if (data.id === id) {
                     this.socket.off("tx_completed", completedCallback);
@@ -6776,11 +6854,37 @@ class WebApi extends Api {
                 // TODO: socket.on('disconnect', disconnectedCallback);
                 this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
             };
-            if (this._connected) { connectedCallback(); }
-            else { this.socket.on('connect', connectedCallback); }
-            return new Promise((resolve) => {
-                txResolve = resolve;
-            });
+            if (this._connected) { 
+                connectedCallback(); 
+            }
+            else if (this._cache) {
+                // Use cache db
+                let newValue;
+                const cachePath = `${this.dbname}/cache/${path}`;
+                return this._cache.db.api.transaction(cachePath, currentValue => {
+                    newValue = callback(currentValue);
+                    return newValue;
+                })
+                .then(() => {
+                    if (typeof newValue !== 'undefined') {
+                        // Store as pending 'remove' or 'set' operation
+                        const op = { type: newValue === null ? 'remove' : 'set', path, data: newValue, callback: callback.toString() };
+                        this._cache.db.api.set(`${this.dbname}/pending/${id}`, op); 
+                    }
+                    // Perform transaction again once connection is established.
+                    // DISABLED because this _should_ be executed during sync instead:
+                    // this._connectHooks.push(() => {
+                    //     this._cache.db.api.set(`${this.dbname}/pending/${id}`, null); // remove pending transaction 
+                    //     connectedCallback(); // Proceed with normal online flow (callback is executed again with live data)
+                    // });
+                });
+            }
+            else { 
+                // DISABLED because it is unclear to calling code what we're waiting for:
+                // this._connectHooks.push('connect', connectedCallback); 
+                return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+            }
+            return txPromise;
         };
 
         this._request = (method, url, data, dataReceivedCallback) => {
@@ -6978,42 +7082,72 @@ class WebApi extends Api {
             if (pendingChanges === null) {
                 return; // No updates
             }
-            const updates = Object.keys(pendingChanges).map(id => {
-                const change = pendingChanges[id];
-                let promise;
-                if (change.type === 'update') { 
-                    promise = this.update(change.path, change.data, { allow_cache: false });
-                }
-                else if (change.type === 'set') { 
-                    if (!change.data) { change.data = null; } // Before type 'remove' was implemented
-                    promise = this.set(change.path, change.data, { allow_cache: false });
-                }
-                else if (change.type === 'remove') {
-                    promise = this.set(change.path, null, { allow_cache: false });
-                }
-                else {
-                    throw new Error(`unsupported change type "${change.type}"`);
-                }
-                return promise
-                .then(() => {
-                    delete pendingChanges[id];
-                    cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
-                })
-                .catch(err => {
-                    // Updating remote db failed
-                    if (!this._connected) {
-                        // Connection was broken, should retry later
-                        throw err;
+            const syncPromise = Object.keys(pendingChanges)
+                .sort((a,b) => a < b ? 1 : -1) // sort z-a
+                .reduce((netChangeIds, id) => {
+                    // Only get effective changes: 
+                    // ignore operations preceeding a 'set' or 'remove' operation on the same and descendant paths
+                    const change = pendingChanges[id];
+                    // Check if the change is about a path that is 'set' or 'remove'd later (earlier in our sort order...)
+                    const pathInfo = PathInfo.get(change.path);
+                    const ignore = netChangeIds.some(id => {
+                        const laterChange = pendingChanges[id];
+                        return (laterChange.path === change.path || pathInfo.isDescendantOf(laterChange)) && ['set','remove'].includes(laterChange.type);
+                    })
+                    if (!ignore) {
+                        netChangeIds.push(id);
                     }
-                    // We are connected, so the change is not allowed or otherwise denied.
-                    eventCallback && eventCallback('sync_change_error', change);
-                    // Delete the change and cached data
-                    cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                    cacheApi.set(`${this.dbname}/cache/${change.data.path}`, null);
-                });
-            });
-            totalPendingChanges = updates.length;
-            return Promise.all(updates);
+                    else {
+                        delete pendingChanges[id];
+                        cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                    }
+                    return netChangeIds;
+                }, [])
+                .sort() // sort a-z
+                .reduce((prevPromise, id) => {
+                    // Now process the net changes
+                    const change = pendingChanges[id];
+                    totalPendingChanges++;
+                    const go = () => {
+                        let promise;
+                        if (change.type === 'update') { 
+                            promise = this.update(change.path, change.data, { allow_cache: false });
+                        }
+                        else if (change.type === 'set') { 
+                            if (!change.data) { change.data = null; } // Before type 'remove' was implemented
+                            promise = this.set(change.path, change.data, { allow_cache: false });
+                        }
+                        else if (change.type === 'remove') {
+                            promise = this.set(change.path, null, { allow_cache: false });
+                        }
+                        else {
+                            throw new Error(`unsupported change type "${change.type}"`);
+                        }
+                        return promise
+                        .then(() => {
+                            delete pendingChanges[id];
+                            cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                        })
+                        .catch(err => {
+                            // Updating remote db failed
+                            if (!this._connected) {
+                                // Connection was broken, should retry later
+                                throw err;
+                            }
+                            // We are connected, so the change is not allowed or otherwise denied.
+                            if (typeof err === 'string') { 
+                                err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                            }
+                            cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                            // Delete the change and cached data
+                            cacheApi.set(`${this.dbname}/pending/${id}`, null);
+                            cacheApi.set(`${this.dbname}/cache/${change.data.path}`, null);
+                            eventCallback && eventCallback('sync_change_error', { error: err, change });
+                        });
+                    };
+                    return prevPromise.then(go); // Chain to previous promise
+                }, Promise.resolve());
+            return syncPromise;
         })
         .then(() => {
             cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
@@ -7043,7 +7177,9 @@ class WebApi extends Api {
         // }
         const cache = {
             use: this._cache && allowCache,
-            updateValue: () => { return this._cache.db.api.set(`${this.dbname}/cache/${path}`, value); },
+            updateValue: () => { 
+                return this._cache.db.api.set(`${this.dbname}/cache/${path}`, value); 
+            },
             addPending: () => { 
                 const id = ID.generate(); 
                 const op = value === null ? { type: 'remove', path } : { type: 'set', path, data: value };

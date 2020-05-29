@@ -380,6 +380,8 @@ class WebApi extends Api {
 
         this.transaction = (path, callback) => {
             const id = ID.generate();
+            const cachePath = `${this.dbname}/cache/${path}`;
+            let cacheUpdateVal;
             const startedCallback = (data) => {
                 if (data.id === id) {
                     this.socket.off("tx_started", startedCallback);
@@ -388,6 +390,9 @@ class WebApi extends Api {
                     const finish = (val) => {
                         const newValue = Transport.serialize(val);
                         this.socket.emit("transaction", { action: "finish", id: id, path, value: newValue, access_token: accessToken });
+                        if (this._cache) {
+                            cacheUpdateVal = val;
+                        }
                     };
                     if (val instanceof Promise) {
                         val.then(finish);
@@ -399,11 +404,19 @@ class WebApi extends Api {
             }
             let txResolve, txPromise = new Promise((resolve) => {
                 txResolve = resolve;
-            });;
+            });
             const completedCallback = (data) => {
                 if (data.id === id) {
                     this.socket.off("tx_completed", completedCallback);
-                    txResolve(this);
+                    if (this._cache) {
+                        // Update cache db value
+                        this._cache.db.api.set(cachePath, cacheUpdateVal).then(() => {
+                            txResolve(this);
+                        })
+                    }
+                    else {
+                        txResolve(this);
+                    }
                 }
             }
             const connectedCallback = () => {
@@ -418,7 +431,6 @@ class WebApi extends Api {
             else if (this._cache) {
                 // Use cache db
                 let newValue;
-                const cachePath = `${this.dbname}/cache/${path}`;
                 return this._cache.db.api.transaction(cachePath, currentValue => {
                     newValue = callback(currentValue);
                     return newValue;
@@ -650,7 +662,7 @@ class WebApi extends Api {
                     const pathInfo = PathInfo.get(change.path);
                     const ignore = netChangeIds.some(id => {
                         const laterChange = pendingChanges[id];
-                        return (laterChange.path === change.path || pathInfo.isDescendantOf(laterChange)) && ['set','remove'].includes(laterChange.type);
+                        return (laterChange.path === change.path || pathInfo.isDescendantOf(laterChange.path)) && ['set','remove'].includes(laterChange.type);
                     })
                     if (!ignore) {
                         netChangeIds.push(id);

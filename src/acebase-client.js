@@ -55,38 +55,39 @@ class AceBaseClient extends AceBaseBase {
         this._connected = false;
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.blue); // `[ ${settings.dbname} ]`
 
+        let syncRunning = false;
+        const syncPendingChanges = () => {
+            if (syncRunning) { 
+                // Already syncing
+                return; 
+            }
+            if (!this._connected) {
+                return; // We'll retry once connected
+            }
+            syncRunning = true;
+            return this.api.sync((eventName, args) => {
+                this.debug.log(eventName, args || '');
+                this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
+            })
+            .catch(err => {
+                // Sync failed for some reason
+                console.error(`Failed to synchronize:`, err);
+            })
+            .then(() => {
+                syncRunning = false;
+            });
+        }
+        let syncTimeout = 0;
+        this.on('connect', () => {
+            syncTimeout && clearTimeout(syncTimeout);
+            syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow client to sign in first
+        });
+        this.on('signin', () => {
+            syncTimeout && clearTimeout(syncTimeout);
+            syncPendingChanges();
+        });
         if (settings.cache) {
             const cacheDb = settings.cache.db;
-            let syncRunning = false;
-            const syncPendingChanges = () => {
-                if (syncRunning) { 
-                    // Already syncing
-                    return; 
-                }
-                syncRunning = true;
-                if (!this._connected) {
-                    return; // We'll retry once connected
-                }
-                return this.api.sync((eventName, args) => {
-                    this.debug.log(eventName, args || '');
-                    this.emit('cache_sync_event', { name: eventName, args });
-                })
-                .catch(err => {
-                    // Sync failed for some reason
-                    console.error(`Failed to synchronize:`, err);
-                }).then(() => {
-                    syncRunning = false;
-                });
-            }
-            let syncTimeout = 0;
-            this.on('connect', () => {
-                syncTimeout && clearTimeout(syncTimeout);
-                syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow client to sign in first
-            });
-            this.on('signin', () => {
-                syncTimeout && clearTimeout(syncTimeout);
-                syncPendingChanges();
-            });
             const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
             cacheDb.ready(() => {
                 // Cache database is ready. Is remote database ready?

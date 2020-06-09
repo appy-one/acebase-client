@@ -152,7 +152,7 @@ class WebApi extends Api {
             callback(name, ...args);
         };
 
-        let subscriptions = {};
+        let subscriptions = this._subscriptions = {};
         let accessToken;
 
         this.connect = () => {            
@@ -265,6 +265,10 @@ class WebApi extends Api {
                 });
 
                 socket.on("data-event", data => {
+                    let val = Transport.deserialize(data.val);
+                    if (this._cache && !data.event.startsWith('notify_')) {
+                        this._cache.db.api.set(data.path, val.current); // Update cached value
+                    }
                     const pathSubs = subscriptions[data.subscr_path];
                     if (!pathSubs) {
                         // weird. we are not subscribed on this path?
@@ -273,7 +277,6 @@ class WebApi extends Api {
                     }
                     pathSubs.forEach(subscr => {
                         if (subscr.event === data.event) {
-                            let val = Transport.deserialize(data.val);
                             subscr.callback(null, data.path, val.current, val.previous);
                         }
                     });
@@ -633,103 +636,171 @@ class WebApi extends Api {
         if (!this._connected) {
             return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
         }
-        if (!this._cache) {
-            return Promise.reject(new Error(`no cache database is used`));
-        }
-        if (!this._cache.db.isReady) {
+        // if (!this._cache) {
+        //     return Promise.reject(new Error(`no cache database is used`));
+        // }
+        if (this._cache && !this._cache.db.isReady) {
             return Promise.reject(new Error(`cache database is not ready yet`));
         }
 
+        eventCallback && eventCallback('sync_start');
         const handleStatsUpdateError = err => {
             this.debug.error(`Failed to update cache db stats:`, err);
         }
         let totalPendingChanges = 0;
-        const cacheApi = this._cache.db.api;
-        return cacheApi.get(`${this.dbname}/pending`) //cacheDb.ref('pending_changes').get()
-        .then(pendingChanges => {
-            eventCallback && eventCallback('sync_start');            
-            cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
-            if (pendingChanges === null) {
-                return; // No updates
-            }
-            const syncPromise = Object.keys(pendingChanges)
-                .sort((a,b) => a < b ? 1 : -1) // sort z-a
-                .reduce((netChangeIds, id) => {
-                    // Only get effective changes: 
-                    // ignore operations preceeding a 'set' or 'remove' operation on the same and descendant paths
-                    const change = pendingChanges[id];
-                    // Check if the change is about a path that is 'set' or 'remove'd later (earlier in our sort order...)
-                    const pathInfo = PathInfo.get(change.path);
-                    const ignore = netChangeIds.some(id => {
-                        const laterChange = pendingChanges[id];
-                        return (laterChange.path === change.path || pathInfo.isDescendantOf(laterChange.path)) && ['set','remove'].includes(laterChange.type);
-                    })
-                    if (!ignore) {
-                        netChangeIds.push(id);
-                    }
-                    else {
-                        delete pendingChanges[id];
-                        cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
-                    }
-                    return netChangeIds;
-                }, [])
-                .sort() // sort a-z
-                .reduce((prevPromise, id) => {
-                    // Now process the net changes
-                    const change = pendingChanges[id];
-                    totalPendingChanges++;
-                    const go = () => {
-                        let promise;
-                        if (change.type === 'update') { 
-                            promise = this.update(change.path, change.data, { allow_cache: false });
-                        }
-                        else if (change.type === 'set') { 
-                            if (!change.data) { change.data = null; } // Before type 'remove' was implemented
-                            promise = this.set(change.path, change.data, { allow_cache: false });
-                        }
-                        else if (change.type === 'remove') {
-                            promise = this.set(change.path, null, { allow_cache: false });
+        const cacheApi = this._cache && this._cache.db.api;
+        let syncPushPromise = Promise.resolve();
+        if (this._cache) {
+            syncPushPromise = cacheApi.get(`${this.dbname}/pending`)
+            .then(pendingChanges => {
+                cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
+                if (pendingChanges === null) {
+                    return; // No updates
+                }
+                const syncPromise = Object.keys(pendingChanges)
+                    .sort((a,b) => a < b ? 1 : -1) // sort z-a
+                    .reduce((netChangeIds, id) => {
+                        // Only get effective changes: 
+                        // ignore operations preceeding a 'set' or 'remove' operation on the same and descendant paths
+                        const change = pendingChanges[id];
+                        // Check if the change is about a path that is 'set' or 'remove'd later (earlier in our sort order...)
+                        const pathInfo = PathInfo.get(change.path);
+                        const ignore = netChangeIds.some(id => {
+                            const laterChange = pendingChanges[id];
+                            return (laterChange.path === change.path || pathInfo.isDescendantOf(laterChange.path)) && ['set','remove'].includes(laterChange.type);
+                        })
+                        if (!ignore) {
+                            netChangeIds.push(id);
                         }
                         else {
-                            throw new Error(`unsupported change type "${change.type}"`);
-                        }
-                        return promise
-                        .then(() => {
                             delete pendingChanges[id];
                             cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
-                        })
-                        .catch(err => {
-                            // Updating remote db failed
-                            if (!this._connected) {
-                                // Connection was broken, should retry later
-                                throw err;
+                        }
+                        return netChangeIds;
+                    }, [])
+                    .sort() // sort a-z
+                    .reduce((prevPromise, id) => {
+                        // Now process the net changes
+                        const change = pendingChanges[id];
+                        totalPendingChanges++;
+                        const go = () => {
+                            let promise;
+                            if (change.type === 'update') { 
+                                promise = this.update(change.path, change.data, { allow_cache: false });
                             }
-                            // We are connected, so the change is not allowed or otherwise denied.
-                            if (typeof err === 'string') { 
-                                err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                            else if (change.type === 'set') { 
+                                if (!change.data) { change.data = null; } // Before type 'remove' was implemented
+                                promise = this.set(change.path, change.data, { allow_cache: false });
                             }
-                            cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
-                            // Delete the change and cached data
-                            cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                            cacheApi.set(`${this.dbname}/cache/${change.data.path}`, null);
-                            eventCallback && eventCallback('sync_change_error', { error: err, change });
+                            else if (change.type === 'remove') {
+                                promise = this.set(change.path, null, { allow_cache: false });
+                            }
+                            else {
+                                throw new Error(`unsupported change type "${change.type}"`);
+                            }
+                            return promise
+                            .then(() => {
+                                delete pendingChanges[id];
+                                cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                            })
+                            .catch(err => {
+                                // Updating remote db failed
+                                if (!this._connected) {
+                                    // Connection was broken, should retry later
+                                    throw err;
+                                }
+                                // We are connected, so the change is not allowed or otherwise denied.
+                                if (typeof err === 'string') { 
+                                    err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                                }
+                                cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                                // Delete the change and cached data
+                                cacheApi.set(`${this.dbname}/pending/${id}`, null);
+                                cacheApi.set(`${this.dbname}/cache/${change.data.path}`, null);
+                                eventCallback && eventCallback('sync_change_error', { error: err, change });
+                            });
+                        };
+                        return prevPromise.then(go); // Chain to previous promise
+                    }, Promise.resolve());
+                return syncPromise;
+            })
+            .then(() => {
+                cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
+                return totalPendingChanges;
+            })
+            .catch(err => {
+                // 1 or more pending changes could not be processed.
+                if (typeof err === 'string') { 
+                    err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                }
+                cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                throw err;
+            });            
+        }
+        let totalRemoteChanges = 0;
+        return syncPushPromise
+        .then(() => {
+            // We've pushed our changes, now get fresh data for all paths with active subscriptions
+            if (this._cache) {
+                // Find out what data to load
+                const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
+                    const hasValueSubscribers = this._subscriptions[path].some(s => !s.event.startsWith('notify_'));
+                    if (hasValueSubscribers) {
+                        const pathInfo = PathInfo.get(path);
+                        const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
+                        if (!ancestorIncluded) { paths.push(path); }
+                    }
+                    return paths;
+                }, []);
+                // Attach all events to cache db so they will fire for data changes
+                Object.keys(this._subscriptions).forEach(path => {
+                    this._subscriptions[path].forEach(subscr => {
+                        subscr.cacheCallback = (err, path, newValue, oldValue) => {
+                            totalRemoteChanges++;
+                            subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue);
+                        }
+                        cacheApi.subscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
+                    });
+                });
+                // Fetch new data
+                const syncPullPromises = loadPaths.map(path => this.get(path, { allow_cache: false }));
+                return Promise.all(syncPullPromises)
+                .then(() => {
+                    // Unsubscribe cache subscriptions
+                    Object.keys(this._subscriptions).forEach(path => {
+                        this._subscriptions[path].forEach(subscr => {
+                            cacheApi.unsubscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
                         });
-                    };
-                    return prevPromise.then(go); // Chain to previous promise
-                }, Promise.resolve());
-            return syncPromise;
+                    });
+                });
+            }
+            else {
+                // Not using cache, so there is no real way of knowing if anything changed or removed.
+                // We could trigger fake "value", "child_added" and "child_changed" events with fresh data, 
+                // but... what's the use? It would result in broken data? 
+                // --> Let's run "value" events only, and warn about all other events
+
+                const syncPullPromises = [];
+                Object.keys(this._subscriptions).forEach(path => {
+                    const subs = this._subscriptions[path];
+                    const valueSubscriptions = subs.filter(s => s.event === 'value');
+                    if (valueSubscriptions.length === 0) {
+                        return subs.forEach(sub => this.debug.warn(`Subscription "${sub.event}" on path "${path}" might have missed events while offline. Data should be reloaded!`));
+                    }
+                    const p = this.get(path, { allow_cache: false }).then(value => {
+                        valueSubscriptions.forEach(subscr => subscr.callback(null, path, value));
+                    });
+                    syncPullPromises.push(p);
+                });
+                return Promise.all(syncPullPromises);
+            }
         })
         .then(() => {
-            cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
-            eventCallback && eventCallback('sync_done');
-            return totalPendingChanges;
+            const info = { local: totalPendingChanges, remote: totalRemoteChanges };
+            eventCallback && eventCallback('sync_done', info);
+            return info;
         })
         .catch(err => {
-            // 1 or more pending changes could not be processed.
-            if (typeof err === 'string') { 
-                err = { code: 'unknown', message: err, stack: 'n/a' }; 
-            }
-            cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
             eventCallback && eventCallback('sync_error', err);
             throw err;
         });

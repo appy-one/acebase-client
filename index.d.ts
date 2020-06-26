@@ -54,6 +54,25 @@ export class AceBaseClientAuth {
     signInWithToken(accessToken: string): Promise<{ user: AceBaseUser, accessToken: string }>;
 
     /**
+     * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
+     * This method returs a Promise that resolves with the url you have to redirect your user to authenticate 
+     * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
+     * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
+     * to finish signing in.
+     * @param {string} providerName one of the configured providers (eg 'facebook', 'instagram', 'google', 'apple', 'spotify')
+     * @param {string} callbackUrl url on your website/app that will receive the sign in result
+     * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
+     */
+    startOAuthProviderSignIn(providerName: string, callbackUrl: string): Promise<string>
+
+    /**
+     * Use this method to finish OAuth flow from your callbackUrl.
+     * @param {string} callbackResult result received in your.callback/url?result
+     * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string } }>}
+     */
+    finishOAuthProviderSignIn(callbackResult): Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string } }>
+
+    /**
      * Signs out of the current account
      * @param {boolean} everywhere whether to sign out all clients, or only this one
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
@@ -95,6 +114,13 @@ export class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signUp(details: { username?: string, email?: string, password: string, displayName: string, settings?: { [key:string]: string|number|boolean } }): Promise<{ user: AceBaseUser, accessToken: string }>;
+    
+    /**
+     * Verifies an e-mail address using the code sent to the email address upon signing up
+     * @param {string} verificationCode
+     * @returns {Promise<void>} returns a promise that resolves when verification was successful
+     */
+    verifyEmailAddress(verificationCode): Promise<void>
 
     /**
      * Changes the username of the currrently signed into account
@@ -143,6 +169,7 @@ export class AceBaseUser {
     changePassword?: boolean
     changePasswordRequested?: string
     changePasswordBefore?: string //Date
+    picture?: { width: number, height: number, url }
 
     constructor(user: AceBaseUser);
 }

@@ -75,6 +75,45 @@ class AceBaseClientAuth {
     }
 
     /**
+     * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
+     * This method returs a Promise that resolves with the url you have to redirect your user to authenticate 
+     * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
+     * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
+     * to finish signing in.
+     * @param {string} providerName one of the configured providers (eg 'facebook', 'instagram', 'google', 'apple', 'spotify')
+     * @param {string} callbackUrl url on your website/app that will receive the sign in result
+     * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
+     */
+    startOAuthProviderSignIn(providerName, callbackUrl) {
+        // this.user = null;
+        return this.client.api.startOAuthProviderSignIn(providerName, callbackUrl)
+        .then(details => {
+            return details.redirectUrl;
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
+     * Use this method to finish OAuth flow from your callbackUrl.
+     * @param {string} callbackResult result received in your.callback/url?result
+     */
+    finishOAuthProviderSignIn(callbackResult) {
+        this.user = null;
+        return this.client.api.finishOAuthProviderSignIn(callbackResult)
+        .then(details => {
+            this.accessToken = details.accessToken;
+            this.user = new AceBaseUser(details.user);
+            this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
+        })
+        // .catch(err => {
+        //     return { success: false, reason: err };
+        // });
+    }
+
+    /**
      * Signs out of the current account
      * @param {boolean} [everywhere=false] whether to sign out all clients, or only this one
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
@@ -134,6 +173,15 @@ class AceBaseClientAuth {
      */
     resetPassword(resetCode, newPassword) {
         return this.client.api.resetPassword(resetCode, newPassword);
+    }
+
+    /**
+     * Verifies an e-mail address using the code sent to the email address upon signing up
+     * @param {string} verificationCode
+     * @returns {Promise<void>} returns a promise that resolves when verification was successful
+     */
+    verifyEmailAddress(verificationCode) {
+        return this.client.api.verifyEmailAddress(verificationCode);
     }
 
     _updateUserDetails(details) {

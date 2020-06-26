@@ -543,6 +543,31 @@ class WebApi extends Api {
             });
         };
 
+        this.startOAuthProviderSignIn = (providerName, callbackUrl) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            return this._request("GET", `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}`)
+            .then(result => {
+                return { redirectUrl: result.redirectUrl };
+            })
+            .catch(err => {
+                throw err;
+            });
+        }
+
+        this.finishOAuthProviderSignIn = (callbackResult) => {
+            /** @type {{ provider: { name: string, access_token: string }, access_token: string, user: AceBaseUser }} */
+            let result;
+            try {
+                result = JSON.parse(Buffer.from(callbackResult, 'base64').toString('utf8'));
+            }
+            catch(err) {
+                return Promise.reject(`Invalid result`);
+            }
+            accessToken = result.access_token;
+            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
+            return Promise.resolve({ user: result.user, accessToken, provider: result.provider });
+        }
+
         this.signOut = (everywhere = false) => {
             if (!accessToken) { return Promise.resolve(); }
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
@@ -572,6 +597,14 @@ class WebApi extends Api {
         this.forgotPassword = (email) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("POST", `${this.url}/auth/${this.dbname}/forgot_password`, { email })
+            .catch(err => {
+                throw err;
+            });
+        };
+
+        this.verifyEmailAddress = (verificationCode) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            return this._request("POST", `${this.url}/auth/${this.dbname}/verify_email`, { code: verificationCode })
             .catch(err => {
                 throw err;
             });

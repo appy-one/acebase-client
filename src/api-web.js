@@ -543,7 +543,7 @@ class WebApi extends Api {
             });
         };
 
-        this.startOAuthProviderSignIn = (providerName, callbackUrl) => {
+        this.startAuthProviderSignIn = (providerName, callbackUrl) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request("GET", `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}`)
             .then(result => {
@@ -554,8 +554,8 @@ class WebApi extends Api {
             });
         }
 
-        this.finishOAuthProviderSignIn = (callbackResult) => {
-            /** @type {{ provider: { name: string, access_token: string }, access_token: string, user: AceBaseUser }} */
+        this.finishAuthProviderSignIn = (callbackResult) => {
+            /** @type {{ provider: { name: string, access_token: string, refresh_token: string, expires_in: number }, access_token: string, user: AceBaseUser }} */
             let result;
             try {
                 result = JSON.parse(Buffer.from(callbackResult, 'base64').toString('utf8'));
@@ -566,6 +566,17 @@ class WebApi extends Api {
             accessToken = result.access_token;
             this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
             return Promise.resolve({ user: result.user, accessToken, provider: result.provider });
+        }
+
+        this.refreshAuthProviderToken = (providerName, refreshToken) => {
+            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            return this._request("GET", `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}`)
+            .then(result => {
+                return result;
+            })
+            .catch(err => {
+                throw err;
+            });
         }
 
         this.signOut = (everywhere = false) => {

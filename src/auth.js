@@ -29,10 +29,7 @@ class AceBaseClientAuth {
             this.user = new AceBaseUser(details.user);
             this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
             return { user: this.user, accessToken: this.accessToken }; // success: true, 
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**
@@ -49,10 +46,7 @@ class AceBaseClientAuth {
             this.user = new AceBaseUser(details.user);
             this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
             return { user: this.user, accessToken: this.accessToken }; //success: true, 
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**
@@ -68,49 +62,85 @@ class AceBaseClientAuth {
             this.user = new AceBaseUser(details.user);
             this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
             return { user: this.user, accessToken: this.accessToken }; // success: true, 
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**
-     * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
+     * If the server has been configured with Auth providers, use this to kick off the authentication flow.
      * This method returs a Promise that resolves with the url you have to redirect your user to authenticate 
      * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
      * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
      * to finish signing in.
-     * @param {string} providerName one of the configured providers (eg 'facebook', 'instagram', 'google', 'apple', 'spotify')
+     * @param {string} providerName one of the configured providers (eg 'facebook', 'google', 'apple', 'spotify')
      * @param {string} callbackUrl url on your website/app that will receive the sign in result
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
-    startOAuthProviderSignIn(providerName, callbackUrl) {
+    startAuthProviderSignIn(providerName, callbackUrl) {
         // this.user = null;
-        return this.client.api.startOAuthProviderSignIn(providerName, callbackUrl)
+        return this.client.api.startAuthProviderSignIn(providerName, callbackUrl)
         .then(details => {
             return details.redirectUrl;
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**
      * Use this method to finish OAuth flow from your callbackUrl.
      * @param {string} callbackResult result received in your.callback/url?result
+     * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }>}
      */
-    finishOAuthProviderSignIn(callbackResult) {
+    finishAuthProviderSignIn(callbackResult) {
         this.user = null;
-        return this.client.api.finishOAuthProviderSignIn(callbackResult)
+        return this.client.api.finishAuthProviderSignIn(callbackResult)
         .then(details => {
             this.accessToken = details.accessToken;
             this.user = new AceBaseUser(details.user);
             this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
             return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
+        });
+    }
+
+    /**
+     * Refreshes an expiring access token with the refresh token returned from finishAuthProviderSignIn
+     * @param {string} providerName
+     * @param {string} refreshToken 
+     * @returns 
+     */
+    refreshAuthProviderToken(providerName, refreshToken) {
+        return this.client.api.refreshAuthProviderToken(providerName, refreshToken)
+        .then(details => {
+            return { provider: details.provider };
         })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+    }
+
+    /**
+     * Signs in with an external auth provider by redirecting the user to the provider's login page.
+     * After signing in, the user will be redirected to the current browser url. Execute
+     * getRedirectResult() when your page is loaded again to check if the user was authenticated.
+     * @param {string} providerName 
+     */
+    signInWithRedirect(providerName) {
+        if (typeof window === 'undefined') {
+            throw new Error(`signInWithRedirect can only be used within a browser context`);
+        }
+        return this.startAuthProviderSignIn(providerName, window.location.href)
+        .then(redirectUrl => {
+            window.location.href = redirectUrl;
+        });
+    }
+
+    /** 
+     * Checks if the user authentication with an auth provider. 
+     */
+    getRedirectResult() {
+        if (typeof window === 'undefined') {
+            throw new Error(`getRedirectResult can only be used within a browser context`);
+        }
+        const match = window.location.search.match(/[?&]result=(.*?)(?:&|$)/);
+        const callbackResult = match && match[1];
+        if (!callbackResult) {
+            return Promise.resolve(null);
+        }
+        return this.finishAuthProviderSignIn(callbackResult);
     }
 
     /**
@@ -128,11 +158,7 @@ class AceBaseClientAuth {
             let user = this.user;
             this.user = null;
             this.eventCallback("signout", { source: 'signout', user });
-            // return { success: true };
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**
@@ -150,10 +176,7 @@ class AceBaseClientAuth {
             this.accessToken = result.accessToken;
             this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
             return { accessToken: result.accessToken }; //success: true, 
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**
@@ -197,10 +220,7 @@ class AceBaseClientAuth {
                 this.user[key] = result.user[key];
             });
             return { user: this.user }; // success: true
-        })
-        // .catch(err => {
-        //     return { success: false, reason: err };
-        // });
+        });
     }
 
     /**

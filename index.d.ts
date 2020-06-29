@@ -26,6 +26,17 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
     disconnect(): void
 }
 
+export interface IAceBaseAuthProviderSignInResult { 
+    user: AceBaseUser, 
+    accessToken: string, 
+    provider: IAceBaseAuthProviderTokens 
+}
+export interface IAceBaseAuthProviderTokens { 
+    name: string, 
+    access_token: string, 
+    refresh_token: string, 
+    expires_in: number 
+}
 export class AceBaseClientAuth {
     user?: AceBaseUser
     accessToken: string
@@ -59,18 +70,40 @@ export class AceBaseClientAuth {
      * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
      * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
      * to finish signing in.
-     * @param {string} providerName one of the configured providers (eg 'facebook', 'instagram', 'google', 'apple', 'spotify')
+     * @param {string} providerName one of the configured providers (eg 'facebook', 'google', 'apple', 'spotify')
      * @param {string} callbackUrl url on your website/app that will receive the sign in result
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
-    startOAuthProviderSignIn(providerName: string, callbackUrl: string): Promise<string>
+    startAuthProviderSignIn(providerName: string, callbackUrl: string): Promise<string>
 
     /**
      * Use this method to finish OAuth flow from your callbackUrl.
      * @param {string} callbackResult result received in your.callback/url?result
-     * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string } }>}
      */
-    finishOAuthProviderSignIn(callbackResult): Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string } }>
+    finishAuthProviderSignIn(callbackResult): Promise<IAceBaseAuthProviderSignInResult>
+
+    /**
+     * Refreshes an expiring access token with the refresh token returned from finishAuthProviderSignIn
+     * @param {string} providerName
+     * @param {string} refreshToken
+     */
+    refreshAuthProviderToken(providerName: string, refreshToken: string): Promise<{ provider: IAceBaseAuthProviderTokens }>
+
+    /**
+     * Signs in with an external auth provider by redirecting the user to the provider's login page.
+     * After signing in, the user will be redirected to the current browser url. Execute
+     * getRedirectResult() when your page is loaded again to check if the user was authenticated.
+     * @param {string} providerName 
+     */
+    signInWithRedirect(providerName: string): void;
+
+    /** 
+     * Checks if the user authentication with an auth provider. 
+     */
+    getRedirectResult(): Promise<IAceBaseAuthProviderSignInResult>;
+
+    // TODO:
+    // signInWithPopup(providerName: string): Promise<IAceBaseAuthProviderSignInResult>;
 
     /**
      * Signs out of the current account

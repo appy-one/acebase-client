@@ -76,8 +76,7 @@ class AceBaseClientAuth {
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
     startAuthProviderSignIn(providerName, callbackUrl) {
-        // this.user = null;
-        return this.client.api.startAuthProviderSignIn(providerName, callbackUrl)
+        return this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user)
         .then(details => {
             return details.redirectUrl;
         });
@@ -89,7 +88,6 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }>}
      */
     finishAuthProviderSignIn(callbackResult) {
-        this.user = null;
         return this.client.api.finishAuthProviderSignIn(callbackResult)
         .then(details => {
             this.accessToken = details.accessToken;

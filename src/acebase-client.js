@@ -144,6 +144,9 @@ class AceBaseClient extends AceBaseBase {
         this.api.disconnect();
     }
 
+    callExtension(method, path) {
+        return this.api.callExtension(method, path);
+    }
 }
 
 class PromiseTimeoutError extends Error {}

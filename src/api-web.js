@@ -989,6 +989,10 @@ class WebApi extends Api {
         });
     }
 
+    callExtension(method, path) {
+        return this._request(method.toUpperCase(), `${this.url}/ext/${this.dbname}/${path}`);
+    }
+
     /**
      * 
      * @param {string} path 

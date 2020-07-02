@@ -24,6 +24,13 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
     readonly connected: boolean
     connect(): Promise<void>
     disconnect(): void
+
+    /**
+     * Calls an extension method that was added to the connected server with the .extend method and returns the result
+     * @param method method of your extension
+     * @param path path of your extension
+     */
+    callExtension(method:'get'|'put'|'post'|'delete', path: string): Promise<any>
 }
 
 export interface IAceBaseAuthProviderSignInResult { 

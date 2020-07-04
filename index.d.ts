@@ -29,8 +29,9 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
      * Calls an extension method that was added to the connected server with the .extend method and returns the result
      * @param method method of your extension
      * @param path path of your extension
+     * @param data data to post (put/post methods) or to add to querystring
      */
-    callExtension(method:'get'|'put'|'post'|'delete', path: string): Promise<any>
+    callExtension(method:'get'|'put'|'post'|'delete', path: string, data?: any): Promise<any>
 }
 
 export interface IAceBaseAuthProviderSignInResult { 

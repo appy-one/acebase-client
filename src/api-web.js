@@ -989,8 +989,18 @@ class WebApi extends Api {
         });
     }
 
-    callExtension(method, path) {
-        return this._request(method.toUpperCase(), `${this.url}/ext/${this.dbname}/${path}`);
+    callExtension(method, path, data) {
+        method = method.toUpperCase();
+        const postData = ['PUT','POST'].includes(method) ? data : null;
+        let url = `${this.url}/ext/${this.dbname}/${path}`;
+        if (data && !['PUT','POST'].includes(method)) {
+            // Add to query string
+            if (typeof data !== 'string') {
+                throw new Error('data must be a string with query parameters, like "index=3&name=Something"')
+            }
+            url += `?` + data;
+        }
+        return this._request(method, url, postData);
     }
 
     /**

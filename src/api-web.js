@@ -411,7 +411,7 @@ class WebApi extends Api {
             const completedCallback = (data) => {
                 if (data.id === id) {
                     this.socket.off("tx_completed", completedCallback);
-                    if (this._cache) {
+                    if (this._cache && typeof cacheUpdateVal !== 'undefined') {
                         // Update cache db value
                         this._cache.db.api.set(cachePath, cacheUpdateVal).then(() => {
                             txResolve(this);
@@ -430,27 +430,6 @@ class WebApi extends Api {
             };
             if (this._connected) { 
                 connectedCallback(); 
-            }
-            else if (this._cache) {
-                // Use cache db
-                let newValue;
-                return this._cache.db.api.transaction(cachePath, currentValue => {
-                    newValue = callback(currentValue);
-                    return newValue;
-                })
-                .then(() => {
-                    if (typeof newValue !== 'undefined') {
-                        // Store as pending 'remove' or 'set' operation
-                        const op = { type: newValue === null ? 'remove' : 'set', path, data: newValue, callback: callback.toString() };
-                        this._cache.db.api.set(`${this.dbname}/pending/${id}`, op); 
-                    }
-                    // Perform transaction again once connection is established.
-                    // DISABLED because this _should_ be executed during sync instead:
-                    // this._connectHooks.push(() => {
-                    //     this._cache.db.api.set(`${this.dbname}/pending/${id}`, null); // remove pending transaction 
-                    //     connectedCallback(); // Proceed with normal online flow (callback is executed again with live data)
-                    // });
-                });
             }
             else { 
                 // DISABLED because it is unclear to calling code what we're waiting for:
@@ -995,8 +974,15 @@ class WebApi extends Api {
         let url = `${this.url}/ext/${this.dbname}/${path}`;
         if (data && !['PUT','POST'].includes(method)) {
             // Add to query string
-            if (typeof data !== 'string') {
-                throw new Error('data must be a string with query parameters, like "index=3&name=Something"')
+            if (typeof data === 'object') {
+                // Convert object to querystring
+                data = Object.keys(data)
+                    .filter(key => typeof data[key] !== 'undefined')
+                    .map(key => key + '=' + encodeURIComponent(JSON.stringify(data[key])))
+                    .join('&')
+            }
+            else if (typeof data !== 'string' || !data.includes('=')) {
+                throw new Error('data must be an object, or a string with query parameters, like "index=3&name=Something"');
             }
             url += `?` + data;
         }

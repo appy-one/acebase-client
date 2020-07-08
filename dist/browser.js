@@ -7552,7 +7552,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signIn(username, password) {
-        this.user = null;
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signIn(username, password));
+        }
         return this.client.api.signIn(username, password)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -7569,7 +7571,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signInWithEmail(email, password) {
-        this.user = null;
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signInWithEmail(email, password));
+        }
         return this.client.api.signInWithEmail(email, password)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -7585,7 +7589,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signInWithToken(accessToken) {
-        this.user = null;
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signInWithToken(accessToken));
+        }
         return this.client.api.signInWithToken(accessToken)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -7606,6 +7612,9 @@ class AceBaseClientAuth {
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
     startAuthProviderSignIn(providerName, callbackUrl) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.startAuthProviderSignIn(providerName, callbackUrl));
+        }
         return this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user)
         .then(details => {
             return details.redirectUrl;
@@ -7618,6 +7627,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }>}
      */
     finishAuthProviderSignIn(callbackResult) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.finishAuthProviderSignIn(callbackResult));
+        }
         return this.client.api.finishAuthProviderSignIn(callbackResult)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -7631,9 +7643,12 @@ class AceBaseClientAuth {
      * Refreshes an expiring access token with the refresh token returned from finishAuthProviderSignIn
      * @param {string} providerName
      * @param {string} refreshToken 
-     * @returns 
+     * @returns {Promise<{ provider: IAceBaseAuthProviderTokens }}
      */
     refreshAuthProviderToken(providerName, refreshToken) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.refreshAuthProviderToken(providerName, refreshToken));
+        }
         return this.client.api.refreshAuthProviderToken(providerName, refreshToken)
         .then(details => {
             return { provider: details.provider };
@@ -7664,7 +7679,7 @@ class AceBaseClientAuth {
             throw new Error(`getRedirectResult can only be used within a browser context`);
         }
         const match = window.location.search.match(/[?&]result=(.*?)(?:&|$)/);
-        const callbackResult = match && match[1];
+        const callbackResult = match && decodeURIComponent(match[1]);
         if (!callbackResult) {
             return Promise.resolve(null);
         }
@@ -7677,7 +7692,10 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
     signOut(everywhere) {
-        if (!this.user) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signOut(everywhere));
+        }
+        else if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         return this.client.api.signOut(everywhere)
@@ -7696,7 +7714,10 @@ class AceBaseClientAuth {
      * @returns {Promise<{ accessToken: string }>} returns a promise that resolves with a new access token
      */
     changePassword(oldPassword, newPassword) {
-        if (!this.user) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.changePassword(oldPassword, newPassword));
+        }
+        else if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         return this.client.api.changePassword(this.user.uid, oldPassword, newPassword)
@@ -7713,6 +7734,9 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves once the request has been processed
      */
     forgotPassword(email) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.forgotPassword(email));
+        }
         return this.client.api.forgotPassword(email);
     }
 
@@ -7723,6 +7747,9 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
      */
     resetPassword(resetCode, newPassword) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.resetPassword(resetCode, newPassword));
+        }
         return this.client.api.resetPassword(resetCode, newPassword);
     }
 
@@ -7732,10 +7759,16 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves when verification was successful
      */
     verifyEmailAddress(verificationCode) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.verifyEmailAddress(verificationCode));
+        }
         return this.client.api.verifyEmailAddress(verificationCode);
     }
 
     _updateUserDetails(details) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this._updateUserDetails(details));
+        }
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
@@ -7796,6 +7829,9 @@ class AceBaseClientAuth {
         if (!details.password) {
             return Promise.reject({ code: 'invalid_details', message: 'No password given' });
         }
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signUp(details));
+        }
         const isAdmin = this.user && this.user.uid === 'admin';
         if (this.user && !isAdmin) {
             // Sign out of current account
@@ -7826,6 +7862,9 @@ class AceBaseClientAuth {
      * @returns {Promise<void>}
      */
     deleteAccount(uid) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.deleteAccount(uid));
+        }
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
@@ -8089,6 +8128,7 @@ class AceBaseBase extends EventEmitter {
 
         if (!options) { options = {}; }
 
+        this.setMaxListeners(50); // Prevent warning for >10 "ready" event listeners, increase to 50
         this.once("ready", () => {
             this._ready = true;
         });
@@ -8428,14 +8468,26 @@ class DataReference {
      * @returns {Promise<DataReference>} promise that resolves with this reference when completed (when not using onComplete callback)
      */
     set(value, onComplete = undefined) {
+        const handleError = err => {
+            if (typeof onComplete === 'function') {
+                try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
+            }
+            else {
+                // throw again
+                return Promise.reject(err);
+            }
+        };
         if (this.isWildcardPath) {
-            throw new Error(`Cannot set the value of a path with wildcards and/or variables`);
+            return handleError(new Error(`Cannot set the value of wildcard path "/${this.path}"`));
         }
         if (this.parent === null) {
-            throw new Error(`Cannot set the root object. Use update, or set individual child properties`);
+            return handleError(new Error(`Cannot set the root object. Use update, or set individual child properties`));
         }
         if (typeof value === 'undefined') {
-            throw new TypeError(`Cannot store value undefined`);
+            return handleError(new TypeError(`Cannot store undefined value in "/${this.path}"`));
+        }
+        if (!this.db.isReady) {
+            return this.db.ready().then(() => this.set(value, onComplete));
         }
         value = this.db.types.serialize(this.path, value);
         return this.db.api.set(this.path, value)
@@ -8445,13 +8497,7 @@ class DataReference {
             }
         })
         .catch(err => {
-            if (typeof onComplete === 'function') {
-                try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
-            }
-            else {
-                // throw again
-                throw err;
-            }
+            return handleError(err);
         })
         .then(() => {
             return this;
@@ -8465,8 +8511,17 @@ class DataReference {
      * @return {Promise<DataReference>} returns promise that resolves with this reference once completed (when not using onComplete callback)
      */
     update(updates, onComplete = undefined) {
+        const handleError = err => {
+            if (typeof onComplete === 'function') {
+                try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
+            }
+            else {
+                // throw again
+                return Promise.reject(err);
+            }
+        };
         if (this.isWildcardPath) {
-            throw new Error(`Cannot update the value of a path with wildcards and/or variables`);
+            return handleError(new Error(`Cannot update the value of wildcard path "/${this.path}"`));
         }
         let promise;
         if (typeof updates !== "object" || updates instanceof Array || updates instanceof ArrayBuffer || updates instanceof Date) {
@@ -8474,7 +8529,10 @@ class DataReference {
         }
         else if (Object.keys(updates).length === 0) {
             console.warn(`update called on path "/${this.path}", but there is nothing to update`);
-            return Promise.resolve();
+            promise = Promise.resolve();
+        }
+        else if (!this.db.isReady) {
+            return this.db.ready().then(() => this.update(updates, onComplete));
         }
         else {            
             updates = this.db.types.serialize(this.path, updates);
@@ -8486,12 +8544,7 @@ class DataReference {
             }
         })
         .catch(err => {
-            if (typeof onComplete === 'function') {
-                try { onComplete(err); } catch(err) { console.error(`Error in onComplete callback:`, err); }
-            }
-            else {
-                throw err;
-            }
+            return handleError(err);
         })
         .then(() => {
             return this;
@@ -8506,7 +8559,10 @@ class DataReference {
      */
     transaction(callback) {
         if (this.isWildcardPath) {
-            throw new Error(`Cannot start a transaction on a path with wildcards and/or variables`);
+            return Promise.reject(new Error(`Cannot start a transaction on wildcard path "/${this.path}"`));
+        }
+        if (!this.db.isReady) {
+            return this.db.ready().then(() => this.transaction(callback));
         }
         let throwError;
         let cb = (currentValue) => {
@@ -8607,79 +8663,88 @@ class DataReference {
         };
         this[_private].callbacks.push(cb);
 
-        let authorized = this.db.api.subscribe(this.path, event, cb.ours);
-        const allSubscriptionsStoppedCallback = () => {
-            let callbacks = this[_private].callbacks;
-            callbacks.splice(callbacks.indexOf(cb), 1);
-            this.db.api.unsubscribe(this.path, event, cb.ours);
-        };
-        if (authorized instanceof Promise) {
-            // Web API now returns a promise that resolves if the request is allowed
-            // and rejects when access is denied by the set security rules
-            authorized.then(() => {
-                // Access granted
-                eventPublisher.start(allSubscriptionsStoppedCallback);
-            })
-            .catch(err => {
-                // Access denied?
-                // Cancel subscription
+        const subscribe = () => {
+            let authorized = this.db.api.subscribe(this.path, event, cb.ours);
+            const allSubscriptionsStoppedCallback = () => {
                 let callbacks = this[_private].callbacks;
                 callbacks.splice(callbacks.indexOf(cb), 1);
                 this.db.api.unsubscribe(this.path, event, cb.ours);
+            };
+            if (authorized instanceof Promise) {
+                // Web API now returns a promise that resolves if the request is allowed
+                // and rejects when access is denied by the set security rules
+                authorized.then(() => {
+                    // Access granted
+                    eventPublisher.start(allSubscriptionsStoppedCallback);
+                })
+                .catch(err => {
+                    // Access denied?
+                    // Cancel subscription
+                    let callbacks = this[_private].callbacks;
+                    callbacks.splice(callbacks.indexOf(cb), 1);
+                    this.db.api.unsubscribe(this.path, event, cb.ours);
 
-                // Call cancelCallbacks
-                eventPublisher.cancel(err.message);
-                cancelCallback && cancelCallback(err.message);
-            });
+                    // Call cancelCallbacks
+                    eventPublisher.cancel(err.message);
+                    cancelCallback && cancelCallback(err.message);
+                });
+            }
+            else {
+                // Local API, always authorized
+                eventPublisher.start(allSubscriptionsStoppedCallback);
+            }
+
+            if (callback && !this.isWildcardPath) {
+                // If callback param is supplied (either a callback function or true or something else truthy),
+                // it will fire events for current values right now.
+                // Otherwise, it expects the .subscribe methode to be used, which will then
+                // only be called for future events
+                if (event === "value") {
+                    this.get(snap => {
+                        eventPublisher.publish(snap);
+                        useCallback && callback(snap);
+                    });
+                }
+                else if (event === "child_added") {
+                    this.get(snap => {
+                        const val = snap.val();
+                        if (val === null || typeof val !== "object") { return; }
+                        Object.keys(val).forEach(key => {
+                            let childSnap = new DataSnapshot(this.child(key), val[key]);
+                            eventPublisher.publish(childSnap);
+                            useCallback && callback(childSnap);
+                        });
+                    });
+                }
+                else if (event === "notify_child_added") {
+                    // Use the reflect API to get current children. 
+                    // NOTE: This does not work with AceBaseServer <= v0.9.7, only when signed in as admin
+                    const step = 100;
+                    let limit = step, skip = 0;
+                    const more = () => {
+                        this.db.api.reflect(this.path, "children", { limit, skip })
+                        .then(children => {
+                            children.list.forEach(child => {
+                                const childRef = this.child(child.key);
+                                eventPublisher.publish(childRef);
+                                useCallback && callback(childRef);
+                            })
+                            if (children.more) {
+                                skip += step;
+                                more();
+                            }
+                        });
+                    };
+                    more();
+                }
+            }
+        };
+
+        if (this.db.isReady) {
+            subscribe();
         }
         else {
-            // Local API, always authorized
-            eventPublisher.start(allSubscriptionsStoppedCallback);
-        }
-
-        if (callback && !this.isWildcardPath) {
-            // If callback param is supplied (either a callback function or true or something else truthy),
-            // it will fire events for current values right now.
-            // Otherwise, it expects the .subscribe methode to be used, which will then
-            // only be called for future events
-            if (event === "value") {
-                this.get(snap => {
-                    eventPublisher.publish(snap);
-                    useCallback && callback(snap);
-                });
-            }
-            else if (event === "child_added") {
-                this.get(snap => {
-                    const val = snap.val();
-                    if (val === null || typeof val !== "object") { return; }
-                    Object.keys(val).forEach(key => {
-                        let childSnap = new DataSnapshot(this.child(key), val[key]);
-                        eventPublisher.publish(childSnap);
-                        useCallback && callback(childSnap);
-                    });
-                });
-            }
-            else if (event === "notify_child_added") {
-                // Use the reflect API to get current children. 
-                // NOTE: This does not work with AceBaseServer <= v0.9.7, only when signed in as admin
-                const step = 100;
-                let limit = step, skip = 0;
-                const more = () => {
-                    this.db.api.reflect(this.path, "children", { limit, skip })
-                    .then(children => {
-                        children.list.forEach(child => {
-                            const childRef = this.child(child.key);
-                            eventPublisher.publish(childRef);
-                            useCallback && callback(childRef);
-                        })
-                        if (children.more) {
-                            skip += step;
-                            more();
-                        }
-                    });
-                };
-                more();
-            }
+            this.db.ready(subscribe);
         }
 
         return eventStream;
@@ -8707,7 +8772,15 @@ class DataReference {
                 cb.subscr.unsubscribe();
             });
         }
-        this.db.api.unsubscribe(this.path, event, callback);
+        const unsubscribe = () => {
+            this.db.api.unsubscribe(this.path, event, callback);
+        };
+        if (this.db.isReady) {
+            unsubscribe();
+        }
+        else {
+            this.db.ready(unsubscribe);
+        }
         return this;
     }
 
@@ -8718,8 +8791,9 @@ class DataReference {
      * @returns {Promise<DataSnapshot>|void} returns a promise that resolves with a snapshot of the data, or nothing if callback is used
      */
     get(optionsOrCallback = undefined, callback = undefined) {
-        if (this.isWildcardPath) {
-            throw new Error(`Cannot get the value of a path with wildcards and/or variables. Use .query() instead`);
+        if (!this.db.isReady) {
+            const promise = this.db.ready().then(() => this.get(optionsOrCallback, callback));
+            return typeof optionsOrCallback !== 'function' && typeof callback !== 'function' ? promise : undefined; // only return promise if no callback is used
         }
 
         callback = 
@@ -8728,6 +8802,12 @@ class DataReference {
             : typeof callback === 'function'
                 ? callback
                 : undefined;
+
+        if (this.isWildcardPath) {
+            const error = new Error(`Cannot get value of wildcard path "/${this.path}". Use .query() instead`);
+            if (typeof callback === 'function') { throw err; }
+            return Promise.reject(error);
+        }
 
         const options = 
             typeof optionsOrCallback === 'object' 
@@ -8798,7 +8878,9 @@ class DataReference {
      */
     push(value = undefined, onComplete = undefined) {
         if (this.isWildcardPath) {
-            throw new Error(`Cannot push to a path with wildcards and/or variables`);
+            const error = new Error(`Cannot push to wildcard path "/${this.path}"`);
+            if (typeof value === 'undefined' || typeof onComplete === 'function') { throw error; }
+            return Promise.reject(error);
         }
 
         const id = ID.generate(); //uuid62.v1({ node: [0x61, 0x63, 0x65, 0x62, 0x61, 0x73] });
@@ -8818,10 +8900,10 @@ class DataReference {
      */
     remove() {
         if (this.isWildcardPath) {
-            throw new Error(`Cannot remove a path with wildcards and/or variables. Use query().remove instead`);
+            return Promise.reject(new Error(`Cannot remove wildcard path "/${this.path}". Use query().remove instead`));
         }
         if (this.parent === null) {
-            throw new Error(`Cannot remove the top node`);
+            throw Promise.reject(new Error(`Cannot remove the root node`));
         }
         return this.set(null);
     }
@@ -8832,7 +8914,10 @@ class DataReference {
      */
     exists() {
         if (this.isWildcardPath) {
-            throw new Error(`Cannot push to a path with wildcards and/or variables`);
+            return Promise.reject(new Error(`Cannot check wildcard path "/${this.path}" existence`));
+        }
+        else if (!this.db.isReady) {
+            return this.db.ready().then(() => this.exists());
         }
         return this.db.api.exists(this.path);
     }
@@ -8846,13 +8931,22 @@ class DataReference {
     }
 
     reflect(type, args) {
-        if (this.pathHasVariables) {
-            throw new Error(`Cannot reflect on a path with wildcards and/or variables`);
+        if (this.isWildcardPath) {
+            return Promise.reject(new Error(`Cannot reflect on wildcard path "/${this.path}"`));
+        }
+        else if (!this.db.isReady) {
+            return this.db.ready().then(() => this.reflect(type, args));
         }
         return this.db.api.reflect(this.path, type, args);
     }
 
     export(stream, options = { format: 'json' }) {
+        if (this.isWildcardPath) {
+            return Promise.reject(new Error(`Cannot export wildcard path "/${this.path}"`));
+        }
+        else if (!this.db.isReady) {
+            return this.db.ready().then(() => this.export(stream, options));
+        }
         return this.db.api.export(this.path, stream, options);
     }
 } 
@@ -8958,6 +9052,10 @@ class DataReferenceQuery {
      * @returns {Promise<DataSnapshotsArray>|Promise<DataReferencesArray>|void} returns an Promise that resolves with an array of DataReferences or DataSnapshots, or void if a callback is used instead
      */
     get(optionsOrCallback = undefined, callback = undefined) {
+        if (!this.ref.db.isReady) {
+            return this.ref.db.ready().then(() => this.get(optionsOrCallback, callback));
+        }
+
         callback = 
             typeof optionsOrCallback === 'function' 
             ? optionsOrCallback 

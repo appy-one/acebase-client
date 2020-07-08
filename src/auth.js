@@ -22,7 +22,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signIn(username, password) {
-        this.user = null;
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signIn(username, password));
+        }
         return this.client.api.signIn(username, password)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -39,7 +41,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signInWithEmail(email, password) {
-        this.user = null;
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signInWithEmail(email, password));
+        }
         return this.client.api.signInWithEmail(email, password)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -55,7 +59,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
     signInWithToken(accessToken) {
-        this.user = null;
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signInWithToken(accessToken));
+        }
         return this.client.api.signInWithToken(accessToken)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -76,6 +82,9 @@ class AceBaseClientAuth {
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
     startAuthProviderSignIn(providerName, callbackUrl) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.startAuthProviderSignIn(providerName, callbackUrl));
+        }
         return this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user)
         .then(details => {
             return details.redirectUrl;
@@ -88,6 +97,9 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }>}
      */
     finishAuthProviderSignIn(callbackResult) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.finishAuthProviderSignIn(callbackResult));
+        }
         return this.client.api.finishAuthProviderSignIn(callbackResult)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -101,9 +113,12 @@ class AceBaseClientAuth {
      * Refreshes an expiring access token with the refresh token returned from finishAuthProviderSignIn
      * @param {string} providerName
      * @param {string} refreshToken 
-     * @returns 
+     * @returns {Promise<{ provider: IAceBaseAuthProviderTokens }}
      */
     refreshAuthProviderToken(providerName, refreshToken) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.refreshAuthProviderToken(providerName, refreshToken));
+        }
         return this.client.api.refreshAuthProviderToken(providerName, refreshToken)
         .then(details => {
             return { provider: details.provider };
@@ -134,7 +149,7 @@ class AceBaseClientAuth {
             throw new Error(`getRedirectResult can only be used within a browser context`);
         }
         const match = window.location.search.match(/[?&]result=(.*?)(?:&|$)/);
-        const callbackResult = match && match[1];
+        const callbackResult = match && decodeURIComponent(match[1]);
         if (!callbackResult) {
             return Promise.resolve(null);
         }
@@ -147,7 +162,10 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
     signOut(everywhere) {
-        if (!this.user) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signOut(everywhere));
+        }
+        else if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         return this.client.api.signOut(everywhere)
@@ -166,7 +184,10 @@ class AceBaseClientAuth {
      * @returns {Promise<{ accessToken: string }>} returns a promise that resolves with a new access token
      */
     changePassword(oldPassword, newPassword) {
-        if (!this.user) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.changePassword(oldPassword, newPassword));
+        }
+        else if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
         return this.client.api.changePassword(this.user.uid, oldPassword, newPassword)
@@ -183,6 +204,9 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves once the request has been processed
      */
     forgotPassword(email) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.forgotPassword(email));
+        }
         return this.client.api.forgotPassword(email);
     }
 
@@ -193,6 +217,9 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
      */
     resetPassword(resetCode, newPassword) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.resetPassword(resetCode, newPassword));
+        }
         return this.client.api.resetPassword(resetCode, newPassword);
     }
 
@@ -202,10 +229,16 @@ class AceBaseClientAuth {
      * @returns {Promise<void>} returns a promise that resolves when verification was successful
      */
     verifyEmailAddress(verificationCode) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.verifyEmailAddress(verificationCode));
+        }
         return this.client.api.verifyEmailAddress(verificationCode);
     }
 
     _updateUserDetails(details) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this._updateUserDetails(details));
+        }
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
@@ -266,6 +299,9 @@ class AceBaseClientAuth {
         if (!details.password) {
             return Promise.reject({ code: 'invalid_details', message: 'No password given' });
         }
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.signUp(details));
+        }
         const isAdmin = this.user && this.user.uid === 'admin';
         if (this.user && !isAdmin) {
             // Sign out of current account
@@ -296,6 +332,9 @@ class AceBaseClientAuth {
      * @returns {Promise<void>}
      */
     deleteAccount(uid) {
+        if (!this.client.isReady) {
+            return this.client.ready().then(() => this.deleteAccount(uid));
+        }
         if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }

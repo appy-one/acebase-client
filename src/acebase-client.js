@@ -51,6 +51,10 @@ class AceBaseClient extends AceBaseBase {
             settings = new AceBaseClientConnectionSettings(settings);
         }
         super(settings.dbname, {});
+
+        const cacheDb = settings.cache && settings.cache.db;
+        const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
+
         let ready = false;
         this._connected = false;
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.blue); // `[ ${settings.dbname} ]`
@@ -65,9 +69,11 @@ class AceBaseClient extends AceBaseBase {
                 return; // We'll retry once connected
             }
             syncRunning = true;
-            return this.api.sync((eventName, args) => {
-                this.debug.log(eventName, args || '');
-                this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
+            return cacheReadyPromise.then(() => {
+                return this.api.sync((eventName, args) => {
+                    this.debug.log(eventName, args || '');
+                    this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
+                })
             })
             .catch(err => {
                 // Sync failed for some reason
@@ -86,10 +92,9 @@ class AceBaseClient extends AceBaseBase {
             syncTimeout && clearTimeout(syncTimeout);
             syncPendingChanges();
         });
-        if (settings.cache) {
-            const cacheDb = settings.cache.db;
+        if (cacheDb) {
             const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
-            cacheDb.ready(() => {
+            cacheReadyPromise.then(() => {
                 // Cache database is ready. Is remote database ready?
                 return promiseTimeout(
                     1000, 

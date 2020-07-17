@@ -6890,9 +6890,17 @@ class WebApi extends Api {
             return txPromise;
         };
 
-        this._request = (method, url, data, dataReceivedCallback) => {
-            if (this._connected) { 
-                return _request(method, url, data, accessToken, dataReceivedCallback)
+        /**
+         * @param {object} options 
+         * @param {string} options.url
+         * @param {'GET'|'PUT'|'POST'|'DELETE'} [options.method='GET']
+         * @param {any} [options.data] Data to post when method is PUT or POST
+         * @param {(chunk: string) => void} [options.dataReceivedCallback] A method that overrides the default data receiving handler. Override for streaming.
+         * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
+         */
+        this._request = (options) => {
+            if (this._connected || options.ignoreConnectionState === true) { 
+                return _request(options.method || 'GET', options.url, options.data, accessToken, options.dataReceivedCallback)
                 .catch(err => {
                     throw err;
                 });
@@ -6921,7 +6929,7 @@ class WebApi extends Api {
                         if (state !== 'wait') { return; }
                         state = 'connected';
                         clearTimeout(timeout); // Cancel timeout
-                        this._request(method, url, data)
+                        this._request(options)
                         .then(resolve)
                         .catch(reject);
                     };
@@ -6932,7 +6940,7 @@ class WebApi extends Api {
 
         this.signIn = (username, password) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'account', username, password, client_id: this.socket.id })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
                 // Make sure the connected websocket server knows who we are as well. 
@@ -6949,7 +6957,7 @@ class WebApi extends Api {
 
         this.signInWithEmail = (email, password) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'email', email, password, client_id: this.socket.id })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
                 this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
@@ -6962,7 +6970,7 @@ class WebApi extends Api {
 
         this.signInWithToken = (token) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signin`, { method: 'token', access_token: token, client_id: this.socket.id })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
                 this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
@@ -6975,7 +6983,7 @@ class WebApi extends Api {
 
         this.startAuthProviderSignIn = (providerName, callbackUrl) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("GET", `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}`)
+            return this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` })
             .then(result => {
                 return { redirectUrl: result.redirectUrl };
             })
@@ -7000,7 +7008,7 @@ class WebApi extends Api {
 
         this.refreshAuthProviderToken = (providerName, refreshToken) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("GET", `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}`)
+            return this._request({ url: `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}` })
             .then(result => {
                 return result;
             })
@@ -7012,7 +7020,7 @@ class WebApi extends Api {
         this.signOut = (everywhere = false) => {
             if (!accessToken) { return Promise.resolve(); }
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signout`, { client_id: this.socket.id, everywhere })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere } })
             .then(() => {
                 this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
                 accessToken = null;
@@ -7025,7 +7033,7 @@ class WebApi extends Api {
         this.changePassword = (uid, currentPassword, newPassword) => {
             if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/change_password`, { uid, password: currentPassword, new_password: newPassword })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } })
             .then(result => {
                 accessToken = result.access_token;
                 return { accessToken };
@@ -7037,7 +7045,7 @@ class WebApi extends Api {
     
         this.forgotPassword = (email) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/forgot_password`, { email })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/forgot_password`, data: { email } })
             .catch(err => {
                 throw err;
             });
@@ -7045,7 +7053,7 @@ class WebApi extends Api {
 
         this.verifyEmailAddress = (verificationCode) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/verify_email`, { code: verificationCode })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/verify_email`, data: { code: verificationCode } })
             .catch(err => {
                 throw err;
             });
@@ -7053,7 +7061,7 @@ class WebApi extends Api {
 
         this.resetPassword = (resetCode, newPassword) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/reset_password`, { code: resetCode, password: newPassword })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/reset_password`, data: { code: resetCode, password: newPassword } })
             .catch(err => {
                 throw err;
             });
@@ -7061,7 +7069,7 @@ class WebApi extends Api {
 
         this.signUp = (details, signIn = true) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/signup`, details)
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signup`, data: details })
             .then(result => {
                 if (signIn) {
                     accessToken = result.access_token;
@@ -7076,7 +7084,7 @@ class WebApi extends Api {
 
         this.updateUserDetails = (details) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/update`, details)
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/update`, data: details })
             .then(result => {
                 return { user: result.user };
             })
@@ -7087,7 +7095,7 @@ class WebApi extends Api {
 
         this.deleteAccount = (uid, signOut = true) => {
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request("POST", `${this.url}/auth/${this.dbname}/delete`, { uid })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } })
             .then(result => {
                 if (signOut) {
                     this.socket.emit("signout", accessToken);
@@ -7102,7 +7110,7 @@ class WebApi extends Api {
     }
 
     stats(options = undefined) {
-        return this._request("GET", `${this.url}/stats/${this.dbname}`);
+        return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
     sync(eventCallback) {
@@ -7309,7 +7317,7 @@ class WebApi extends Api {
             ]);
         }
         const data = JSON.stringify(Transport.serialize(value));
-        return this._request("PUT", `${this.url}/data/${this.dbname}/${path}`, data)
+        return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data })
         .then(() => {
             // return cacheUpdates && cacheUpdates.commit();
             return cache.use && cache.updateValue();
@@ -7341,7 +7349,7 @@ class WebApi extends Api {
             ]);
         }        
         const data = JSON.stringify(Transport.serialize(updates));
-        return this._request("POST", `${this.url}/data/${this.dbname}/${path}`, data)
+        return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data })
         .then(res => {
             return cache.use && cache.updateValue();
         })
@@ -7380,7 +7388,7 @@ class WebApi extends Api {
                 url += `?${query.join('&')}`;
             }
         }
-        return this._request("GET", url)
+        return this._request({ url })
         .then(data => {
             let val = Transport.deserialize(data);
             if (this._cache) {
@@ -7412,7 +7420,7 @@ class WebApi extends Api {
             // Not connected, peek cache
             return this._cache.db.api.exists(`${this.dbname}/cache/${path}`);
         }
-        return this._request("GET", `${this.url}/exists/${this.dbname}/${path}`)
+        return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
         .then(res => res.exists)
         .catch(err => {
             throw err;
@@ -7437,7 +7445,7 @@ class WebApi extends Api {
             }
             url += `?` + data;
         }
-        return this._request(method, url, postData);
+        return this._request({ method, url, data: postData, ignoreConnectionState: true });
     }
 
     /**
@@ -7478,7 +7486,7 @@ class WebApi extends Api {
             this._realtimeQueries[request.query_id] = { query, options };
         }
         const data = JSON.stringify(Transport.serialize(request));
-        return this._request("POST", `${this.url}/query/${this.dbname}/${path}`, data)
+        return this._request({ method: "POST", url: `${this.url}/query/${this.dbname}/${path}`, data })
         .then(data => {
             let results = Transport.deserialize(data);
             return results.list;
@@ -7490,14 +7498,14 @@ class WebApi extends Api {
 
     createIndex(path, key, options) {
         const data = JSON.stringify({ action: "create", path, key, options });
-        return this._request("POST", `${this.url}/index/${this.dbname}`, data)
+        return this._request({ method: "POST", url: `${this.url}/index/${this.dbname}`, data })
         .catch(err => {
             throw err;
         });
     }
 
     getIndexes() {
-        return this._request("GET", `${this.url}/index/${this.dbname}`)
+        return this._request({ url: `${this.url}/index/${this.dbname}` })
         .catch(err => {
             throw err;
         });         
@@ -7513,7 +7521,7 @@ class WebApi extends Api {
                 url += `&${query.join('&')}`;
             }
         }
-        return this._request("GET", url)
+        return this._request({ url })
         .catch(err => {
             throw err;
         }); 
@@ -7523,7 +7531,7 @@ class WebApi extends Api {
         options = options || {};
         options.format = 'json';
         let url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}`;
-        return this._request("GET", url, null, chunk => stream.write(chunk))
+        return this._request({ url, dataReceivedCallback: chunk => stream.write(chunk) })
         .catch(err => {
             throw err;
         });
@@ -9754,6 +9762,7 @@ class PathInfo {
         if (this.path === otherPath) { return true; }
         const otherKeys = getPathKeys(otherPath);
         return this.pathKeys.every((key, index) => {
+            if (index >= otherKeys.length) { return true; }
             const otherKey = otherKeys[index];
             return otherKey === key 
                 || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
@@ -9997,7 +10006,7 @@ class EventStream {
                     sub.callback(val);
                 }
                 catch(err) {
-                    debug.error(`Error running subscriber callback: ${err.message}`);
+                    console.error(`Error running subscriber callback: ${err.message}`);
                 }
             });
             return subscribers.length > 0;

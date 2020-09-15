@@ -53,6 +53,8 @@ const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
                 if (res.statusCode === 200) {
                     if (data[0] === '{') {
                         let val = JSON.parse(data);
+                        // console.log('Delaying data retrieval...')
+                        // setTimeout(() => resolve(val), 2500);
                         resolve(val);
                     }
                     else {
@@ -78,6 +80,11 @@ const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
                 }
             });
         });
+
+        req.on('error', (err) => {
+            reject(new AceBaseRequestError(options, null, err.name, err.message));
+        });
+
         if (postData.length > 0) {
             req.write(postData);
         }
@@ -226,11 +233,6 @@ class WebApi extends Api {
                         Object.keys(subscriptions).forEach(path => {
                             const events = [];
                             subscriptions[path].forEach(subscr => {
-                                if (this._cache) {
-                                    // Remove cache db subscription
-                                    console.assert(typeof subscr.cacheCallback !== 'undefined', 'When subscription was added, we were not connected so cacheCallback must have been set');
-                                    this._cache.db.api.unsubscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
-                                }
                                 const serverAlreadyNotifying = events.includes(subscr.event);
                                 if (!serverAlreadyNotifying) {
                                     events.push(subscr.event);
@@ -252,30 +254,30 @@ class WebApi extends Api {
                     // Existing connection was broken, by us or network
                     this._connected = false;
                     eventCallback && eventCallback('disconnect');
-                    if (this._cache) {
-                        // Set events on cache db so they will fire until we're reconnected again
-                        // console.log('Moving event subscriptions to cache db');
-                        Object.keys(subscriptions).forEach(path => {
-                            subscriptions[path].forEach(subscr => {
-                                subscr.cacheCallback = (err, path, newValue, oldValue) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue);
-                                this._cache.db.api.subscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
-                            });
-                        });
-                    }
                 });
 
                 socket.on("data-event", data => {
                     let val = Transport.deserialize(data.val);
-                    if (this._cache && !data.event.startsWith('notify_')) {
-                        this._cache.db.api.set(data.path, val.current); // Update cached value
-                    }
+                    // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
                     const pathSubs = subscriptions[data.subscr_path];
                     if (!pathSubs) {
                         // weird. we are not subscribed on this path?
                         this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
                         return;
                     }
-                    pathSubs.forEach(subscr => {
+                    let eventsFired = false;
+                    if (this._cache) {
+                        if (data.event === 'notify_child_removed') {
+                            this._cache.db.api.set(`${this.dbname}/cache/${data.path}`, null); // Remove cached value
+                            eventsFired = true;
+                        }
+                        else if (!data.event.startsWith('notify_')) {
+                            this._cache.db.api.set(`${this.dbname}/cache/${data.path}`, val.current); // Update cached value
+                            eventsFired = true;
+                        }
+                    }
+                    // Only fire events if they were not triggered by the cache db already (and they only fired if the cached data really changed!)
+                    !eventsFired && pathSubs.forEach(subscr => {
                         if (subscr.event === data.event) {
                             subscr.callback(null, data.path, val.current, val.previous);
                         }
@@ -320,13 +322,13 @@ class WebApi extends Api {
             const subscr = { path, event, callback };
             pathSubs.push(subscr);
 
-            if (this._cache && !this._connected) {
-                // Events are currently handled by cache db
+            if (this._cache) {
+                // Events are also handled by cache db
                 subscr.cacheCallback = (err, path, newValue, oldValue) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue);
-                return this._cache.db.api.subscribe(`${this.dbname}/cache/${path}`, event, subscr.cacheCallback);
+                this._cache.db.api.subscribe(`${this.dbname}/cache/${path}`, event, subscr.cacheCallback);
             }
 
-            if (serverAlreadyNotifying) {
+            if (serverAlreadyNotifying || !this._connected) {
                 return Promise.resolve();
             }
             return _websocketRequest(this.socket, "subscribe", { path, event }, accessToken);
@@ -339,26 +341,25 @@ class WebApi extends Api {
             const unsubscribeFrom = (subscriptions) => {
                 subscriptions.forEach(subscr => {
                     pathSubs.splice(pathSubs.indexOf(subscr), 1);
-                    if (this._cache && !this._connected) {
-                        // Events are currently handled by cache db, also remove those
-                        console.assert(typeof subscr.cacheCallback !== 'undefined', 'When subscription was added, we were not connected so cacheCallback must have been set');
+                    if (this._cache) {
+                        // Events are also handled by cache db, also remove those
+                        console.assert(typeof subscr.cacheCallback !== 'undefined', 'When subscription was added, cacheCallback must have been set');
                         this._cache.db.api.unsubscribe(`${this.dbname}/cache/${path}`, subscr.event, subscr.cacheCallback);
                     }
                 });
             };
 
             if (!event) {
-                // Unsubscribe from all events
-                // pathSubs = [];
+                // Unsubscribe from all events on path
                 unsubscribeFrom(pathSubs);
             }
             else if (!callback) {
-                // Unsubscribe from specific event
+                // Unsubscribe from specific event on path
                 const subscriptions = pathSubs.filter(subscr => subscr.event === event);
                 unsubscribeFrom(subscriptions);
             }
             else {
-                // Unsubscribe from a specific callback
+                // Unsubscribe from a specific callback on path event
                 const subscriptions = pathSubs.filter(subscr => subscr.event === event && subscr.callback === callback);
                 unsubscribeFrom(subscriptions);
             }
@@ -688,7 +689,7 @@ class WebApi extends Api {
                 if (pendingChanges === null) {
                     return; // No updates
                 }
-                const syncPromise = Object.keys(pendingChanges)
+                return Object.keys(pendingChanges)
                     .sort((a,b) => a < b ? 1 : -1) // sort z-a
                     .reduce((netChangeIds, id) => {
                         // Only get effective changes: 
@@ -713,6 +714,7 @@ class WebApi extends Api {
                     .reduce((prevPromise, id) => {
                         // Now process the net changes
                         const change = pendingChanges[id];
+                        this.debug.verbose(`SYNC processing change ${id}: `, change);
                         totalPendingChanges++;
                         const go = () => {
                             let promise;
@@ -731,11 +733,13 @@ class WebApi extends Api {
                             }
                             return promise
                             .then(() => {
+                                this.debug.verbose(`SYNC change ${id} processed ok`);
                                 delete pendingChanges[id];
                                 cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
                             })
                             .catch(err => {
                                 // Updating remote db failed
+                                this.debug.error(`SYNC change ${id} failed: ${err.message}`);
                                 if (!this._connected) {
                                     // Connection was broken, should retry later
                                     throw err;
@@ -753,14 +757,15 @@ class WebApi extends Api {
                         };
                         return prevPromise.then(go); // Chain to previous promise
                     }, Promise.resolve());
-                return syncPromise;
             })
             .then(() => {
+                this.debug.verbose(`SYNC push done`);
                 cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
                 return totalPendingChanges;
             })
             .catch(err => {
                 // 1 or more pending changes could not be processed.
+                this.debug.error(`SYNC push error: ${err.message}`);
                 if (typeof err === 'string') { 
                     err = { code: 'unknown', message: err, stack: 'n/a' }; 
                 }
@@ -783,24 +788,31 @@ class WebApi extends Api {
                     }
                     return paths;
                 }, []);
-                // Attach all events to cache db so they will fire for data changes
+                // Attach temp events to cache db so they will fire for data changes
                 Object.keys(this._subscriptions).forEach(path => {
                     this._subscriptions[path].forEach(subscr => {
-                        subscr.cacheCallback = (err, path, newValue, oldValue) => {
+                        subscr.tempCallback = (err, path, newValue, oldValue) => {
                             totalRemoteChanges++;
-                            subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue);
                         }
-                        cacheApi.subscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
+                        cacheApi.subscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.tempCallback);
                     });
                 });
                 // Fetch new data
-                const syncPullPromises = loadPaths.map(path => this.get(path, { allow_cache: false }));
+                const syncPullPromises = loadPaths.map(path => {
+                    this.debug.verbose(`SYNC pull "${path}"`);
+                    return this.get(path, { allow_cache: false })
+                    .catch(err => {
+                        this.debug.error(`SYNC pull error`, err);
+                        eventCallback && eventCallback('sync_pull_error', err);
+                    });
+                });
                 return Promise.all(syncPullPromises)
                 .then(() => {
-                    // Unsubscribe cache subscriptions
+                    // Unsubscribe temp cache subscriptions
                     Object.keys(this._subscriptions).forEach(path => {
                         this._subscriptions[path].forEach(subscr => {
-                            cacheApi.unsubscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.cacheCallback);
+                            cacheApi.unsubscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.tempCallback);
+                            delete subscr.tempCallback;
                         });
                     });
                 });
@@ -827,153 +839,346 @@ class WebApi extends Api {
             }
         })
         .then(() => {
+            this.debug.verbose(`SYNC done`);
             const info = { local: totalPendingChanges, remote: totalRemoteChanges };
             eventCallback && eventCallback('sync_done', info);
             return info;
         })
         .catch(err => {
+            this.debug.error(`SYNC error`, err);
             eventCallback && eventCallback('sync_error', err);
             throw err;
         });
     }
 
     set(path, value, options = { allow_cache: true }) {
-        const allowCache = options && options.allow_cache === true;
-        // let cacheUpdates;
-        // if (allowCache && this._cache) {
-        //     cacheUpdates = this._processCacheUpdate('set', path, value);
-        //     if (!this._connected) { 
-        //         // Don't try updating remote db if the websocket isn't connected
-        //         return cacheUpdates.promise;
-        //     }
-        // }
-        const cache = {
-            use: this._cache && allowCache,
-            updateValue: () => { 
-                return this._cache.db.api.set(`${this.dbname}/cache/${path}`, value); 
-            },
-            addPending: () => { 
-                const id = ID.generate(); 
-                const op = value === null ? { type: 'remove', path } : { type: 'set', path, data: value };
-                return this._cache.db.api.set(`${this.dbname}/pending/${id}`, op); 
-            }
+        const useCache = this._cache && options && options.allow_cache === true;
+        const updateServer = () => {
+            const data = JSON.stringify(Transport.serialize(value));
+            return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data })
         };
-        if (cache.use && !this._connected) {
-            // Not connected, update cache database only
-            return Promise.all([
-                cache.updateValue(),
-                cache.addPending()
-            ]);
+        if (!useCache) {
+            return updateServer();
         }
-        const data = JSON.stringify(Transport.serialize(value));
-        return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data })
-        .then(() => {
-            // return cacheUpdates && cacheUpdates.commit();
-            return cache.use && cache.updateValue();
-        })
-        .catch(err => {
-            // if (this._connected) {
-            //     cacheUpdates && cacheUpdates.rollback();
-            // }
-            if (cache.use && !this._connected) {
-                // It failed because we're not connected
-                return cache.addPending();
+
+        let rollbackValue;
+        const updateCache = () => {
+            return this._cache.db.api.transaction( `${this.dbname}/cache/${path}`, (currentValue) => {
+                rollbackValue = currentValue;
+                return value;
+            });
+        };
+        const rollbackCache = () => {
+            return this._cache.db.api.set(`${this.dbname}/cache/${path}`, rollbackValue);
+        };
+
+        const addPendingTransaction = () => {
+            const id = ID.generate(); 
+            return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value });
+        };
+
+        const cachePromise = updateCache()
+            .then(() => ({ success: true }))
+            .catch(err => ({ success: false, error: err }));
+
+        const serverPromise = !this._connected ? null : updateServer()
+            .then(() => ({ success: true }))
+            .catch(err => ({ success: false, error: err }));
+
+        Promise.all([ cachePromise, serverPromise ])
+        .then(([ cacheResult, serverResult ]) => {
+            if (serverPromise) {
+                // Server was being updated
+
+                if (serverResult.success) {
+                    // Server update success
+                    if (!cacheResult.success) { 
+                        // Cache update failed for some reason, remove the cached node?
+                        this.debug.error(`Failed to set cache for "${path}". Error: `, cacheResult.error);
+                        // NOT doing this because that would trigger data events such as "child_removed", "value" etc
+                        // deleteCache().catch(err => {
+                        //     this.debug.error(`Failed to remove cache for "${path}": `, err);
+                        // });
+                    }
+                }
+                else {
+                    // Server update failed
+                    if (cacheResult.success) {
+                        // Cache update did succeed, rollback to previous value
+                        this.debug.error(`Failed to set server value for "${path}", rolling back cache to previous value. Error:`, serverResult.error)
+                        rollbackCache().catch(err => {
+                            this.debug.error(`Failed to roll back cache? Error:`, err);
+                        });
+                    }
+                }
             }
-            throw err;
-        });
+            else if (cacheResult.success) {
+                // Server was not updated, cache update was successful.
+                // Add pending sync action
+
+                addPendingTransaction().catch(err => {
+                    this.debug.error(`Failed to add pending sync action for "${path}", rolling back cache to previous value. Error:`, err);
+                    rollbackCache().catch(err => {
+                        this.debug.error(`Failed to roll back cache? Error:`, err);
+                    });
+                });
+            }
+        })
+
+        // Use optimistic approach - return cache promise
+        return cachePromise;
     }
 
     update(path, updates, options = { allow_cache: true }) {
-        const allowCache = options && options.allow_cache === true;
-        const cache = {
-            use: this._cache && allowCache,
-            updateValue: () => { return this._cache.db.api.update(`${this.dbname}/cache/${path}`, updates); },
-            addPending: () => { const id = ID.generate(); return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'update', path, data: updates }); }
-        };
-        if (cache.use && !this._connected) {
-            // Not connected, update cache database only
-            return Promise.all([
-                cache.updateValue(),
-                cache.addPending()
-            ]);
-        }        
-        const data = JSON.stringify(Transport.serialize(updates));
-        return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data })
-        .then(res => {
-            return cache.use && cache.updateValue();
-        })
-        .catch(err => {
-            if (cache.use && !this._connected) {
-                // It failed because we're not connected
-                return cache.addPending();
-            }            
-            throw err;
-        });
-    }
-  
-    get(path, options = { allow_cache: true }) {
-        const allowCache = options && options.allow_cache === true;
-        if (allowCache && !this._connected && this._cache) {
-            // We're offline. Try loading from cache
-            return this._cache.db.api.get(`${this.dbname}/cache/${path}`, options);
+        const useCache = this._cache && options && options.allow_cache === true;
+        const updateServer = () => {
+            const data = JSON.stringify(Transport.serialize(updates));
+            return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data });
+        }
+        if (!useCache) {
+            return updateServer();
         }
 
-        // Get from server
-        let url = `${this.url}/data/${this.dbname}/${path}`;
-        let filtered = false;
-        if (options) {
-            let query = [];
-            if (options.exclude instanceof Array) { 
-                query.push(`exclude=${options.exclude.join(',')}`); 
-            }
-            if (options.include instanceof Array) { 
-                query.push(`include=${options.include.join(',')}`); 
-            }
-            if (typeof options.child_objects === "boolean") {
-                query.push(`child_objects=${options.child_objects}`);
-            }
-            if (query.length > 0) {
-                filtered = true;
-                url += `?${query.join('&')}`;
-            }
-        }
-        return this._request({ url })
-        .then(data => {
-            let val = Transport.deserialize(data);
-            if (this._cache) {
-                // Update cache without waiting
-                // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
-                // TODO: do update if no nested filters are used.
-                // if (filtered) {
-                //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
-                // }
-                // else if (!filtered) { 
-                if (!filtered) {
-                    const cachePath = `${this.dbname}/cache/${path}`;
-                    this._cache.db.api.set(cachePath, val)
-                    .catch(err => {
-                        this.debug.error(`Error caching data for "/${path}"`, err)
-                    });
+        let rollbackUpdates;
+        const updateCache = () => {
+            const cachePath = `${this.dbname}/cache/${path}`;
+            const properties = Object.keys(updates);
+            const cacheApi = this._cache.db.api;
+            return cacheApi.get(cachePath, { include: properties })
+            .then(currentValues=> {
+                rollbackUpdates = currentValues;
+                return cacheApi.update(cachePath, updates);
+            });
+        };
+        // const deleteCache = () => {
+        //     return this._cache.db.api.set(`${this.dbname}/cache/${path}`, null);
+        // };
+        const rollbackCache = () => {
+            return this._cache.db.api.update(`${this.dbname}/cache/${path}`, rollbackUpdates);
+        };
+
+        const addPendingTransaction = () => {
+            const id = ID.generate(); 
+            return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'update', path, data: updates });
+        };
+
+        const cachePromise = updateCache()
+            .then(() => ({ success: true }))
+            .catch(err => ({ success: false, error: err }));
+
+        const serverPromise = !this._connected ? null : updateServer()
+            .then(() => ({ success: true }))
+            .catch(err => ({ success: false, error: err }));
+
+        Promise.all([ cachePromise, serverPromise ])
+        .then(([ cacheResult, serverResult ]) => {
+            if (serverPromise) {
+                // Server was being updated
+
+                if (serverResult.success) {
+                    // Server update success
+                    if (!cacheResult.success) { 
+                        // Cache update failed for some reason, remove the cached node?
+                        this.debug.error(`Failed to update cache for "${path}". Error: `, err);
+                        // NOT doing this because that would trigger data events such as "child_removed", "value" etc
+                        // deleteCache().catch(err => {
+                        //     this.debug.error(`Failed to remove cache for "${path}": `, err);
+                        // });
+                    }
+                }
+                else {
+                    // Server update failed
+                    if (cacheResult.success) {
+                        // Cache update did succeed, rollback to previous value
+                        this.debug.error(`Failed to update server value for "${path}", rolling back cache to previous value. Error:`, serverResult.error)
+                        rollbackCache().catch(err => {
+                            this.debug.error(`Failed to roll back cache? Error:`, err);
+                        });
+                    }
                 }
             }
-            return val;
+            else if (cacheResult.success) {
+                // Server was not updated, cache update was successful.
+                // Add pending sync action
+
+                addPendingTransaction().catch(err => {
+                    this.debug.error(`Failed to add pending sync action for "${path}", rolling back cache to previous value. Error:`, err);
+                    rollbackCache().catch(err => {
+                        this.debug.error(`Failed to roll back cache? Error:`, err);
+                    });
+                });
+            }
         })
-        .catch(err => {
-            throw err;
-        });
+
+        // Use optimistic approach - return cache promise
+        return cachePromise;
     }
 
-    exists(path, options = { allow_cache: true }) {
-        const allowCache = options && options.allow_cache === true;
-        if (allowCache && !this._connected && this._cache) {
-            // Not connected, peek cache
-            return this._cache.db.api.exists(`${this.dbname}/cache/${path}`);
+    get(path, options = { allow_cache: true }) {
+        const useCache = this._cache && options && options.allow_cache === true;
+        const getServerValue = () => {
+            // Get from server
+            let url = `${this.url}/data/${this.dbname}/${path}`;
+            let filtered = false;
+            if (options) {
+                let query = [];
+                if (options.exclude instanceof Array) { 
+                    query.push(`exclude=${options.exclude.join(',')}`); 
+                }
+                if (options.include instanceof Array) { 
+                    query.push(`include=${options.include.join(',')}`); 
+                }
+                if (typeof options.child_objects === "boolean") {
+                    query.push(`child_objects=${options.child_objects}`);
+                }
+                if (query.length > 0) {
+                    filtered = true;
+                    url += `?${query.join('&')}`;
+                }
+            }
+            return this._request({ url })
+            .then(data => {
+                let val = Transport.deserialize(data);
+                if (this._cache) {
+                    // Update cache
+                    // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
+                    // TODO: do update if no nested filters are used.
+                    // if (filtered) {
+                    //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
+                    // }
+                    // else if (!filtered) { 
+                    if (!filtered) {
+                        const cachePath = `${this.dbname}/cache/${path}`;
+                        return this._cache.db.api.set(cachePath, val)
+                        .catch(err => {
+                            this.debug.error(`Error caching data for "/${path}"`, err)
+                        })
+                        .then(() => val);
+                    }
+                }
+                return val;
+            })
+            .catch(err => {
+                throw err;
+            });
+        };
+        const getCacheValue = () => {
+            return this._cache.db.api.get(`${this.dbname}/cache/${path}`, options);
+        };
+
+        if (!useCache) {
+            return getServerValue();
         }
-        return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
-        .then(res => res.exists)
-        .catch(err => {
-            throw err;
-        });
+        else if (!this._connected) {
+            return getCacheValue();
+        }
+        else {
+            // Get both, use cached value if available and server version takes too long
+            return new Promise((resolve, reject) => {
+                let wait = true, done = false;
+                const gotValue = (source, val) => {
+                    if (done) { return; }
+                    if (source === 'server') {
+                        done = true;
+                        console.log(`Using server value for "${path}"`);
+                        resolve(val);
+                    }
+                    else if (!wait) { 
+                        // Cached results, don't wait for server value
+                        done = true; 
+                        console.log(`Using cache value for "${path}"`);
+                        resolve(val); 
+                    }
+                    else {
+                        // Cached results, wait 1s before resolving with this value, server value might follow soon
+                        setTimeout(() => {
+                            if (done) { return; }
+                            console.log(`Using (delayed) cache value for "${path}"`);
+                            done = true;
+                            resolve(val);
+                        }, 1000);
+                    }
+                };
+                let errors = [];
+                const gotError = (source, error) => {
+                    errors.push({ source, error });
+                    if (errors.length === 2) { 
+                        // Both failed, reject with server error
+                        reject(errors.find(e => e.source === 'server'));
+                    }
+                };
+
+                getServerValue()
+                    .then(val => gotValue('server', val))
+                    .catch(err => (wait = false, gotError('server', err)));
+
+                getCacheValue()
+                    .then(val => gotValue('cache', val))
+                    .catch(err => gotError('cache', err));
+            });
+        }
+    }
+    
+    exists(path, options = { allow_cache: true }) {
+        const useCache = this._cache && options && options.allow_cache === true;
+        const getCacheExists = () => {
+            return this._cache.db.api.exists(`${this.dbname}/cache/${path}`);
+        };
+        const getServerExists = () => {
+            return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
+            .then(res => res.exists)
+            .catch(err => {
+                throw err;
+            });            
+        }
+        if (!useCache) {
+            return getServerExists();
+        }
+        else if (!this._connected) {
+            return getCacheExists();
+        }
+        else {
+            // Check both
+            return new Promise((resolve, reject) => {
+                let wait = true, done = false;
+                const gotExists = (source, exists) => {
+                    if (done) { return; }
+                    if (source === 'server') {
+                        done = true;
+                        resolve(exists);
+                    }
+                    else if (!wait) { 
+                        // Cached results, don't wait for server value
+                        done = true; 
+                        resolve(exists); 
+                    }
+                    else {
+                        // Cached results, wait 1s before resolving with this value, server value might follow soon
+                        setTimeout(() => {
+                            if (done) { return; }
+                            done = true;
+                            resolve(exists);
+                        }, 1000);
+                    }
+                };
+                let errors = [];
+                const gotError = (source, error) => {
+                    errors.push({ source, error });
+                    if (errors.length === 2) { 
+                        // Both failed, reject with server error
+                        reject(errors.find(e => e.source === 'server'));
+                    }
+                };
+
+                getServerExists()
+                    .then(exists => gotExists('server', exists))
+                    .catch(err => (wait = false, gotError('server', err)));
+
+                getCacheExists()
+                    .then(exists => gotExists('cache', exists))
+                    .catch(err => gotError('cache', err));
+            });
+        }
     }
 
     callExtension(method, path, data) {

@@ -94,8 +94,10 @@ class AceBaseClient extends AceBaseBase {
         });
         if (cacheDb) {
             const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
+            const syncDonePromise = new Promise(resolve => this.once('sync_done', resolve));
             cacheReadyPromise.then(() => {
                 // Cache database is ready. Is remote database ready?
+                let waitForSyncEvent = true;
                 return promiseTimeout(
                     1000, 
                     remoteConnectPromise, 
@@ -104,9 +106,17 @@ class AceBaseClient extends AceBaseBase {
                 .catch(err => {
                     // If the connect promise timed out, we'll emit the ready event and use the cache.
                     // Any other error should halt execution
-                    if (!(err instanceof PromiseTimeoutError)) {
+                    if (err instanceof PromiseTimeoutError) {
+                        waitForSyncEvent = false;
+                    }
+                    else {
                         this.debug.error(`Error: ${err.message}`);
                         throw err;
+                    }
+                })
+                .then(() => {
+                    if (waitForSyncEvent) {
+                        return syncDonePromise;
                     }
                 })
                 .then(() => {

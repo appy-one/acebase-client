@@ -7008,6 +7008,7 @@ class WebApi extends Api {
             let result;
             try {
                 result = JSON.parse(Buffer.from(callbackResult, 'base64').toString('utf8'));
+                // TODO: Implement server check
             }
             catch(err) {
                 return Promise.reject(`Invalid result`);
@@ -7857,7 +7858,17 @@ class AceBaseClientAuth {
     finishAuthProviderSignIn(callbackResult) {
         if (!this.client.isReady) {
             return this.client.ready().then(() => this.finishAuthProviderSignIn(callbackResult));
-        }
+        }        
+        // let readyPromise;
+        // if (!this.client.connected) {
+        //     readyPromise = this.client.connect();
+        // }
+        // else if (!this.client.isReady) {
+        //     readyPromise = this.client.ready();
+        // }
+        // if (readyPromise) {
+        //     return readyPromise.then(() => this.finishAuthProviderSignIn(callbackResult));
+        // }
         return this.client.api.finishAuthProviderSignIn(callbackResult)
         .then(details => {
             this.accessToken = details.accessToken;
@@ -9156,6 +9167,13 @@ class DataReference {
 
     query() {
         return new DataReferenceQuery(this);
+    }
+
+    count() {
+        return this.reflect("info", { child_count: true })
+        .then(info => {
+            return info.children.count;
+        })
     }
 
     reflect(type, args) {

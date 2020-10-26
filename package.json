@@ -1,6 +1,6 @@
 {
   "name": "acebase-client",
-  "version": "0.9.26",
+  "version": "0.9.27",
   "description": "Client to connect to an AceBase realtime database server",
   "main": "./src/index.js",
   "browser": "./dist/browser.js",
@@ -45,7 +45,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "~0.9.19",
+    "acebase-core": "~0.9.20",
     "socket.io-client": "*"
   }
 }

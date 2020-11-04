@@ -15,36 +15,38 @@ class AceBaseRequestError extends Error {
 
 const NOT_CONNECTED_ERROR_MESSAGE = 'remote database is not connected'; //'AceBaseClient is not connected';
 
-const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
+const _request = (method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) => {
     return new Promise((resolve, reject) => {
         let endpoint = URL.parse(url);
 
+        let postData = options.data;
         if (typeof postData === 'undefined' || postData === null) {
             postData = '';
         }
         else if (typeof postData === 'object') {
             postData = JSON.stringify(postData);
         }
-        const options = {
+        const request = {
             method: method,
             protocol: endpoint.protocol,
             host: endpoint.hostname,
             port: endpoint.port,
             path: endpoint.path, //.pathname,
             headers: {
+                'AceBase-Context': JSON.stringify(options.context || null),
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(postData)
             }
         };
-        if (accessToken) {
-            options.headers['Authorization'] = `Bearer ${accessToken}`;
+        if (options.accessToken) {
+            request.headers['Authorization'] = `Bearer ${options.accessToken}`;
         }
-        const client = options.protocol === 'https:' ? https : http;
-        const req = client.request(options, res => {
+        const client = request.protocol === 'https:' ? https : http;
+        const req = client.request(request, res => {
             res.setEncoding("utf8");
             let data = '';
-            if (typeof dataReceivedCallback === 'function') {
-                res.on('data', dataReceivedCallback);
+            if (typeof options.dataReceivedCallback === 'function') {
+                res.on('data', options.dataReceivedCallback);
             }
             else {
                 res.on('data', chunk => { data += chunk; });
@@ -62,7 +64,6 @@ const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
                     }
                 }
                 else {
-                    const request = options;
                     request.body = postData;
                     const response = {
                         statusCode: res.statusCode,
@@ -82,7 +83,7 @@ const _request = (method, url, postData, accessToken, dataReceivedCallback) => {
         });
 
         req.on('error', (err) => {
-            reject(new AceBaseRequestError(options, null, err.name, err.message));
+            reject(new AceBaseRequestError(request, null, err.name, err.message));
         });
 
         if (postData.length > 0) {
@@ -257,7 +258,8 @@ class WebApi extends Api {
                 });
 
                 socket.on("data-event", data => {
-                    let val = Transport.deserialize(data.val);
+                    const val = Transport.deserialize(data.val);
+                    const context = data.context;
                     // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
                     const pathSubs = subscriptions[data.subscr_path];
                     if (!pathSubs) {
@@ -267,19 +269,23 @@ class WebApi extends Api {
                     }
                     let eventsFired = false;
                     if (this._cache) {
-                        if (data.event === 'notify_child_removed') {
-                            this._cache.db.api.set(`${this.dbname}/cache/${data.path}`, null); // Remove cached value
+                        if (data.path.startsWith('__')) {
+                            // Don't cache private data. This happens when the admin user is signed in 
+                            // and has an event subscription on the root, or private path. 
+                        }
+                        else if (data.event === 'notify_child_removed') {
+                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { context }); // Remove cached value
                             eventsFired = true;
                         }
                         else if (!data.event.startsWith('notify_')) {
-                            this._cache.db.api.set(`${this.dbname}/cache/${data.path}`, val.current); // Update cached value
+                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { context }); // Update cached value
                             eventsFired = true;
                         }
                     }
                     // Only fire events if they were not triggered by the cache db already (and they only fired if the cached data really changed!)
                     !eventsFired && pathSubs.forEach(subscr => {
                         if (subscr.event === data.event) {
-                            subscr.callback(null, data.path, val.current, val.previous);
+                            subscr.callback(null, data.path, val.current, val.previous, context);
                         }
                     });
                 });
@@ -315,7 +321,7 @@ class WebApi extends Api {
             this._connecting = false;
         }
 
-        this.subscribe = (path, event, callback) => {            
+        this.subscribe = (path, event, callback) => {
             let pathSubs = subscriptions[path];
             if (!pathSubs) { pathSubs = subscriptions[path] = []; }
             let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event);
@@ -324,8 +330,8 @@ class WebApi extends Api {
 
             if (this._cache) {
                 // Events are also handled by cache db
-                subscr.cacheCallback = (err, path, newValue, oldValue) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue);
-                this._cache.db.api.subscribe(`${this.dbname}/cache/${path}`, event, subscr.cacheCallback);
+                subscr.cacheCallback = (err, path, newValue, oldValue, context) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue, context);
+                this._cache.db.api.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
             }
 
             if (serverAlreadyNotifying || !this._connected) {
@@ -344,7 +350,7 @@ class WebApi extends Api {
                     if (this._cache) {
                         // Events are also handled by cache db, also remove those
                         console.assert(typeof subscr.cacheCallback !== 'undefined', 'When subscription was added, cacheCallback must have been set');
-                        this._cache.db.api.unsubscribe(`${this.dbname}/cache/${path}`, subscr.event, subscr.cacheCallback);
+                        this._cache.db.api.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);
                     }
                 });
             };
@@ -382,9 +388,9 @@ class WebApi extends Api {
             return Promise.resolve();
         };
 
-        this.transaction = (path, callback) => {
+        this.transaction = (path, callback, options = { context: null }) => {
             const id = ID.generate();
-            const cachePath = `${this.dbname}/cache/${path}`;
+            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
             let cacheUpdateVal;
             const startedCallback = (data) => {
                 if (data.id === id) {
@@ -427,7 +433,7 @@ class WebApi extends Api {
                 this.socket.on("tx_started", startedCallback);
                 this.socket.on("tx_completed", completedCallback);
                 // TODO: socket.on('disconnect', disconnectedCallback);
-                this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken });
+                this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken, context: options.context });
             };
             if (this._connected) { 
                 connectedCallback(); 
@@ -435,6 +441,9 @@ class WebApi extends Api {
             else { 
                 // DISABLED because it is unclear to calling code what we're waiting for:
                 // this._connectHooks.push('connect', connectedCallback); 
+
+                // TODO: Fallback to http call when socket is disconnected
+
                 return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
             }
             return txPromise;
@@ -445,12 +454,13 @@ class WebApi extends Api {
          * @param {string} options.url
          * @param {'GET'|'PUT'|'POST'|'DELETE'} [options.method='GET']
          * @param {any} [options.data] Data to post when method is PUT or POST
+         * @param {any} [options.context] Context to add to PUT or POST requests
          * @param {(chunk: string) => void} [options.dataReceivedCallback] A method that overrides the default data receiving handler. Override for streaming.
          * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
          */
         this._request = (options) => {
             if (this._connected || options.ignoreConnectionState === true) { 
-                return _request(options.method || 'GET', options.url, options.data, accessToken, options.dataReceivedCallback)
+                return _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context })
                 .catch(err => {
                     throw err;
                 });
@@ -547,6 +557,7 @@ class WebApi extends Api {
             let result;
             try {
                 result = JSON.parse(Buffer.from(callbackResult, 'base64').toString('utf8'));
+                // TODO: Implement server check
             }
             catch(err) {
                 return Promise.reject(`Invalid result`);
@@ -751,7 +762,7 @@ class WebApi extends Api {
                                 cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
                                 // Delete the change and cached data
                                 cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                                cacheApi.set(`${this.dbname}/cache/${change.data.path}`, null);
+                                cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, change.data.path), null);
                                 eventCallback && eventCallback('sync_change_error', { error: err, change });
                             });
                         };
@@ -780,21 +791,23 @@ class WebApi extends Api {
             if (this._cache) {
                 // Find out what data to load
                 const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
-                    const hasValueSubscribers = this._subscriptions[path].some(s => !s.event.startsWith('notify_'));
-                    if (hasValueSubscribers) {
-                        const pathInfo = PathInfo.get(path);
-                        const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
-                        if (!ancestorIncluded) { paths.push(path); }
+                    if (!paths.includes(path)) {
+                        const hasValueSubscribers = this._subscriptions[path].some(s => !s.event.startsWith('notify_'));
+                        if (hasValueSubscribers) {
+                            const pathInfo = PathInfo.get(path);
+                            const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
+                            if (!ancestorIncluded) { paths.push(path); }
+                        }
                     }
                     return paths;
                 }, []);
-                // Attach temp events to cache db so they will fire for data changes
+                // Attach temp events to cache db so they will fire for data changes (just for counting)
                 Object.keys(this._subscriptions).forEach(path => {
                     this._subscriptions[path].forEach(subscr => {
-                        subscr.tempCallback = (err, path, newValue, oldValue) => {
+                        subscr.tempCallback = (err, path, newValue, oldValue, context) => {
                             totalRemoteChanges++;
                         }
-                        cacheApi.subscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.tempCallback);
+                        cacheApi.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
                     });
                 });
                 // Fetch new data
@@ -811,7 +824,7 @@ class WebApi extends Api {
                     // Unsubscribe temp cache subscriptions
                     Object.keys(this._subscriptions).forEach(path => {
                         this._subscriptions[path].forEach(subscr => {
-                            cacheApi.unsubscribe(`${this.dbname}/cache/${subscr.path}`, subscr.event, subscr.tempCallback);
+                            cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
                             delete subscr.tempCallback;
                         });
                     });
@@ -851,11 +864,11 @@ class WebApi extends Api {
         });
     }
 
-    set(path, value, options = { allow_cache: true }) {
+    set(path, value, options = { allow_cache: true, context: null }) {
         const useCache = this._cache && options && options.allow_cache === true;
         const updateServer = () => {
             const data = JSON.stringify(Transport.serialize(value));
-            return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data })
+            return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context })
         };
         if (!useCache) {
             return updateServer();
@@ -863,18 +876,18 @@ class WebApi extends Api {
 
         let rollbackValue;
         const updateCache = () => {
-            return this._cache.db.api.transaction( `${this.dbname}/cache/${path}`, (currentValue) => {
+            return this._cache.db.api.transaction(PathInfo.getChildPath(`${this.dbname}/cache`, path), (currentValue) => {
                 rollbackValue = currentValue;
                 return value;
-            });
+            }, { context: options.context });
         };
         const rollbackCache = () => {
-            return this._cache.db.api.set(`${this.dbname}/cache/${path}`, rollbackValue);
+            return this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, path), rollbackValue, { context: options.context });
         };
 
         const addPendingTransaction = () => {
             const id = ID.generate(); 
-            return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value });
+            return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value }, { context: options.context });
         };
 
         const cachePromise = updateCache()
@@ -929,37 +942,37 @@ class WebApi extends Api {
         return cachePromise;
     }
 
-    update(path, updates, options = { allow_cache: true }) {
+    update(path, updates, options = { allow_cache: true, context: null }) {
         const useCache = this._cache && options && options.allow_cache === true;
         const updateServer = () => {
             const data = JSON.stringify(Transport.serialize(updates));
-            return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data });
+            return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context });
         }
         if (!useCache) {
             return updateServer();
         }
 
+        const cacheApi = this._cache.db.api;
         let rollbackUpdates;
         const updateCache = () => {
-            const cachePath = `${this.dbname}/cache/${path}`;
+            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
             const properties = Object.keys(updates);
-            const cacheApi = this._cache.db.api;
             return cacheApi.get(cachePath, { include: properties })
             .then(currentValues=> {
                 rollbackUpdates = currentValues;
-                return cacheApi.update(cachePath, updates);
+                return cacheApi.update(cachePath, updates, { context: options.context });
             });
         };
         // const deleteCache = () => {
         //     return this._cache.db.api.set(`${this.dbname}/cache/${path}`, null);
         // };
         const rollbackCache = () => {
-            return this._cache.db.api.update(`${this.dbname}/cache/${path}`, rollbackUpdates);
+            return cacheApi.update(PathInfo.getChildPath(`${this.dbname}/cache`, path), rollbackUpdates, { context: options.context });
         };
 
         const addPendingTransaction = () => {
             const id = ID.generate(); 
-            return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'update', path, data: updates });
+            return cacheApi.set(`${this.dbname}/pending/${id}`, { type: 'update', path, data: updates }, { context: options.context });
         };
 
         const cachePromise = updateCache()
@@ -1048,7 +1061,7 @@ class WebApi extends Api {
                     // }
                     // else if (!filtered) { 
                     if (!filtered) {
-                        const cachePath = `${this.dbname}/cache/${path}`;
+                        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
                         return this._cache.db.api.set(cachePath, val)
                         .catch(err => {
                             this.debug.error(`Error caching data for "/${path}"`, err)
@@ -1063,7 +1076,7 @@ class WebApi extends Api {
             });
         };
         const getCacheValue = () => {
-            return this._cache.db.api.get(`${this.dbname}/cache/${path}`, options);
+            return this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
         };
 
         if (!useCache) {
@@ -1122,7 +1135,7 @@ class WebApi extends Api {
     exists(path, options = { allow_cache: true }) {
         const useCache = this._cache && options && options.allow_cache === true;
         const getCacheExists = () => {
-            return this._cache.db.api.exists(`${this.dbname}/cache/${path}`);
+            return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
         };
         const getServerExists = () => {
             return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
@@ -1227,7 +1240,7 @@ class WebApi extends Api {
         const allowCache = options && options.allow_cache === true;
         if (allowCache && !this._connected && this._cache) {
             // Not connected, query cache db
-            return this._cache.db.api.query(`${this.dbname}/cache/${path}`, query, options);
+            return this._cache.db.api.query(PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
         }
         const request = {
             query,

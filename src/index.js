@@ -1,4 +1,4 @@
-const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, TypeMappingOptions } = require('acebase-core');
+const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
 
 module.exports = {
@@ -7,6 +7,7 @@ module.exports = {
     DataSnapshot, 
     EventSubscription, 
     PathReference, 
-    TypeMappings, 
-    TypeMappingOptions
+    TypeMappings,
+    ID,
+    proxyAccess
 };

@@ -1,4 +1,4 @@
-const { Api, Transport, DebugLogger, ID, PathInfo } = require('acebase-core');
+const { Api, Transport, ID, PathInfo } = require('acebase-core');
 const http = require('http');
 const https = require('https');
 const URL = require('url');
@@ -83,7 +83,7 @@ const _request = (method, url, options = { accessToken: null, data: null, dataRe
         });
 
         req.on('error', (err) => {
-            reject(new AceBaseRequestError(request, null, err.name, err.message));
+            reject(new AceBaseRequestError(request, null, err.code || err.name, err.message));
         });
 
         if (postData.length > 0) {
@@ -139,6 +139,7 @@ class WebApi extends Api {
         // events are triggered through a websocket
         super();
 
+        this._id = ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
         this.url = settings.url;
         this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.dbname = dbname;
@@ -234,15 +235,23 @@ class WebApi extends Api {
                         Object.keys(subscriptions).forEach(path => {
                             const events = [];
                             subscriptions[path].forEach(subscr => {
+                                if (subscr.event === 'mutated') { return; } // Skip mutated events for now
                                 const serverAlreadyNotifying = events.includes(subscr.event);
                                 if (!serverAlreadyNotifying) {
                                     events.push(subscr.event);
-                                    // this.subscribe(subscr.path, subscr.event, subscr.callback);
-                                    const promise = _websocketRequest(this.socket, "subscribe", { path, event: subscr.event }, accessToken);
-                                    subscribePromises.push(promise);
+                                    const promise = _websocketRequest(this.socket, 'subscribe', { path, event: subscr.event }, accessToken);
+                                    subscribePromises.push(promise.catch(err => { console.error(err); }));
                                 }
                             });
                         });
+                        // Now, subscribe to all top path mutated events
+                        Object.keys(subscriptions)
+                            .filter(path => subscriptions[path].some(sub => sub.event === 'mutated'))
+                            .filter((path, i, arr) => !arr.some(otherPath => PathInfo.get(otherPath).isAncestorOf(path)))
+                            .forEach(topEventPath => {
+                                const promise = _websocketRequest(this.socket, 'subscribe', { path: topEventPath, event: 'mutated' }, accessToken);
+                                subscribePromises.push(promise.catch(err => { console.error(err); }));
+                            });
                         return Promise.all(subscribePromises);
                     })
                     .then(() => {
@@ -259,34 +268,106 @@ class WebApi extends Api {
 
                 socket.on("data-event", data => {
                     const val = Transport.deserialize(data.val);
-                    const context = data.context;
+                    const context = data.context || {};
+
+                    /*
+                        Using the new context, we can determine how we should handle this data event.
+                        From client v0.9.29 on, the set and update API methods add an acebase_mutation object
+                        to the context with the following info:
+
+                        client_id: which client initiated the mutation (web api instance, also different per browser tab)
+                        id: a unique id of the mutation
+                        op: operation used: 'set' or 'update'
+                        path: the path the operation was executed on
+                        flow: the flow used: 
+                            - 'server': app was connected, cache was not used.
+                            - 'cache': app was offline while mutating, now syncs its change
+                            - 'parallel': app was connected, cache was used and updated
+
+                        To determine how to handle this data event, we have to know what events may have already
+                        been fired.
+
+                        [Mutation initiated:]
+                            - Cache database used?
+                                - No -> 'server' flow
+                                - Yes -> Client was online/connected?
+                                    - No -> 'cache' flow (saved to cache db, sycing once connected)
+                                    - Yes -> 'parallel' flow
+                        
+                        During 'cache' and 'parallel' flow, any change events will have fired on the cache database
+                        already. If we are receiving this data event on the same client, that means we don't have to
+                        fire those events again. If we receive this event on a different client, we only have to fire 
+                        events if they change cached data.
+
+                        [Change event received:]
+                            - Is mutation done by us?
+                                - No -> Are we using cache?
+                                    - No -> Fire events
+                                    - Yes -> Update cache with events disabled*, fire events
+                                - Yes -> Are we using cache?
+                                    - No -> Fire events ourself
+                                    - Yes -> Skip cache update, don't fire events (both done already)
+
+                        * Different browser tabs use the same cache database. If we would let the cache database fire data change
+                        events, they would only fire in 1 browser tab - the first one to update the cache, the others will see 
+                        no changes because the data will have been updated already.
+
+                        NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
+                        because they rely on change notifications from the server - to tackle this problem, 
+                        cross-tab communication must be implemented. (TODO: Let cache database change notifications
+                        be sent to other tabs, and let them use the same client ID for server comminications)
+                    */
+                    const causedByUs = context.acebase_mutation && context.acebase_mutation.client_id === this._id;
+                    const cacheEnabled = !!(this._cache && this._cache.db);
+                    const fireThisEvent = !causedByUs || !cacheEnabled;
+                    const updateCache = !causedByUs && cacheEnabled;
+                    const fireCacheEvents = false; // See above flow documentation
+
                     // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
+                    console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
                     const pathSubs = subscriptions[data.subscr_path];
-                    if (!pathSubs) {
+
+                    if (!pathSubs && data.event !== 'mutated') {
                         // weird. we are not subscribed on this path?
                         this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
                         return;
                     }
-                    let eventsFired = false;
-                    if (this._cache) {
+                    if (updateCache) {
                         if (data.path.startsWith('__')) {
                             // Don't cache private data. This happens when the admin user is signed in 
-                            // and has an event subscription on the root, or private path. 
+                            // and has an event subscription on the root, or private path.
+                            // NOTE: fireThisEvent === true, because it is impossible that this mutation was caused by us (well, it should be!)
                         }
                         else if (data.event === 'notify_child_removed') {
-                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { context }); // Remove cached value
-                            eventsFired = true;
+                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
                         }
                         else if (!data.event.startsWith('notify_')) {
-                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { context }); // Update cached value
-                            eventsFired = true;
+                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
                         }
                     }
-                    // Only fire events if they were not triggered by the cache db already (and they only fired if the cached data really changed!)
-                    !eventsFired && pathSubs.forEach(subscr => {
-                        if (subscr.event === data.event) {
-                            subscr.callback(null, data.path, val.current, val.previous, context);
-                        }
+                    if (!fireThisEvent) {
+                        return;
+                    }
+                    // CHANGED - Only fire events if they were not triggered by the cache db already (and they only fired if the cached data really changed!)
+                    // The last point in the comment above is why I changed this. If the local cache does not change, no events will be fired. This causes an
+                    // issue in browser contexts when there are multiple open tabs: they share the same cache database and if 1 tab makes changes to the cache, 
+                    // other clients won't know about it, and will not be notified of any changes.
+                    // TODO: Implement cross-tab notifications in acebase/src/acebase-browser.js
+                    const targetSubs = data.event === 'mutated'
+                        ? Object.keys(subscriptions)
+                            .filter(path => {
+                                const pathInfo = PathInfo.get(path);
+                                return path === data.path || pathInfo.equals(data.subscr_path) || pathInfo.isAncestorOf(data.path)
+                            })
+                            .reduce((subs, path) => {
+                                const add = subscriptions[path].filter(sub => sub.event === 'mutated');
+                                subs.push(...add);
+                                return subs;
+                            }, [])
+                        : pathSubs.filter(sub => sub.event === data.event);
+                    
+                    targetSubs.forEach(subscr => { // !eventsFired && 
+                        subscr.callback(null, data.path, val.current, val.previous, context);
                     });
                 });
 
@@ -324,7 +405,8 @@ class WebApi extends Api {
         this.subscribe = (path, event, callback) => {
             let pathSubs = subscriptions[path];
             if (!pathSubs) { pathSubs = subscriptions[path] = []; }
-            let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event);
+            let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event)
+                || (event === 'mutated' && Object.keys(subscriptions).some(otherPath => PathInfo.get(otherPath).isAncestorOf(path) && subscriptions[otherPath].some(sub => sub.event === event)));
             const subscr = { path, event, callback };
             pathSubs.push(subscr);
 
@@ -336,6 +418,16 @@ class WebApi extends Api {
 
             if (serverAlreadyNotifying || !this._connected) {
                 return Promise.resolve();
+            }
+            if (event === 'mutated') {
+                // Unsubscribe from 'mutated' events set on descendant paths of current path
+                Object.keys(subscriptions)
+                .filter(otherPath => 
+                    PathInfo.get(otherPath).isDescendantOf(path) 
+                    && subscriptions[otherPath].some(sub => sub.event === 'mutated')
+                )
+                .map(path => _websocketRequest(this.socket, "unsubscribe", { path, event: 'mutated' }, accessToken))
+                .map(promise => promise.catch(err => console.error(err)))
             }
             return _websocketRequest(this.socket, "subscribe", { path, event }, accessToken);
         };
@@ -355,6 +447,7 @@ class WebApi extends Api {
                 });
             };
 
+            const hadMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
             if (!event) {
                 // Unsubscribe from all events on path
                 unsubscribeFrom(pathSubs);
@@ -369,27 +462,41 @@ class WebApi extends Api {
                 const subscriptions = pathSubs.filter(subscr => subscr.event === event && subscr.callback === callback);
                 unsubscribeFrom(subscriptions);
             }
+            const hasMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
 
+            let promise = Promise.resolve();
             if (pathSubs.length === 0) {
                 // Unsubscribed from all events on path
                 delete subscriptions[path];
-                // socket.emit("unsubscribe", { path, access_token: accessToken });
                 if (this._connected) {
-                    return _websocketRequest(this.socket, "unsubscribe", { path, access_token: accessToken }, accessToken);
+                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: accessToken }, accessToken);
                 }
             }
-            else if (pathSubs.reduce((c, subscr) => c + (subscr.event === event ? 1 : 0), 0) === 0) {
+            else if (this._connected && !pathSubs.some(subscr => subscr.event === event)) {
                 // No callbacks left for specific event
-                // socket.emit("unsubscribe", { path, event, access_token: accessToken });
-                if (this._connected) {
-                    return _websocketRequest(this.socket, "unsubscribe", { path: path, event, access_token: accessToken }, accessToken);
-                }
+                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: accessToken }, accessToken);
             }
-            return Promise.resolve();
+            if (this._connected && hadMutatedEvents && !hasMutatedEvents) {
+                // If any descendant paths have mutated events, resubscribe those
+                const promises = Object.keys(subscriptions)
+                    .filter(otherPath => PathInfo.get(otherPath).isDescendantOf(path) && subscriptions[otherPath].some(sub => sub.event === 'mutated'))
+                    .map(path => _websocketRequest(this.socket, 'subscribe', { path: path, event: 'mutated' }, accessToken))
+                    .map(promise => promise.catch(err => console.error(err)));
+                promise = Promise.all([promise, ...promises]);
+            }
+            return promise;
         };
 
-        this.transaction = (path, callback, options = { context: null }) => {
+        this.transaction = (path, callback, options = { context: {} }) => {
             const id = ID.generate();
+            options.context = options.context || {};
+            options.context.acebase_mutation = {
+                client_id: this._id,
+                id,
+                op: 'transaction',
+                path,
+                flow: 'server'
+            };
             const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
             let cacheUpdateVal;
             const startedCallback = (data) => {
@@ -412,21 +519,28 @@ class WebApi extends Api {
                     }
                 }
             }
-            let txResolve, txPromise = new Promise((resolve) => {
+            let txResolve, txReject, txPromise = new Promise((resolve, reject) => {
                 txResolve = resolve;
+                txReject = reject;
             });
+            const handleSuccess = () => {
+                if (this._cache && typeof cacheUpdateVal !== 'undefined') {
+                    // Update cache db value
+                    this._cache.db.api.set(cachePath, cacheUpdateVal).then(() => {
+                        txResolve(this);
+                    })
+                }
+                else {
+                    txResolve(this);
+                }
+            };
+            const handleFailure = err => {
+                txReject(err);
+            }
             const completedCallback = (data) => {
                 if (data.id === id) {
                     this.socket.off("tx_completed", completedCallback);
-                    if (this._cache && typeof cacheUpdateVal !== 'undefined') {
-                        // Update cache db value
-                        this._cache.db.api.set(cachePath, cacheUpdateVal).then(() => {
-                            txResolve(this);
-                        })
-                    }
-                    else {
-                        txResolve(this);
-                    }
+                    handleSuccess();
                 }
             }
             const connectedCallback = () => {
@@ -439,12 +553,23 @@ class WebApi extends Api {
                 connectedCallback(); 
             }
             else { 
-                // DISABLED because it is unclear to calling code what we're waiting for:
-                // this._connectHooks.push('connect', connectedCallback); 
-
-                // TODO: Fallback to http call when socket is disconnected
-
-                return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+                // Websocket might not be connected. Try http call instead
+                const data = JSON.stringify({ path });
+                this._request({ ignoreConnectionState: true, method: "POST", url: `${this.url}/transaction/${this.dbname}/start`, data, context: options.context })
+                .then(tx => {
+                    const id = tx.id;
+                    const currentValue = Transport.deserialize(tx.value);
+                    const value = callback(currentValue);
+                    const data = JSON.stringify({ id, value: Transport.serialize(value) });
+                    return this._request({ ignoreConnectionState: true, method: "POST", url: `${this.url}/transaction/${this.dbname}/finish`, data, context: options.context })
+                })
+                .catch(err => {
+                    if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE'].includes(err.code)) {
+                        err.message = NOT_CONNECTED_ERROR_MESSAGE;
+                        // handleFailure(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+                    }
+                    handleFailure(err);
+                });
             }
             return txPromise;
         };
@@ -674,7 +799,7 @@ class WebApi extends Api {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
-    sync(eventCallback) {
+    sync(options = { fetchFreshData: true, eventCallback: null }) {
         // Sync cache
         if (!this._connected) {
             return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
@@ -686,7 +811,7 @@ class WebApi extends Api {
             return Promise.reject(new Error(`cache database is not ready yet`));
         }
 
-        eventCallback && eventCallback('sync_start');
+        options.eventCallback && options.eventCallback('sync_start');
         const handleStatsUpdateError = err => {
             this.debug.error(`Failed to update cache db stats:`, err);
         }
@@ -730,14 +855,14 @@ class WebApi extends Api {
                         const go = () => {
                             let promise;
                             if (change.type === 'update') { 
-                                promise = this.update(change.path, change.data, { allow_cache: false });
+                                promise = this.update(change.path, change.data, { allow_cache: false, context: change.context });
                             }
                             else if (change.type === 'set') { 
                                 if (!change.data) { change.data = null; } // Before type 'remove' was implemented
-                                promise = this.set(change.path, change.data, { allow_cache: false });
+                                promise = this.set(change.path, change.data, { allow_cache: false, context: change.context });
                             }
                             else if (change.type === 'remove') {
-                                promise = this.set(change.path, null, { allow_cache: false });
+                                promise = this.set(change.path, null, { allow_cache: false, context: change.context });
                             }
                             else {
                                 throw new Error(`unsupported change type "${change.type}"`);
@@ -763,7 +888,7 @@ class WebApi extends Api {
                                 // Delete the change and cached data
                                 cacheApi.set(`${this.dbname}/pending/${id}`, null);
                                 cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, change.data.path), null);
-                                eventCallback && eventCallback('sync_change_error', { error: err, change });
+                                options.eventCallback && options.eventCallback('sync_change_error', { error: err, change });
                             });
                         };
                         return prevPromise.then(go); // Chain to previous promise
@@ -788,11 +913,11 @@ class WebApi extends Api {
         return syncPushPromise
         .then(() => {
             // We've pushed our changes, now get fresh data for all paths with active subscriptions
-            if (this._cache) {
+            if (this._cache && options.fetchFreshData) {
                 // Find out what data to load
                 const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
                     if (!paths.includes(path)) {
-                        const hasValueSubscribers = this._subscriptions[path].some(s => !s.event.startsWith('notify_'));
+                        const hasValueSubscribers = this._subscriptions[path].some(s => s.event !== 'mutated' && !s.event.startsWith('notify_'));
                         if (hasValueSubscribers) {
                             const pathInfo = PathInfo.get(path);
                             const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
@@ -816,7 +941,7 @@ class WebApi extends Api {
                     return this.get(path, { allow_cache: false })
                     .catch(err => {
                         this.debug.error(`SYNC pull error`, err);
-                        eventCallback && eventCallback('sync_pull_error', err);
+                        options.eventCallback && options.eventCallback('sync_pull_error', err);
                     });
                 });
                 return Promise.all(syncPullPromises)
@@ -824,13 +949,20 @@ class WebApi extends Api {
                     // Unsubscribe temp cache subscriptions
                     Object.keys(this._subscriptions).forEach(path => {
                         this._subscriptions[path].forEach(subscr => {
+                            if (typeof subscr.tempCallback !== 'function') { 
+                                // If a subscription was added while synchronizing, it won't have a tempCallback.
+                                // This is no big deal, since our tempCallback is only to update sync statistics.
+                                // Before acebase-client v0.9.29, this caused all subscriptions with current path
+                                // and type to be removed.
+                                return; 
+                            }
                             cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
                             delete subscr.tempCallback;
                         });
                     });
                 });
             }
-            else {
+            else if (!this._cache) {
                 // Not using cache, so there is no real way of knowing if anything changed or removed.
                 // We could trigger fake "value", "child_added" and "child_changed" events with fresh data, 
                 // but... what's the use? It would result in broken data? 
@@ -854,18 +986,27 @@ class WebApi extends Api {
         .then(() => {
             this.debug.verbose(`SYNC done`);
             const info = { local: totalPendingChanges, remote: totalRemoteChanges };
-            eventCallback && eventCallback('sync_done', info);
+            options.eventCallback && options.eventCallback('sync_done', info);
             return info;
         })
         .catch(err => {
             this.debug.error(`SYNC error`, err);
-            eventCallback && eventCallback('sync_error', err);
+            options.eventCallback && options.eventCallback('sync_error', err);
             throw err;
         });
     }
 
-    set(path, value, options = { allow_cache: true, context: null }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+    set(path, value, options = { allow_cache: true, context: {} }) {
+        if (!options.context) { options.context = {}; }
+        const useCache = this._cache && options.allow_cache !== false;
+        const useServer = this._connected;
+        options.context.acebase_mutation = options.context.acebase_mutation || {
+            client_id: this._id,
+            id: ID.generate(),
+            op: 'set',
+            path,
+            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
+        };
         const updateServer = () => {
             const data = JSON.stringify(Transport.serialize(value));
             return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context })
@@ -874,27 +1015,26 @@ class WebApi extends Api {
             return updateServer();
         }
 
+        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
         let rollbackValue;
         const updateCache = () => {
-            return this._cache.db.api.transaction(PathInfo.getChildPath(`${this.dbname}/cache`, path), (currentValue) => {
+            return this._cache.db.api.transaction(cachePath, (currentValue) => {
                 rollbackValue = currentValue;
                 return value;
             }, { context: options.context });
         };
         const rollbackCache = () => {
-            return this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, path), rollbackValue, { context: options.context });
+            return this._cache.db.api.set(cachePath, rollbackValue, { context: options.context });
         };
-
         const addPendingTransaction = () => {
-            const id = ID.generate(); 
-            return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value }, { context: options.context });
+            return this._cache.db.api.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'set', path, data: value, context: options.context });
         };
 
         const cachePromise = updateCache()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !this._connected ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
@@ -906,12 +1046,8 @@ class WebApi extends Api {
                 if (serverResult.success) {
                     // Server update success
                     if (!cacheResult.success) { 
-                        // Cache update failed for some reason, remove the cached node?
+                        // Cache update failed for some reason?
                         this.debug.error(`Failed to set cache for "${path}". Error: `, cacheResult.error);
-                        // NOT doing this because that would trigger data events such as "child_removed", "value" etc
-                        // deleteCache().catch(err => {
-                        //     this.debug.error(`Failed to remove cache for "${path}": `, err);
-                        // });
                     }
                 }
                 else {
@@ -942,23 +1078,31 @@ class WebApi extends Api {
         return cachePromise;
     }
 
-    update(path, updates, options = { allow_cache: true, context: null }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+    update(path, updates, options = { allow_cache: true, context: {} }) {
+        const useCache = this._cache && options && options.allow_cache !== false;
+        const useServer = this._connected;
+        options.context.acebase_mutation = options.context.acebase_mutation || {
+            client_id: this._id,
+            id: ID.generate(),
+            op: 'update',
+            path,
+            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
+        };
         const updateServer = () => {
             const data = JSON.stringify(Transport.serialize(updates));
             return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context });
-        }
+        };
         if (!useCache) {
             return updateServer();
         }
 
         const cacheApi = this._cache.db.api;
+        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
         let rollbackUpdates;
         const updateCache = () => {
-            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
             const properties = Object.keys(updates);
             return cacheApi.get(cachePath, { include: properties })
-            .then(currentValues=> {
+            .then(currentValues => {
                 rollbackUpdates = currentValues;
                 return cacheApi.update(cachePath, updates, { context: options.context });
             });
@@ -967,19 +1111,17 @@ class WebApi extends Api {
         //     return this._cache.db.api.set(`${this.dbname}/cache/${path}`, null);
         // };
         const rollbackCache = () => {
-            return cacheApi.update(PathInfo.getChildPath(`${this.dbname}/cache`, path), rollbackUpdates, { context: options.context });
+            return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
-
         const addPendingTransaction = () => {
-            const id = ID.generate(); 
-            return cacheApi.set(`${this.dbname}/pending/${id}`, { type: 'update', path, data: updates }, { context: options.context });
+            return cacheApi.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'update', path, data: updates, context: options.context });
         };
 
         const cachePromise = updateCache()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !this._connected ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
@@ -991,12 +1133,8 @@ class WebApi extends Api {
                 if (serverResult.success) {
                     // Server update success
                     if (!cacheResult.success) { 
-                        // Cache update failed for some reason, remove the cached node?
-                        this.debug.error(`Failed to update cache for "${path}". Error: `, err);
-                        // NOT doing this because that would trigger data events such as "child_removed", "value" etc
-                        // deleteCache().catch(err => {
-                        //     this.debug.error(`Failed to remove cache for "${path}": `, err);
-                        // });
+                        // Cache update failed for some reason?
+                        this.debug.error(`Failed to update cache for "${path}". Error: `, cacheResult.error);
                     }
                 }
                 else {
@@ -1028,7 +1166,7 @@ class WebApi extends Api {
     }
 
     get(path, options = { allow_cache: true }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+        const useCache = this._cache && options.allow_cache !== false;
         const getServerValue = () => {
             // Get from server
             let url = `${this.url}/data/${this.dbname}/${path}`;
@@ -1062,7 +1200,7 @@ class WebApi extends Api {
                     // else if (!filtered) { 
                     if (!filtered) {
                         const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-                        return this._cache.db.api.set(cachePath, val)
+                        return this._cache.db.api.set(cachePath, val, { context: { acebase_operation: 'update_cache' } })
                         .catch(err => {
                             this.debug.error(`Error caching data for "/${path}"`, err)
                         })
@@ -1133,7 +1271,7 @@ class WebApi extends Api {
     }
     
     exists(path, options = { allow_cache: true }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+        const useCache = this._cache && options.allow_cache !== false;
         const getCacheExists = () => {
             return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
         };

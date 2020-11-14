@@ -52,10 +52,15 @@ class AceBaseClient extends AceBaseBase {
         }
         super(settings.dbname, {});
 
+        /*
+            TODO: improve init flow with await/async (requires Node 7.6+) 
+        */
+
         const cacheDb = settings.cache && settings.cache.db;
         const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
 
         let ready = false;
+        this.on('ready', () => { ready = true; });
         this._connected = false;
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.blue); // `[ ${settings.dbname} ]`
 
@@ -70,10 +75,13 @@ class AceBaseClient extends AceBaseBase {
             }
             syncRunning = true;
             return cacheReadyPromise.then(() => {
-                return this.api.sync((eventName, args) => {
-                    this.debug.log(eventName, args || '');
-                    this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
-                })
+                return this.api.sync({
+                    fetchFreshData: ready,
+                    eventCallback: (eventName, args) => {
+                        this.debug.log(eventName, args || '');
+                        this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
+                    }
+                });
             })
             .catch(err => {
                 // Sync failed for some reason
@@ -130,7 +138,6 @@ class AceBaseClient extends AceBaseBase {
                 this._connected = true;
                 this.emit('connect');
                 if (!ready) {
-                    ready = true;
                     // If no local cache is used, we can emit the ready event now.
                     if (!settings.cache) {
                         this.emit('ready');

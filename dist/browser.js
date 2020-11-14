@@ -712,7 +712,7 @@ function localstorage() {
 }
 
 }).call(this,require('_process'))
-},{"./debug":10,"_process":179}],10:[function(require,module,exports){
+},{"./debug":10,"_process":180}],10:[function(require,module,exports){
 
 /**
  * This is the common logic for both the Node.js and web browser
@@ -3102,7 +3102,7 @@ WS.prototype.check = function () {
 };
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"../transport":13,"component-inherit":8,"debug":9,"engine.io-parser":20,"parseqs":28,"ws":168,"yeast":39}],19:[function(require,module,exports){
+},{"../transport":13,"component-inherit":8,"debug":9,"engine.io-parser":20,"parseqs":28,"ws":169,"yeast":39}],19:[function(require,module,exports){
 (function (global){
 // browser shim for xmlhttprequest module
 
@@ -4101,7 +4101,7 @@ function hasBinary (obj) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":169,"isarray":26}],24:[function(require,module,exports){
+},{"buffer":170,"isarray":26}],24:[function(require,module,exports){
 
 /**
  * Module exports.
@@ -6320,10 +6320,15 @@ class AceBaseClient extends AceBaseBase {
         }
         super(settings.dbname, {});
 
+        /*
+            TODO: improve init flow with await/async (requires Node 7.6+) 
+        */
+
         const cacheDb = settings.cache && settings.cache.db;
         const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
 
         let ready = false;
+        this.on('ready', () => { ready = true; });
         this._connected = false;
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.blue); // `[ ${settings.dbname} ]`
 
@@ -6338,10 +6343,13 @@ class AceBaseClient extends AceBaseBase {
             }
             syncRunning = true;
             return cacheReadyPromise.then(() => {
-                return this.api.sync((eventName, args) => {
-                    this.debug.log(eventName, args || '');
-                    this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
-                })
+                return this.api.sync({
+                    fetchFreshData: ready,
+                    eventCallback: (eventName, args) => {
+                        this.debug.log(eventName, args || '');
+                        this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
+                    }
+                });
             })
             .catch(err => {
                 // Sync failed for some reason
@@ -6398,7 +6406,6 @@ class AceBaseClient extends AceBaseBase {
                 this._connected = true;
                 this.emit('connect');
                 if (!ready) {
-                    ready = true;
                     // If no local cache is used, we can emit the ready event now.
                     if (!settings.cache) {
                         this.emit('ready');
@@ -6457,9 +6464,9 @@ function promiseTimeout(ms, promise, comment) {
 }
 
 module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
-},{"./api-web":41,"./auth":42,"acebase-core":159}],41:[function(require,module,exports){
+},{"./api-web":41,"./auth":42,"acebase-core":160}],41:[function(require,module,exports){
 (function (Buffer){
-const { Api, Transport, DebugLogger, ID, PathInfo } = require('acebase-core');
+const { Api, Transport, ID, PathInfo } = require('acebase-core');
 const http = require('http');
 const https = require('https');
 const URL = require('url');
@@ -6544,7 +6551,7 @@ const _request = (method, url, options = { accessToken: null, data: null, dataRe
         });
 
         req.on('error', (err) => {
-            reject(new AceBaseRequestError(request, null, err.name, err.message));
+            reject(new AceBaseRequestError(request, null, err.code || err.name, err.message));
         });
 
         if (postData.length > 0) {
@@ -6600,6 +6607,7 @@ class WebApi extends Api {
         // events are triggered through a websocket
         super();
 
+        this._id = ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
         this.url = settings.url;
         this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.dbname = dbname;
@@ -6695,15 +6703,23 @@ class WebApi extends Api {
                         Object.keys(subscriptions).forEach(path => {
                             const events = [];
                             subscriptions[path].forEach(subscr => {
+                                if (subscr.event === 'mutated') { return; } // Skip mutated events for now
                                 const serverAlreadyNotifying = events.includes(subscr.event);
                                 if (!serverAlreadyNotifying) {
                                     events.push(subscr.event);
-                                    // this.subscribe(subscr.path, subscr.event, subscr.callback);
-                                    const promise = _websocketRequest(this.socket, "subscribe", { path, event: subscr.event }, accessToken);
-                                    subscribePromises.push(promise);
+                                    const promise = _websocketRequest(this.socket, 'subscribe', { path, event: subscr.event }, accessToken);
+                                    subscribePromises.push(promise.catch(err => { console.error(err); }));
                                 }
                             });
                         });
+                        // Now, subscribe to all top path mutated events
+                        Object.keys(subscriptions)
+                            .filter(path => subscriptions[path].some(sub => sub.event === 'mutated'))
+                            .filter((path, i, arr) => !arr.some(otherPath => PathInfo.get(otherPath).isAncestorOf(path)))
+                            .forEach(topEventPath => {
+                                const promise = _websocketRequest(this.socket, 'subscribe', { path: topEventPath, event: 'mutated' }, accessToken);
+                                subscribePromises.push(promise.catch(err => { console.error(err); }));
+                            });
                         return Promise.all(subscribePromises);
                     })
                     .then(() => {
@@ -6720,34 +6736,106 @@ class WebApi extends Api {
 
                 socket.on("data-event", data => {
                     const val = Transport.deserialize(data.val);
-                    const context = data.context;
+                    const context = data.context || {};
+
+                    /*
+                        Using the new context, we can determine how we should handle this data event.
+                        From client v0.9.29 on, the set and update API methods add an acebase_mutation object
+                        to the context with the following info:
+
+                        client_id: which client initiated the mutation (web api instance, also different per browser tab)
+                        id: a unique id of the mutation
+                        op: operation used: 'set' or 'update'
+                        path: the path the operation was executed on
+                        flow: the flow used: 
+                            - 'server': app was connected, cache was not used.
+                            - 'cache': app was offline while mutating, now syncs its change
+                            - 'parallel': app was connected, cache was used and updated
+
+                        To determine how to handle this data event, we have to know what events may have already
+                        been fired.
+
+                        [Mutation initiated:]
+                            - Cache database used?
+                                - No -> 'server' flow
+                                - Yes -> Client was online/connected?
+                                    - No -> 'cache' flow (saved to cache db, sycing once connected)
+                                    - Yes -> 'parallel' flow
+                        
+                        During 'cache' and 'parallel' flow, any change events will have fired on the cache database
+                        already. If we are receiving this data event on the same client, that means we don't have to
+                        fire those events again. If we receive this event on a different client, we only have to fire 
+                        events if they change cached data.
+
+                        [Change event received:]
+                            - Is mutation done by us?
+                                - No -> Are we using cache?
+                                    - No -> Fire events
+                                    - Yes -> Update cache with events disabled*, fire events
+                                - Yes -> Are we using cache?
+                                    - No -> Fire events ourself
+                                    - Yes -> Skip cache update, don't fire events (both done already)
+
+                        * Different browser tabs use the same cache database. If we would let the cache database fire data change
+                        events, they would only fire in 1 browser tab - the first one to update the cache, the others will see 
+                        no changes because the data will have been updated already.
+
+                        NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
+                        because they rely on change notifications from the server - to tackle this problem, 
+                        cross-tab communication must be implemented. (TODO: Let cache database change notifications
+                        be sent to other tabs, and let them use the same client ID for server comminications)
+                    */
+                    const causedByUs = context.acebase_mutation && context.acebase_mutation.client_id === this._id;
+                    const cacheEnabled = !!(this._cache && this._cache.db);
+                    const fireThisEvent = !causedByUs || !cacheEnabled;
+                    const updateCache = !causedByUs && cacheEnabled;
+                    const fireCacheEvents = false; // See above flow documentation
+
                     // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
+                    console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
                     const pathSubs = subscriptions[data.subscr_path];
-                    if (!pathSubs) {
+
+                    if (!pathSubs && data.event !== 'mutated') {
                         // weird. we are not subscribed on this path?
                         this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
                         return;
                     }
-                    let eventsFired = false;
-                    if (this._cache) {
+                    if (updateCache) {
                         if (data.path.startsWith('__')) {
                             // Don't cache private data. This happens when the admin user is signed in 
-                            // and has an event subscription on the root, or private path. 
+                            // and has an event subscription on the root, or private path.
+                            // NOTE: fireThisEvent === true, because it is impossible that this mutation was caused by us (well, it should be!)
                         }
                         else if (data.event === 'notify_child_removed') {
-                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { context }); // Remove cached value
-                            eventsFired = true;
+                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
                         }
                         else if (!data.event.startsWith('notify_')) {
-                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { context }); // Update cached value
-                            eventsFired = true;
+                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
                         }
                     }
-                    // Only fire events if they were not triggered by the cache db already (and they only fired if the cached data really changed!)
-                    !eventsFired && pathSubs.forEach(subscr => {
-                        if (subscr.event === data.event) {
-                            subscr.callback(null, data.path, val.current, val.previous, context);
-                        }
+                    if (!fireThisEvent) {
+                        return;
+                    }
+                    // CHANGED - Only fire events if they were not triggered by the cache db already (and they only fired if the cached data really changed!)
+                    // The last point in the comment above is why I changed this. If the local cache does not change, no events will be fired. This causes an
+                    // issue in browser contexts when there are multiple open tabs: they share the same cache database and if 1 tab makes changes to the cache, 
+                    // other clients won't know about it, and will not be notified of any changes.
+                    // TODO: Implement cross-tab notifications in acebase/src/acebase-browser.js
+                    const targetSubs = data.event === 'mutated'
+                        ? Object.keys(subscriptions)
+                            .filter(path => {
+                                const pathInfo = PathInfo.get(path);
+                                return path === data.path || pathInfo.equals(data.subscr_path) || pathInfo.isAncestorOf(data.path)
+                            })
+                            .reduce((subs, path) => {
+                                const add = subscriptions[path].filter(sub => sub.event === 'mutated');
+                                subs.push(...add);
+                                return subs;
+                            }, [])
+                        : pathSubs.filter(sub => sub.event === data.event);
+                    
+                    targetSubs.forEach(subscr => { // !eventsFired && 
+                        subscr.callback(null, data.path, val.current, val.previous, context);
                     });
                 });
 
@@ -6785,7 +6873,8 @@ class WebApi extends Api {
         this.subscribe = (path, event, callback) => {
             let pathSubs = subscriptions[path];
             if (!pathSubs) { pathSubs = subscriptions[path] = []; }
-            let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event);
+            let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event)
+                || (event === 'mutated' && Object.keys(subscriptions).some(otherPath => PathInfo.get(otherPath).isAncestorOf(path) && subscriptions[otherPath].some(sub => sub.event === event)));
             const subscr = { path, event, callback };
             pathSubs.push(subscr);
 
@@ -6797,6 +6886,16 @@ class WebApi extends Api {
 
             if (serverAlreadyNotifying || !this._connected) {
                 return Promise.resolve();
+            }
+            if (event === 'mutated') {
+                // Unsubscribe from 'mutated' events set on descendant paths of current path
+                Object.keys(subscriptions)
+                .filter(otherPath => 
+                    PathInfo.get(otherPath).isDescendantOf(path) 
+                    && subscriptions[otherPath].some(sub => sub.event === 'mutated')
+                )
+                .map(path => _websocketRequest(this.socket, "unsubscribe", { path, event: 'mutated' }, accessToken))
+                .map(promise => promise.catch(err => console.error(err)))
             }
             return _websocketRequest(this.socket, "subscribe", { path, event }, accessToken);
         };
@@ -6816,6 +6915,7 @@ class WebApi extends Api {
                 });
             };
 
+            const hadMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
             if (!event) {
                 // Unsubscribe from all events on path
                 unsubscribeFrom(pathSubs);
@@ -6830,27 +6930,41 @@ class WebApi extends Api {
                 const subscriptions = pathSubs.filter(subscr => subscr.event === event && subscr.callback === callback);
                 unsubscribeFrom(subscriptions);
             }
+            const hasMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
 
+            let promise = Promise.resolve();
             if (pathSubs.length === 0) {
                 // Unsubscribed from all events on path
                 delete subscriptions[path];
-                // socket.emit("unsubscribe", { path, access_token: accessToken });
                 if (this._connected) {
-                    return _websocketRequest(this.socket, "unsubscribe", { path, access_token: accessToken }, accessToken);
+                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: accessToken }, accessToken);
                 }
             }
-            else if (pathSubs.reduce((c, subscr) => c + (subscr.event === event ? 1 : 0), 0) === 0) {
+            else if (this._connected && !pathSubs.some(subscr => subscr.event === event)) {
                 // No callbacks left for specific event
-                // socket.emit("unsubscribe", { path, event, access_token: accessToken });
-                if (this._connected) {
-                    return _websocketRequest(this.socket, "unsubscribe", { path: path, event, access_token: accessToken }, accessToken);
-                }
+                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: accessToken }, accessToken);
             }
-            return Promise.resolve();
+            if (this._connected && hadMutatedEvents && !hasMutatedEvents) {
+                // If any descendant paths have mutated events, resubscribe those
+                const promises = Object.keys(subscriptions)
+                    .filter(otherPath => PathInfo.get(otherPath).isDescendantOf(path) && subscriptions[otherPath].some(sub => sub.event === 'mutated'))
+                    .map(path => _websocketRequest(this.socket, 'subscribe', { path: path, event: 'mutated' }, accessToken))
+                    .map(promise => promise.catch(err => console.error(err)));
+                promise = Promise.all([promise, ...promises]);
+            }
+            return promise;
         };
 
-        this.transaction = (path, callback, options = { context: null }) => {
+        this.transaction = (path, callback, options = { context: {} }) => {
             const id = ID.generate();
+            options.context = options.context || {};
+            options.context.acebase_mutation = {
+                client_id: this._id,
+                id,
+                op: 'transaction',
+                path,
+                flow: 'server'
+            };
             const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
             let cacheUpdateVal;
             const startedCallback = (data) => {
@@ -6873,21 +6987,28 @@ class WebApi extends Api {
                     }
                 }
             }
-            let txResolve, txPromise = new Promise((resolve) => {
+            let txResolve, txReject, txPromise = new Promise((resolve, reject) => {
                 txResolve = resolve;
+                txReject = reject;
             });
+            const handleSuccess = () => {
+                if (this._cache && typeof cacheUpdateVal !== 'undefined') {
+                    // Update cache db value
+                    this._cache.db.api.set(cachePath, cacheUpdateVal).then(() => {
+                        txResolve(this);
+                    })
+                }
+                else {
+                    txResolve(this);
+                }
+            };
+            const handleFailure = err => {
+                txReject(err);
+            }
             const completedCallback = (data) => {
                 if (data.id === id) {
                     this.socket.off("tx_completed", completedCallback);
-                    if (this._cache && typeof cacheUpdateVal !== 'undefined') {
-                        // Update cache db value
-                        this._cache.db.api.set(cachePath, cacheUpdateVal).then(() => {
-                            txResolve(this);
-                        })
-                    }
-                    else {
-                        txResolve(this);
-                    }
+                    handleSuccess();
                 }
             }
             const connectedCallback = () => {
@@ -6900,12 +7021,23 @@ class WebApi extends Api {
                 connectedCallback(); 
             }
             else { 
-                // DISABLED because it is unclear to calling code what we're waiting for:
-                // this._connectHooks.push('connect', connectedCallback); 
-
-                // TODO: Fallback to http call when socket is disconnected
-
-                return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+                // Websocket might not be connected. Try http call instead
+                const data = JSON.stringify({ path });
+                this._request({ ignoreConnectionState: true, method: "POST", url: `${this.url}/transaction/${this.dbname}/start`, data, context: options.context })
+                .then(tx => {
+                    const id = tx.id;
+                    const currentValue = Transport.deserialize(tx.value);
+                    const value = callback(currentValue);
+                    const data = JSON.stringify({ id, value: Transport.serialize(value) });
+                    return this._request({ ignoreConnectionState: true, method: "POST", url: `${this.url}/transaction/${this.dbname}/finish`, data, context: options.context })
+                })
+                .catch(err => {
+                    if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE'].includes(err.code)) {
+                        err.message = NOT_CONNECTED_ERROR_MESSAGE;
+                        // handleFailure(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+                    }
+                    handleFailure(err);
+                });
             }
             return txPromise;
         };
@@ -7135,7 +7267,7 @@ class WebApi extends Api {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
-    sync(eventCallback) {
+    sync(options = { fetchFreshData: true, eventCallback: null }) {
         // Sync cache
         if (!this._connected) {
             return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
@@ -7147,7 +7279,7 @@ class WebApi extends Api {
             return Promise.reject(new Error(`cache database is not ready yet`));
         }
 
-        eventCallback && eventCallback('sync_start');
+        options.eventCallback && options.eventCallback('sync_start');
         const handleStatsUpdateError = err => {
             this.debug.error(`Failed to update cache db stats:`, err);
         }
@@ -7191,14 +7323,14 @@ class WebApi extends Api {
                         const go = () => {
                             let promise;
                             if (change.type === 'update') { 
-                                promise = this.update(change.path, change.data, { allow_cache: false });
+                                promise = this.update(change.path, change.data, { allow_cache: false, context: change.context });
                             }
                             else if (change.type === 'set') { 
                                 if (!change.data) { change.data = null; } // Before type 'remove' was implemented
-                                promise = this.set(change.path, change.data, { allow_cache: false });
+                                promise = this.set(change.path, change.data, { allow_cache: false, context: change.context });
                             }
                             else if (change.type === 'remove') {
-                                promise = this.set(change.path, null, { allow_cache: false });
+                                promise = this.set(change.path, null, { allow_cache: false, context: change.context });
                             }
                             else {
                                 throw new Error(`unsupported change type "${change.type}"`);
@@ -7224,7 +7356,7 @@ class WebApi extends Api {
                                 // Delete the change and cached data
                                 cacheApi.set(`${this.dbname}/pending/${id}`, null);
                                 cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, change.data.path), null);
-                                eventCallback && eventCallback('sync_change_error', { error: err, change });
+                                options.eventCallback && options.eventCallback('sync_change_error', { error: err, change });
                             });
                         };
                         return prevPromise.then(go); // Chain to previous promise
@@ -7249,11 +7381,11 @@ class WebApi extends Api {
         return syncPushPromise
         .then(() => {
             // We've pushed our changes, now get fresh data for all paths with active subscriptions
-            if (this._cache) {
+            if (this._cache && options.fetchFreshData) {
                 // Find out what data to load
                 const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
                     if (!paths.includes(path)) {
-                        const hasValueSubscribers = this._subscriptions[path].some(s => !s.event.startsWith('notify_'));
+                        const hasValueSubscribers = this._subscriptions[path].some(s => s.event !== 'mutated' && !s.event.startsWith('notify_'));
                         if (hasValueSubscribers) {
                             const pathInfo = PathInfo.get(path);
                             const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
@@ -7277,7 +7409,7 @@ class WebApi extends Api {
                     return this.get(path, { allow_cache: false })
                     .catch(err => {
                         this.debug.error(`SYNC pull error`, err);
-                        eventCallback && eventCallback('sync_pull_error', err);
+                        options.eventCallback && options.eventCallback('sync_pull_error', err);
                     });
                 });
                 return Promise.all(syncPullPromises)
@@ -7285,13 +7417,20 @@ class WebApi extends Api {
                     // Unsubscribe temp cache subscriptions
                     Object.keys(this._subscriptions).forEach(path => {
                         this._subscriptions[path].forEach(subscr => {
+                            if (typeof subscr.tempCallback !== 'function') { 
+                                // If a subscription was added while synchronizing, it won't have a tempCallback.
+                                // This is no big deal, since our tempCallback is only to update sync statistics.
+                                // Before acebase-client v0.9.29, this caused all subscriptions with current path
+                                // and type to be removed.
+                                return; 
+                            }
                             cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
                             delete subscr.tempCallback;
                         });
                     });
                 });
             }
-            else {
+            else if (!this._cache) {
                 // Not using cache, so there is no real way of knowing if anything changed or removed.
                 // We could trigger fake "value", "child_added" and "child_changed" events with fresh data, 
                 // but... what's the use? It would result in broken data? 
@@ -7315,18 +7454,27 @@ class WebApi extends Api {
         .then(() => {
             this.debug.verbose(`SYNC done`);
             const info = { local: totalPendingChanges, remote: totalRemoteChanges };
-            eventCallback && eventCallback('sync_done', info);
+            options.eventCallback && options.eventCallback('sync_done', info);
             return info;
         })
         .catch(err => {
             this.debug.error(`SYNC error`, err);
-            eventCallback && eventCallback('sync_error', err);
+            options.eventCallback && options.eventCallback('sync_error', err);
             throw err;
         });
     }
 
-    set(path, value, options = { allow_cache: true, context: null }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+    set(path, value, options = { allow_cache: true, context: {} }) {
+        if (!options.context) { options.context = {}; }
+        const useCache = this._cache && options.allow_cache !== false;
+        const useServer = this._connected;
+        options.context.acebase_mutation = options.context.acebase_mutation || {
+            client_id: this._id,
+            id: ID.generate(),
+            op: 'set',
+            path,
+            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
+        };
         const updateServer = () => {
             const data = JSON.stringify(Transport.serialize(value));
             return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context })
@@ -7335,27 +7483,26 @@ class WebApi extends Api {
             return updateServer();
         }
 
+        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
         let rollbackValue;
         const updateCache = () => {
-            return this._cache.db.api.transaction(PathInfo.getChildPath(`${this.dbname}/cache`, path), (currentValue) => {
+            return this._cache.db.api.transaction(cachePath, (currentValue) => {
                 rollbackValue = currentValue;
                 return value;
             }, { context: options.context });
         };
         const rollbackCache = () => {
-            return this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, path), rollbackValue, { context: options.context });
+            return this._cache.db.api.set(cachePath, rollbackValue, { context: options.context });
         };
-
         const addPendingTransaction = () => {
-            const id = ID.generate(); 
-            return this._cache.db.api.set(`${this.dbname}/pending/${id}`, { type: 'set', path, data: value }, { context: options.context });
+            return this._cache.db.api.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'set', path, data: value, context: options.context });
         };
 
         const cachePromise = updateCache()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !this._connected ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
@@ -7367,12 +7514,8 @@ class WebApi extends Api {
                 if (serverResult.success) {
                     // Server update success
                     if (!cacheResult.success) { 
-                        // Cache update failed for some reason, remove the cached node?
+                        // Cache update failed for some reason?
                         this.debug.error(`Failed to set cache for "${path}". Error: `, cacheResult.error);
-                        // NOT doing this because that would trigger data events such as "child_removed", "value" etc
-                        // deleteCache().catch(err => {
-                        //     this.debug.error(`Failed to remove cache for "${path}": `, err);
-                        // });
                     }
                 }
                 else {
@@ -7403,23 +7546,31 @@ class WebApi extends Api {
         return cachePromise;
     }
 
-    update(path, updates, options = { allow_cache: true, context: null }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+    update(path, updates, options = { allow_cache: true, context: {} }) {
+        const useCache = this._cache && options && options.allow_cache !== false;
+        const useServer = this._connected;
+        options.context.acebase_mutation = options.context.acebase_mutation || {
+            client_id: this._id,
+            id: ID.generate(),
+            op: 'update',
+            path,
+            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
+        };
         const updateServer = () => {
             const data = JSON.stringify(Transport.serialize(updates));
             return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context });
-        }
+        };
         if (!useCache) {
             return updateServer();
         }
 
         const cacheApi = this._cache.db.api;
+        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
         let rollbackUpdates;
         const updateCache = () => {
-            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
             const properties = Object.keys(updates);
             return cacheApi.get(cachePath, { include: properties })
-            .then(currentValues=> {
+            .then(currentValues => {
                 rollbackUpdates = currentValues;
                 return cacheApi.update(cachePath, updates, { context: options.context });
             });
@@ -7428,19 +7579,17 @@ class WebApi extends Api {
         //     return this._cache.db.api.set(`${this.dbname}/cache/${path}`, null);
         // };
         const rollbackCache = () => {
-            return cacheApi.update(PathInfo.getChildPath(`${this.dbname}/cache`, path), rollbackUpdates, { context: options.context });
+            return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
-
         const addPendingTransaction = () => {
-            const id = ID.generate(); 
-            return cacheApi.set(`${this.dbname}/pending/${id}`, { type: 'update', path, data: updates }, { context: options.context });
+            return cacheApi.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'update', path, data: updates, context: options.context });
         };
 
         const cachePromise = updateCache()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !this._connected ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer()
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
@@ -7452,12 +7601,8 @@ class WebApi extends Api {
                 if (serverResult.success) {
                     // Server update success
                     if (!cacheResult.success) { 
-                        // Cache update failed for some reason, remove the cached node?
-                        this.debug.error(`Failed to update cache for "${path}". Error: `, err);
-                        // NOT doing this because that would trigger data events such as "child_removed", "value" etc
-                        // deleteCache().catch(err => {
-                        //     this.debug.error(`Failed to remove cache for "${path}": `, err);
-                        // });
+                        // Cache update failed for some reason?
+                        this.debug.error(`Failed to update cache for "${path}". Error: `, cacheResult.error);
                     }
                 }
                 else {
@@ -7489,7 +7634,7 @@ class WebApi extends Api {
     }
 
     get(path, options = { allow_cache: true }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+        const useCache = this._cache && options.allow_cache !== false;
         const getServerValue = () => {
             // Get from server
             let url = `${this.url}/data/${this.dbname}/${path}`;
@@ -7523,7 +7668,7 @@ class WebApi extends Api {
                     // else if (!filtered) { 
                     if (!filtered) {
                         const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-                        return this._cache.db.api.set(cachePath, val)
+                        return this._cache.db.api.set(cachePath, val, { context: { acebase_operation: 'update_cache' } })
                         .catch(err => {
                             this.debug.error(`Error caching data for "/${path}"`, err)
                         })
@@ -7594,7 +7739,7 @@ class WebApi extends Api {
     }
     
     exists(path, options = { allow_cache: true }) {
-        const useCache = this._cache && options && options.allow_cache === true;
+        const useCache = this._cache && options.allow_cache !== false;
         const getCacheExists = () => {
             return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
         };
@@ -7768,7 +7913,7 @@ class WebApi extends Api {
 
 module.exports = { WebApi };
 }).call(this,require("buffer").Buffer)
-},{"acebase-core":159,"buffer":169,"http":194,"https":173,"socket.io-client":30,"url":201}],42:[function(require,module,exports){
+},{"acebase-core":160,"buffer":170,"http":195,"https":174,"socket.io-client":30,"url":202}],42:[function(require,module,exports){
 const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
 const { AceBaseClient } = require('./acebase-client');
 
@@ -8147,7 +8292,7 @@ window.acebaseclient = acebaseclient;
 window.AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
 module.exports = acebaseclient;
 },{"./index":44}],44:[function(require,module,exports){
-const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, TypeMappingOptions } = require('acebase-core');
+const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
 
 module.exports = {
@@ -8156,10 +8301,11 @@ module.exports = {
     DataSnapshot, 
     EventSubscription, 
     PathReference, 
-    TypeMappings, 
-    TypeMappingOptions
+    TypeMappings,
+    ID,
+    proxyAccess
 };
-},{"./acebase-client":40,"acebase-core":159}],45:[function(require,module,exports){
+},{"./acebase-client":40,"acebase-core":160}],45:[function(require,module,exports){
 
 class AceBaseUser {
     /**
@@ -8447,7 +8593,7 @@ exports.NEVER = never_2.NEVER;
 var config_1 = require("./internal/config");
 exports.config = config_1.config;
 
-},{"./internal/AsyncSubject":50,"./internal/BehaviorSubject":51,"./internal/Notification":53,"./internal/Observable":54,"./internal/ReplaySubject":57,"./internal/Scheduler":58,"./internal/Subject":59,"./internal/Subscriber":61,"./internal/Subscription":62,"./internal/config":63,"./internal/observable/ConnectableObservable":65,"./internal/observable/bindCallback":66,"./internal/observable/bindNodeCallback":67,"./internal/observable/combineLatest":68,"./internal/observable/concat":69,"./internal/observable/defer":70,"./internal/observable/empty":71,"./internal/observable/forkJoin":72,"./internal/observable/from":73,"./internal/observable/fromEvent":75,"./internal/observable/fromEventPattern":76,"./internal/observable/generate":77,"./internal/observable/iif":78,"./internal/observable/interval":79,"./internal/observable/merge":80,"./internal/observable/never":81,"./internal/observable/of":82,"./internal/observable/onErrorResumeNext":83,"./internal/observable/pairs":84,"./internal/observable/partition":85,"./internal/observable/race":86,"./internal/observable/range":87,"./internal/observable/throwError":88,"./internal/observable/timer":89,"./internal/observable/using":90,"./internal/observable/zip":91,"./internal/operators/groupBy":94,"./internal/scheduled/scheduled":104,"./internal/scheduler/VirtualTimeScheduler":114,"./internal/scheduler/animationFrame":115,"./internal/scheduler/asap":116,"./internal/scheduler/async":117,"./internal/scheduler/queue":118,"./internal/symbol/observable":120,"./internal/util/ArgumentOutOfRangeError":122,"./internal/util/EmptyError":123,"./internal/util/ObjectUnsubscribedError":125,"./internal/util/TimeoutError":126,"./internal/util/UnsubscriptionError":127,"./internal/util/identity":130,"./internal/util/isObservable":138,"./internal/util/noop":141,"./internal/util/pipe":143}],50:[function(require,module,exports){
+},{"./internal/AsyncSubject":50,"./internal/BehaviorSubject":51,"./internal/Notification":53,"./internal/Observable":54,"./internal/ReplaySubject":57,"./internal/Scheduler":58,"./internal/Subject":59,"./internal/Subscriber":61,"./internal/Subscription":62,"./internal/config":63,"./internal/observable/ConnectableObservable":66,"./internal/observable/bindCallback":67,"./internal/observable/bindNodeCallback":68,"./internal/observable/combineLatest":69,"./internal/observable/concat":70,"./internal/observable/defer":71,"./internal/observable/empty":72,"./internal/observable/forkJoin":73,"./internal/observable/from":74,"./internal/observable/fromEvent":76,"./internal/observable/fromEventPattern":77,"./internal/observable/generate":78,"./internal/observable/iif":79,"./internal/observable/interval":80,"./internal/observable/merge":81,"./internal/observable/never":82,"./internal/observable/of":83,"./internal/observable/onErrorResumeNext":84,"./internal/observable/pairs":85,"./internal/observable/partition":86,"./internal/observable/race":87,"./internal/observable/range":88,"./internal/observable/throwError":89,"./internal/observable/timer":90,"./internal/observable/using":91,"./internal/observable/zip":92,"./internal/operators/groupBy":95,"./internal/scheduled/scheduled":105,"./internal/scheduler/VirtualTimeScheduler":115,"./internal/scheduler/animationFrame":116,"./internal/scheduler/asap":117,"./internal/scheduler/async":118,"./internal/scheduler/queue":119,"./internal/symbol/observable":121,"./internal/util/ArgumentOutOfRangeError":123,"./internal/util/EmptyError":124,"./internal/util/ObjectUnsubscribedError":126,"./internal/util/TimeoutError":127,"./internal/util/UnsubscriptionError":128,"./internal/util/identity":131,"./internal/util/isObservable":139,"./internal/util/noop":142,"./internal/util/pipe":144}],50:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -8565,7 +8711,7 @@ var BehaviorSubject = (function (_super) {
 }(Subject_1.Subject));
 exports.BehaviorSubject = BehaviorSubject;
 
-},{"./Subject":59,"./util/ObjectUnsubscribedError":125}],52:[function(require,module,exports){
+},{"./Subject":59,"./util/ObjectUnsubscribedError":126}],52:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -8685,7 +8831,7 @@ var Notification = (function () {
 }());
 exports.Notification = Notification;
 
-},{"./observable/empty":71,"./observable/of":82,"./observable/throwError":88}],54:[function(require,module,exports){
+},{"./observable/empty":72,"./observable/of":83,"./observable/throwError":89}],54:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var canReportError_1 = require("./util/canReportError");
@@ -8803,7 +8949,7 @@ function getPromiseCtor(promiseCtor) {
     return promiseCtor;
 }
 
-},{"./config":63,"./symbol/observable":120,"./util/canReportError":128,"./util/pipe":143,"./util/toSubscriber":150}],55:[function(require,module,exports){
+},{"./config":63,"./symbol/observable":121,"./util/canReportError":129,"./util/pipe":144,"./util/toSubscriber":151}],55:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var config_1 = require("./config");
@@ -8822,7 +8968,7 @@ exports.empty = {
     complete: function () { }
 };
 
-},{"./config":63,"./util/hostReportError":129}],56:[function(require,module,exports){
+},{"./config":63,"./util/hostReportError":130}],56:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -8988,7 +9134,7 @@ var ReplayEvent = (function () {
     return ReplayEvent;
 }());
 
-},{"./Subject":59,"./SubjectSubscription":60,"./Subscription":62,"./operators/observeOn":98,"./scheduler/queue":118,"./util/ObjectUnsubscribedError":125}],58:[function(require,module,exports){
+},{"./Subject":59,"./SubjectSubscription":60,"./Subscription":62,"./operators/observeOn":99,"./scheduler/queue":119,"./util/ObjectUnsubscribedError":126}],58:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Scheduler = (function () {
@@ -9178,7 +9324,7 @@ var AnonymousSubject = (function (_super) {
 }(Subject));
 exports.AnonymousSubject = AnonymousSubject;
 
-},{"../internal/symbol/rxSubscriber":121,"./Observable":54,"./SubjectSubscription":60,"./Subscriber":61,"./Subscription":62,"./util/ObjectUnsubscribedError":125}],60:[function(require,module,exports){
+},{"../internal/symbol/rxSubscriber":122,"./Observable":54,"./SubjectSubscription":60,"./Subscriber":61,"./Subscription":62,"./util/ObjectUnsubscribedError":126}],60:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -9471,7 +9617,7 @@ var SafeSubscriber = (function (_super) {
 }(Subscriber));
 exports.SafeSubscriber = SafeSubscriber;
 
-},{"../internal/symbol/rxSubscriber":121,"./Observer":55,"./Subscription":62,"./config":63,"./util/hostReportError":129,"./util/isFunction":133}],62:[function(require,module,exports){
+},{"../internal/symbol/rxSubscriber":122,"./Observer":55,"./Subscription":62,"./config":63,"./util/hostReportError":130,"./util/isFunction":134}],62:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var isArray_1 = require("./util/isArray");
@@ -9613,7 +9759,7 @@ function flattenUnsubscriptionErrors(errors) {
     return errors.reduce(function (errs, err) { return errs.concat((err instanceof UnsubscriptionError_1.UnsubscriptionError) ? err.errors : err); }, []);
 }
 
-},{"./util/UnsubscriptionError":127,"./util/isArray":131,"./util/isFunction":133,"./util/isObject":137}],63:[function(require,module,exports){
+},{"./util/UnsubscriptionError":128,"./util/isArray":132,"./util/isFunction":134,"./util/isObject":138}],63:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var _enable_super_gross_mode_that_will_cause_bad_things = false;
@@ -9742,7 +9888,9 @@ function innerSubscribe(result, innerSubscriber) {
 }
 exports.innerSubscribe = innerSubscribe;
 
-},{"./Observable":54,"./Subscriber":61,"./util/subscribeTo":144}],65:[function(require,module,exports){
+},{"./Observable":54,"./Subscriber":61,"./util/subscribeTo":145}],65:[function(require,module,exports){
+arguments[4][54][0].apply(exports,arguments)
+},{"./config":63,"./symbol/observable":121,"./util/canReportError":129,"./util/pipe":144,"./util/toSubscriber":151,"dup":54}],66:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -9898,7 +10046,7 @@ var RefCountSubscriber = (function (_super) {
     return RefCountSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Observable":54,"../Subject":59,"../Subscriber":61,"../Subscription":62,"../operators/refCount":99}],66:[function(require,module,exports){
+},{"../Observable":54,"../Subject":59,"../Subscriber":61,"../Subscription":62,"../operators/refCount":100}],67:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10006,7 +10154,7 @@ function dispatchError(state) {
     subject.error(err);
 }
 
-},{"../AsyncSubject":50,"../Observable":54,"../operators/map":95,"../util/canReportError":128,"../util/isArray":131,"../util/isScheduler":140}],67:[function(require,module,exports){
+},{"../AsyncSubject":50,"../Observable":54,"../operators/map":96,"../util/canReportError":129,"../util/isArray":132,"../util/isScheduler":141}],68:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10122,7 +10270,7 @@ function dispatchError(arg) {
     subject.error(err);
 }
 
-},{"../AsyncSubject":50,"../Observable":54,"../operators/map":95,"../util/canReportError":128,"../util/isArray":131,"../util/isScheduler":140}],68:[function(require,module,exports){
+},{"../AsyncSubject":50,"../Observable":54,"../operators/map":96,"../util/canReportError":129,"../util/isArray":132,"../util/isScheduler":141}],69:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -10238,7 +10386,7 @@ var CombineLatestSubscriber = (function (_super) {
 }(OuterSubscriber_1.OuterSubscriber));
 exports.CombineLatestSubscriber = CombineLatestSubscriber;
 
-},{"../OuterSubscriber":56,"../util/isArray":131,"../util/isScheduler":140,"../util/subscribeToResult":149,"./fromArray":74}],69:[function(require,module,exports){
+},{"../OuterSubscriber":56,"../util/isArray":132,"../util/isScheduler":141,"../util/subscribeToResult":150,"./fromArray":75}],70:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var of_1 = require("./of");
@@ -10252,7 +10400,7 @@ function concat() {
 }
 exports.concat = concat;
 
-},{"../operators/concatAll":92,"./of":82}],70:[function(require,module,exports){
+},{"../operators/concatAll":93,"./of":83}],71:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10274,7 +10422,7 @@ function defer(observableFactory) {
 }
 exports.defer = defer;
 
-},{"../Observable":54,"./empty":71,"./from":73}],71:[function(require,module,exports){
+},{"../Observable":54,"./empty":72,"./from":74}],72:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10287,7 +10435,7 @@ function emptyScheduled(scheduler) {
     return new Observable_1.Observable(function (subscriber) { return scheduler.schedule(function () { return subscriber.complete(); }); });
 }
 
-},{"../Observable":54}],72:[function(require,module,exports){
+},{"../Observable":54}],73:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10359,7 +10507,7 @@ function forkJoinInternal(sources, keys) {
     });
 }
 
-},{"../Observable":54,"../operators/map":95,"../util/isArray":131,"../util/isObject":137,"./from":73}],73:[function(require,module,exports){
+},{"../Observable":54,"../operators/map":96,"../util/isArray":132,"../util/isObject":138,"./from":74}],74:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10378,7 +10526,7 @@ function from(input, scheduler) {
 }
 exports.from = from;
 
-},{"../Observable":54,"../scheduled/scheduled":104,"../util/subscribeTo":144}],74:[function(require,module,exports){
+},{"../Observable":54,"../scheduled/scheduled":105,"../util/subscribeTo":145}],75:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10394,7 +10542,7 @@ function fromArray(input, scheduler) {
 }
 exports.fromArray = fromArray;
 
-},{"../Observable":54,"../scheduled/scheduleArray":100,"../util/subscribeToArray":145}],75:[function(require,module,exports){
+},{"../Observable":54,"../scheduled/scheduleArray":101,"../util/subscribeToArray":146}],76:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10460,7 +10608,7 @@ function isEventTarget(sourceObj) {
     return sourceObj && typeof sourceObj.addEventListener === 'function' && typeof sourceObj.removeEventListener === 'function';
 }
 
-},{"../Observable":54,"../operators/map":95,"../util/isArray":131,"../util/isFunction":133}],76:[function(require,module,exports){
+},{"../Observable":54,"../operators/map":96,"../util/isArray":132,"../util/isFunction":134}],77:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10495,7 +10643,7 @@ function fromEventPattern(addHandler, removeHandler, resultSelector) {
 }
 exports.fromEventPattern = fromEventPattern;
 
-},{"../Observable":54,"../operators/map":95,"../util/isArray":131,"../util/isFunction":133}],77:[function(require,module,exports){
+},{"../Observable":54,"../operators/map":96,"../util/isArray":132,"../util/isFunction":134}],78:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10623,7 +10771,7 @@ function dispatch(state) {
     return this.schedule(state);
 }
 
-},{"../Observable":54,"../util/identity":130,"../util/isScheduler":140}],78:[function(require,module,exports){
+},{"../Observable":54,"../util/identity":131,"../util/isScheduler":141}],79:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var defer_1 = require("./defer");
@@ -10635,7 +10783,7 @@ function iif(condition, trueResult, falseResult) {
 }
 exports.iif = iif;
 
-},{"./defer":70,"./empty":71}],79:[function(require,module,exports){
+},{"./defer":71,"./empty":72}],80:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10662,7 +10810,7 @@ function dispatch(state) {
     this.schedule({ subscriber: subscriber, counter: counter + 1, period: period }, period);
 }
 
-},{"../Observable":54,"../scheduler/async":117,"../util/isNumeric":136}],80:[function(require,module,exports){
+},{"../Observable":54,"../scheduler/async":118,"../util/isNumeric":137}],81:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10693,7 +10841,7 @@ function merge() {
 }
 exports.merge = merge;
 
-},{"../Observable":54,"../operators/mergeAll":96,"../util/isScheduler":140,"./fromArray":74}],81:[function(require,module,exports){
+},{"../Observable":54,"../operators/mergeAll":97,"../util/isScheduler":141,"./fromArray":75}],82:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10704,7 +10852,7 @@ function never() {
 }
 exports.never = never;
 
-},{"../Observable":54,"../util/noop":141}],82:[function(require,module,exports){
+},{"../Observable":54,"../util/noop":142}],83:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var isScheduler_1 = require("../util/isScheduler");
@@ -10726,7 +10874,7 @@ function of() {
 }
 exports.of = of;
 
-},{"../scheduled/scheduleArray":100,"../util/isScheduler":140,"./fromArray":74}],83:[function(require,module,exports){
+},{"../scheduled/scheduleArray":101,"../util/isScheduler":141,"./fromArray":75}],84:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10756,7 +10904,7 @@ function onErrorResumeNext() {
 }
 exports.onErrorResumeNext = onErrorResumeNext;
 
-},{"../Observable":54,"../util/isArray":131,"./empty":71,"./from":73}],84:[function(require,module,exports){
+},{"../Observable":54,"../util/isArray":132,"./empty":72,"./from":74}],85:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10799,7 +10947,7 @@ function dispatch(state) {
 }
 exports.dispatch = dispatch;
 
-},{"../Observable":54,"../Subscription":62}],85:[function(require,module,exports){
+},{"../Observable":54,"../Subscription":62}],86:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var not_1 = require("../util/not");
@@ -10814,7 +10962,7 @@ function partition(source, predicate, thisArg) {
 }
 exports.partition = partition;
 
-},{"../Observable":54,"../operators/filter":93,"../util/not":142,"../util/subscribeTo":144}],86:[function(require,module,exports){
+},{"../Observable":54,"../operators/filter":94,"../util/not":143,"../util/subscribeTo":145}],87:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -10907,7 +11055,7 @@ var RaceSubscriber = (function (_super) {
 }(OuterSubscriber_1.OuterSubscriber));
 exports.RaceSubscriber = RaceSubscriber;
 
-},{"../OuterSubscriber":56,"../util/isArray":131,"../util/subscribeToResult":149,"./fromArray":74}],87:[function(require,module,exports){
+},{"../OuterSubscriber":56,"../util/isArray":132,"../util/subscribeToResult":150,"./fromArray":75}],88:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10957,7 +11105,7 @@ function dispatch(state) {
 }
 exports.dispatch = dispatch;
 
-},{"../Observable":54}],88:[function(require,module,exports){
+},{"../Observable":54}],89:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -10975,7 +11123,7 @@ function dispatch(_a) {
     subscriber.error(error);
 }
 
-},{"../Observable":54}],89:[function(require,module,exports){
+},{"../Observable":54}],90:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -11017,7 +11165,7 @@ function dispatch(state) {
     this.schedule(state, period);
 }
 
-},{"../Observable":54,"../scheduler/async":117,"../util/isNumeric":136,"../util/isScheduler":140}],90:[function(require,module,exports){
+},{"../Observable":54,"../scheduler/async":118,"../util/isNumeric":137,"../util/isScheduler":141}],91:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -11053,7 +11201,7 @@ function using(resourceFactory, observableFactory) {
 }
 exports.using = using;
 
-},{"../Observable":54,"./empty":71,"./from":73}],91:[function(require,module,exports){
+},{"../Observable":54,"./empty":72,"./from":74}],92:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -11283,7 +11431,7 @@ var ZipBufferIterator = (function (_super) {
     return ZipBufferIterator;
 }(innerSubscribe_1.SimpleOuterSubscriber));
 
-},{"../../internal/symbol/iterator":119,"../Subscriber":61,"../innerSubscribe":64,"../util/isArray":131,"./fromArray":74}],92:[function(require,module,exports){
+},{"../../internal/symbol/iterator":120,"../Subscriber":61,"../innerSubscribe":64,"../util/isArray":132,"./fromArray":75}],93:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var mergeAll_1 = require("./mergeAll");
@@ -11292,7 +11440,7 @@ function concatAll() {
 }
 exports.concatAll = concatAll;
 
-},{"./mergeAll":96}],93:[function(require,module,exports){
+},{"./mergeAll":97}],94:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -11350,7 +11498,7 @@ var FilterSubscriber = (function (_super) {
     return FilterSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Subscriber":61}],94:[function(require,module,exports){
+},{"../Subscriber":61}],95:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -11547,7 +11695,7 @@ var InnerRefCountSubscription = (function (_super) {
     return InnerRefCountSubscription;
 }(Subscription_1.Subscription));
 
-},{"../Observable":54,"../Subject":59,"../Subscriber":61,"../Subscription":62}],95:[function(require,module,exports){
+},{"../Observable":54,"../Subject":59,"../Subscriber":61,"../Subscription":62}],96:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -11607,7 +11755,7 @@ var MapSubscriber = (function (_super) {
     return MapSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Subscriber":61}],96:[function(require,module,exports){
+},{"../Subscriber":61}],97:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var mergeMap_1 = require("./mergeMap");
@@ -11618,7 +11766,7 @@ function mergeAll(concurrent) {
 }
 exports.mergeAll = mergeAll;
 
-},{"../util/identity":130,"./mergeMap":97}],97:[function(require,module,exports){
+},{"../util/identity":131,"./mergeMap":98}],98:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -11728,7 +11876,7 @@ var MergeMapSubscriber = (function (_super) {
 exports.MergeMapSubscriber = MergeMapSubscriber;
 exports.flatMap = mergeMap;
 
-},{"../innerSubscribe":64,"../observable/from":73,"./map":95}],98:[function(require,module,exports){
+},{"../innerSubscribe":64,"../observable/from":74,"./map":96}],99:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -11806,7 +11954,7 @@ var ObserveOnMessage = (function () {
 }());
 exports.ObserveOnMessage = ObserveOnMessage;
 
-},{"../Notification":53,"../Subscriber":61}],99:[function(require,module,exports){
+},{"../Notification":53,"../Subscriber":61}],100:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -11879,7 +12027,7 @@ var RefCountSubscriber = (function (_super) {
     return RefCountSubscriber;
 }(Subscriber_1.Subscriber));
 
-},{"../Subscriber":61}],100:[function(require,module,exports){
+},{"../Subscriber":61}],101:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -11903,7 +12051,7 @@ function scheduleArray(input, scheduler) {
 }
 exports.scheduleArray = scheduleArray;
 
-},{"../Observable":54,"../Subscription":62}],101:[function(require,module,exports){
+},{"../Observable":54,"../Subscription":62}],102:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -11952,7 +12100,7 @@ function scheduleIterable(input, scheduler) {
 }
 exports.scheduleIterable = scheduleIterable;
 
-},{"../Observable":54,"../Subscription":62,"../symbol/iterator":119}],102:[function(require,module,exports){
+},{"../Observable":54,"../Subscription":62,"../symbol/iterator":120}],103:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -11974,7 +12122,7 @@ function scheduleObservable(input, scheduler) {
 }
 exports.scheduleObservable = scheduleObservable;
 
-},{"../Observable":54,"../Subscription":62,"../symbol/observable":120}],103:[function(require,module,exports){
+},{"../Observable":54,"../Subscription":62,"../symbol/observable":121}],104:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -11995,7 +12143,7 @@ function schedulePromise(input, scheduler) {
 }
 exports.schedulePromise = schedulePromise;
 
-},{"../Observable":54,"../Subscription":62}],104:[function(require,module,exports){
+},{"../Observable":54,"../Subscription":62}],105:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var scheduleObservable_1 = require("./scheduleObservable");
@@ -12025,7 +12173,7 @@ function scheduled(input, scheduler) {
 }
 exports.scheduled = scheduled;
 
-},{"../util/isArrayLike":132,"../util/isInteropObservable":134,"../util/isIterable":135,"../util/isPromise":139,"./scheduleArray":100,"./scheduleIterable":101,"./scheduleObservable":102,"./schedulePromise":103}],105:[function(require,module,exports){
+},{"../util/isArrayLike":133,"../util/isInteropObservable":135,"../util/isIterable":136,"../util/isPromise":140,"./scheduleArray":101,"./scheduleIterable":102,"./scheduleObservable":103,"./schedulePromise":104}],106:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12055,7 +12203,7 @@ var Action = (function (_super) {
 }(Subscription_1.Subscription));
 exports.Action = Action;
 
-},{"../Subscription":62}],106:[function(require,module,exports){
+},{"../Subscription":62}],107:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12103,7 +12251,7 @@ var AnimationFrameAction = (function (_super) {
 }(AsyncAction_1.AsyncAction));
 exports.AnimationFrameAction = AnimationFrameAction;
 
-},{"./AsyncAction":110}],107:[function(require,module,exports){
+},{"./AsyncAction":111}],108:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12150,7 +12298,7 @@ var AnimationFrameScheduler = (function (_super) {
 }(AsyncScheduler_1.AsyncScheduler));
 exports.AnimationFrameScheduler = AnimationFrameScheduler;
 
-},{"./AsyncScheduler":111}],108:[function(require,module,exports){
+},{"./AsyncScheduler":112}],109:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12199,7 +12347,7 @@ var AsapAction = (function (_super) {
 }(AsyncAction_1.AsyncAction));
 exports.AsapAction = AsapAction;
 
-},{"../util/Immediate":124,"./AsyncAction":110}],109:[function(require,module,exports){
+},{"../util/Immediate":125,"./AsyncAction":111}],110:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12246,7 +12394,7 @@ var AsapScheduler = (function (_super) {
 }(AsyncScheduler_1.AsyncScheduler));
 exports.AsapScheduler = AsapScheduler;
 
-},{"./AsyncScheduler":111}],110:[function(require,module,exports){
+},{"./AsyncScheduler":112}],111:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12349,7 +12497,7 @@ var AsyncAction = (function (_super) {
 }(Action_1.Action));
 exports.AsyncAction = AsyncAction;
 
-},{"./Action":105}],111:[function(require,module,exports){
+},{"./Action":106}],112:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12417,7 +12565,7 @@ var AsyncScheduler = (function (_super) {
 }(Scheduler_1.Scheduler));
 exports.AsyncScheduler = AsyncScheduler;
 
-},{"../Scheduler":58}],112:[function(require,module,exports){
+},{"../Scheduler":58}],113:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12468,7 +12616,7 @@ var QueueAction = (function (_super) {
 }(AsyncAction_1.AsyncAction));
 exports.QueueAction = QueueAction;
 
-},{"./AsyncAction":110}],113:[function(require,module,exports){
+},{"./AsyncAction":111}],114:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12494,7 +12642,7 @@ var QueueScheduler = (function (_super) {
 }(AsyncScheduler_1.AsyncScheduler));
 exports.QueueScheduler = QueueScheduler;
 
-},{"./AsyncScheduler":111}],114:[function(require,module,exports){
+},{"./AsyncScheduler":112}],115:[function(require,module,exports){
 "use strict";
 var __extends = (this && this.__extends) || (function () {
     var extendStatics = function (d, b) {
@@ -12606,7 +12754,7 @@ var VirtualAction = (function (_super) {
 }(AsyncAction_1.AsyncAction));
 exports.VirtualAction = VirtualAction;
 
-},{"./AsyncAction":110,"./AsyncScheduler":111}],115:[function(require,module,exports){
+},{"./AsyncAction":111,"./AsyncScheduler":112}],116:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var AnimationFrameAction_1 = require("./AnimationFrameAction");
@@ -12614,7 +12762,7 @@ var AnimationFrameScheduler_1 = require("./AnimationFrameScheduler");
 exports.animationFrameScheduler = new AnimationFrameScheduler_1.AnimationFrameScheduler(AnimationFrameAction_1.AnimationFrameAction);
 exports.animationFrame = exports.animationFrameScheduler;
 
-},{"./AnimationFrameAction":106,"./AnimationFrameScheduler":107}],116:[function(require,module,exports){
+},{"./AnimationFrameAction":107,"./AnimationFrameScheduler":108}],117:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var AsapAction_1 = require("./AsapAction");
@@ -12622,7 +12770,7 @@ var AsapScheduler_1 = require("./AsapScheduler");
 exports.asapScheduler = new AsapScheduler_1.AsapScheduler(AsapAction_1.AsapAction);
 exports.asap = exports.asapScheduler;
 
-},{"./AsapAction":108,"./AsapScheduler":109}],117:[function(require,module,exports){
+},{"./AsapAction":109,"./AsapScheduler":110}],118:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var AsyncAction_1 = require("./AsyncAction");
@@ -12630,7 +12778,7 @@ var AsyncScheduler_1 = require("./AsyncScheduler");
 exports.asyncScheduler = new AsyncScheduler_1.AsyncScheduler(AsyncAction_1.AsyncAction);
 exports.async = exports.asyncScheduler;
 
-},{"./AsyncAction":110,"./AsyncScheduler":111}],118:[function(require,module,exports){
+},{"./AsyncAction":111,"./AsyncScheduler":112}],119:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var QueueAction_1 = require("./QueueAction");
@@ -12638,7 +12786,7 @@ var QueueScheduler_1 = require("./QueueScheduler");
 exports.queueScheduler = new QueueScheduler_1.QueueScheduler(QueueAction_1.QueueAction);
 exports.queue = exports.queueScheduler;
 
-},{"./QueueAction":112,"./QueueScheduler":113}],119:[function(require,module,exports){
+},{"./QueueAction":113,"./QueueScheduler":114}],120:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function getSymbolIterator() {
@@ -12651,12 +12799,12 @@ exports.getSymbolIterator = getSymbolIterator;
 exports.iterator = getSymbolIterator();
 exports.$$iterator = exports.iterator;
 
-},{}],120:[function(require,module,exports){
+},{}],121:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.observable = (function () { return typeof Symbol === 'function' && Symbol.observable || '@@observable'; })();
 
-},{}],121:[function(require,module,exports){
+},{}],122:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.rxSubscriber = (function () {
@@ -12666,7 +12814,7 @@ exports.rxSubscriber = (function () {
 })();
 exports.$$rxSubscriber = exports.rxSubscriber;
 
-},{}],122:[function(require,module,exports){
+},{}],123:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var ArgumentOutOfRangeErrorImpl = (function () {
@@ -12681,7 +12829,7 @@ var ArgumentOutOfRangeErrorImpl = (function () {
 })();
 exports.ArgumentOutOfRangeError = ArgumentOutOfRangeErrorImpl;
 
-},{}],123:[function(require,module,exports){
+},{}],124:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var EmptyErrorImpl = (function () {
@@ -12696,7 +12844,7 @@ var EmptyErrorImpl = (function () {
 })();
 exports.EmptyError = EmptyErrorImpl;
 
-},{}],124:[function(require,module,exports){
+},{}],125:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var nextHandle = 1;
@@ -12726,7 +12874,7 @@ exports.TestTools = {
     }
 };
 
-},{}],125:[function(require,module,exports){
+},{}],126:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var ObjectUnsubscribedErrorImpl = (function () {
@@ -12741,7 +12889,7 @@ var ObjectUnsubscribedErrorImpl = (function () {
 })();
 exports.ObjectUnsubscribedError = ObjectUnsubscribedErrorImpl;
 
-},{}],126:[function(require,module,exports){
+},{}],127:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var TimeoutErrorImpl = (function () {
@@ -12756,7 +12904,7 @@ var TimeoutErrorImpl = (function () {
 })();
 exports.TimeoutError = TimeoutErrorImpl;
 
-},{}],127:[function(require,module,exports){
+},{}],128:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var UnsubscriptionErrorImpl = (function () {
@@ -12773,7 +12921,7 @@ var UnsubscriptionErrorImpl = (function () {
 })();
 exports.UnsubscriptionError = UnsubscriptionErrorImpl;
 
-},{}],128:[function(require,module,exports){
+},{}],129:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Subscriber_1 = require("../Subscriber");
@@ -12794,7 +12942,7 @@ function canReportError(observer) {
 }
 exports.canReportError = canReportError;
 
-},{"../Subscriber":61}],129:[function(require,module,exports){
+},{"../Subscriber":61}],130:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function hostReportError(err) {
@@ -12802,7 +12950,7 @@ function hostReportError(err) {
 }
 exports.hostReportError = hostReportError;
 
-},{}],130:[function(require,module,exports){
+},{}],131:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function identity(x) {
@@ -12810,17 +12958,17 @@ function identity(x) {
 }
 exports.identity = identity;
 
-},{}],131:[function(require,module,exports){
+},{}],132:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isArray = (function () { return Array.isArray || (function (x) { return x && typeof x.length === 'number'; }); })();
 
-},{}],132:[function(require,module,exports){
+},{}],133:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isArrayLike = (function (x) { return x && typeof x.length === 'number' && typeof x !== 'function'; });
 
-},{}],133:[function(require,module,exports){
+},{}],134:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function isFunction(x) {
@@ -12828,7 +12976,7 @@ function isFunction(x) {
 }
 exports.isFunction = isFunction;
 
-},{}],134:[function(require,module,exports){
+},{}],135:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var observable_1 = require("../symbol/observable");
@@ -12837,7 +12985,7 @@ function isInteropObservable(input) {
 }
 exports.isInteropObservable = isInteropObservable;
 
-},{"../symbol/observable":120}],135:[function(require,module,exports){
+},{"../symbol/observable":121}],136:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var iterator_1 = require("../symbol/iterator");
@@ -12846,7 +12994,7 @@ function isIterable(input) {
 }
 exports.isIterable = isIterable;
 
-},{"../symbol/iterator":119}],136:[function(require,module,exports){
+},{"../symbol/iterator":120}],137:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var isArray_1 = require("./isArray");
@@ -12855,7 +13003,7 @@ function isNumeric(val) {
 }
 exports.isNumeric = isNumeric;
 
-},{"./isArray":131}],137:[function(require,module,exports){
+},{"./isArray":132}],138:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function isObject(x) {
@@ -12863,7 +13011,7 @@ function isObject(x) {
 }
 exports.isObject = isObject;
 
-},{}],138:[function(require,module,exports){
+},{}],139:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Observable_1 = require("../Observable");
@@ -12872,7 +13020,7 @@ function isObservable(obj) {
 }
 exports.isObservable = isObservable;
 
-},{"../Observable":54}],139:[function(require,module,exports){
+},{"../Observable":54}],140:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function isPromise(value) {
@@ -12880,7 +13028,7 @@ function isPromise(value) {
 }
 exports.isPromise = isPromise;
 
-},{}],140:[function(require,module,exports){
+},{}],141:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function isScheduler(value) {
@@ -12888,13 +13036,13 @@ function isScheduler(value) {
 }
 exports.isScheduler = isScheduler;
 
-},{}],141:[function(require,module,exports){
+},{}],142:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function noop() { }
 exports.noop = noop;
 
-},{}],142:[function(require,module,exports){
+},{}],143:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function not(pred, thisArg) {
@@ -12907,7 +13055,7 @@ function not(pred, thisArg) {
 }
 exports.not = not;
 
-},{}],143:[function(require,module,exports){
+},{}],144:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var identity_1 = require("./identity");
@@ -12932,7 +13080,7 @@ function pipeFromArray(fns) {
 }
 exports.pipeFromArray = pipeFromArray;
 
-},{"./identity":130}],144:[function(require,module,exports){
+},{"./identity":131}],145:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var subscribeToArray_1 = require("./subscribeToArray");
@@ -12965,7 +13113,7 @@ exports.subscribeTo = function (result) {
     }
 };
 
-},{"../symbol/iterator":119,"../symbol/observable":120,"./isArrayLike":132,"./isObject":137,"./isPromise":139,"./subscribeToArray":145,"./subscribeToIterable":146,"./subscribeToObservable":147,"./subscribeToPromise":148}],145:[function(require,module,exports){
+},{"../symbol/iterator":120,"../symbol/observable":121,"./isArrayLike":133,"./isObject":138,"./isPromise":140,"./subscribeToArray":146,"./subscribeToIterable":147,"./subscribeToObservable":148,"./subscribeToPromise":149}],146:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.subscribeToArray = function (array) { return function (subscriber) {
@@ -12975,7 +13123,7 @@ exports.subscribeToArray = function (array) { return function (subscriber) {
     subscriber.complete();
 }; };
 
-},{}],146:[function(require,module,exports){
+},{}],147:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var iterator_1 = require("../symbol/iterator");
@@ -13009,7 +13157,7 @@ exports.subscribeToIterable = function (iterable) { return function (subscriber)
     return subscriber;
 }; };
 
-},{"../symbol/iterator":119}],147:[function(require,module,exports){
+},{"../symbol/iterator":120}],148:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var observable_1 = require("../symbol/observable");
@@ -13023,7 +13171,7 @@ exports.subscribeToObservable = function (obj) { return function (subscriber) {
     }
 }; };
 
-},{"../symbol/observable":120}],148:[function(require,module,exports){
+},{"../symbol/observable":121}],149:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var hostReportError_1 = require("./hostReportError");
@@ -13038,7 +13186,7 @@ exports.subscribeToPromise = function (promise) { return function (subscriber) {
     return subscriber;
 }; };
 
-},{"./hostReportError":129}],149:[function(require,module,exports){
+},{"./hostReportError":130}],150:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var InnerSubscriber_1 = require("../InnerSubscriber");
@@ -13056,7 +13204,7 @@ function subscribeToResult(outerSubscriber, result, outerValue, outerIndex, inne
 }
 exports.subscribeToResult = subscribeToResult;
 
-},{"../InnerSubscriber":52,"../Observable":54,"./subscribeTo":144}],150:[function(require,module,exports){
+},{"../InnerSubscriber":52,"../Observable":54,"./subscribeTo":145}],151:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 var Subscriber_1 = require("../Subscriber");
@@ -13078,7 +13226,7 @@ function toSubscriber(nextOrObserver, error, complete) {
 }
 exports.toSubscriber = toSubscriber;
 
-},{"../Observer":55,"../Subscriber":61,"../symbol/rxSubscriber":121}],151:[function(require,module,exports){
+},{"../Observer":55,"../Subscriber":61,"../symbol/rxSubscriber":122}],152:[function(require,module,exports){
 /**
    ________________________________________________________________________________
    
@@ -13089,7 +13237,7 @@ exports.toSubscriber = toSubscriber;
     | | | | (_|  __/ |_/ / (_| \__ \  __/
     \_| |_/\___\___\____/ \__,_|___/\___|
                                      
-   Copyright 2018 by Ewout Stortenbeker (me@appy.one)   
+   Copyright 2018-2020 Ewout Stortenbeker (me@appy.one)   
    Published under MIT license
    ________________________________________________________________________________
   
@@ -13104,7 +13252,8 @@ class AceBaseSettings {
         //     throw new Error(`No api passed to AceBaseSettings constructor`);
         // }
         this.logLevel = options.logLevel || "log";
-        // this.api = options.api;
+        this.logPrefixing = typeof options.logPrefixing === 'boolean' ? options.logPrefixing : true;
+        this.logColors = typeof options.logColors === 'boolean' ? options.logColors : true;
     }
 }
 
@@ -13122,6 +13271,7 @@ class AceBaseBase extends EventEmitter {
 
         this.setMaxListeners(50); // Prevent warning for >10 "ready" event listeners, increase to 50
         this.once("ready", () => {
+            // console.log(`database "${dbname}" (${this.constructor.name}) is ready to use`);
             this._ready = true;
         });
 
@@ -13217,7 +13367,7 @@ class AceBaseBase extends EventEmitter {
 }
 
 module.exports = { AceBaseBase, AceBaseSettings };
-},{"./data-reference":155,"./type-mappings":165,"events":172}],152:[function(require,module,exports){
+},{"./data-reference":156,"./type-mappings":166,"events":173}],153:[function(require,module,exports){
 
 class Api {
     // interface for local and web api's
@@ -13244,7 +13394,7 @@ class Api {
 }
 
 module.exports = { Api };
-},{}],153:[function(require,module,exports){
+},{}],154:[function(require,module,exports){
 const c = function(input, length, result) {
     var i, j, n, b = [0, 0, 0, 0, 0];
     for(i = 0; i < length; i += 4){
@@ -13314,36 +13464,23 @@ const ascii85 = {
 };
 
 module.exports = ascii85;
-},{}],154:[function(require,module,exports){
+},{}],155:[function(require,module,exports){
+(function (process){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.LiveDataProxy = void 0;
+exports.proxyAccess = exports.LiveDataProxy = void 0;
+const utils_1 = require("./utils");
 const path_info_1 = require("./path-info");
 const path_reference_1 = require("./path-reference");
-// Use this import when editing:
-// Not needed anymore once above files have been ported to Typescript
-// import { DataReference, DataSnapshot, PathInfo, PathReference } from '../index';
+// Import RxJS Observable without throwing errors when not available.
+const { Observable } = require('rxjs/internal/observable');
+const isProxy = Symbol("isProxy");
 class LiveDataProxy {
     /**
      * Creates a live data proxy for the given reference. The data of the reference's path will be loaded, and kept in-sync
      * with live data by listening for 'mutated' events. Any changes made to the value by the client will be synced back
      * to the database.
      * @param ref DataReference to create proxy for.
-     * @example
-     * const ref = db.ref('chats/chat1');
-     * const proxy = await ref.proxy();
-     * const chat = proxy.value;
-     * console.log(`Got chat "${chat.title}":`, chat);
-     * // chat: { message: 'This is an example chat', members: ['Ewout'], messages: { message1: { from: 'Ewout', text: 'Welcome to the proxy chat example' } } }
-     *
-     * // Change title:
-     * chat.title = 'Changing the title in the database too!';
-     *
-     * // Add participants to the members array:
-     * chat.members.push('John', 'Jack', 'Pete');
-     *
-     * // Add a message to the messages collection (NOTE: automatically generates an ID)
-     * chat.messages.push({ from: 'Ewout', message: 'I am changing the database without programming against it!' });
      */
     static async create(ref) {
         let cache, loaded = false;
@@ -13352,16 +13489,22 @@ class LiveDataProxy {
         let onErrorCallback = err => {
             console.error(err.message, err.details);
         };
+        // const waitingForMutationEvents = [];
+        // function globalMutationEventsFired() {
+        //     return new Promise(resolve => waitingForMutationEvents.push(resolve));
+        // };
         // Subscribe to mutated events on the target path
-        const subscription = ref.on('mutated').subscribe(async (mutationSnap) => {
+        const subscription = ref.on('mutated').subscribe(async (snap) => {
             if (!loaded) {
                 return;
             }
-            const context = mutationSnap.ref.context();
+            // // alert those that were waiting for mutation events to fire
+            // waitingForMutationEvents.splice(0).forEach(resolve => process.nextTick(resolve));
+            const context = snap.ref.context();
             const remoteChange = context.proxy_id !== proxyId;
-            if (mutationSnap.ref.path === ref.path) {
+            if (snap.ref.path === ref.path) {
                 // cache value itself being mutated (changing types? being removed/created?)
-                cache = mutationSnap.val();
+                cache = snap.val();
                 return;
             }
             let reloadCache = false;
@@ -13385,6 +13528,7 @@ class LiveDataProxy {
                 }
                 if (!reloadCache) {
                     const prop = trailKeys.shift();
+                    // const oldValue = target[prop] || null;
                     const newValue = snap.val();
                     if (newValue === null) {
                         // Remove it
@@ -13400,11 +13544,11 @@ class LiveDataProxy {
                 const newSnap = await ref.get();
                 cache = newSnap.val();
                 // Set mutationSnap to our new value snapshot, with conflict context
-                const mutationContext = mutationSnap.ref.context();
+                const mutationContext = snap.ref.context();
                 newSnap.ref.context({ proxy_id: proxyId, proxy_source: 'conflict', proxy_conflict: mutationContext });
-                mutationSnap = newSnap;
+                snap = newSnap;
             }
-            onMutationCallback && onMutationCallback(mutationSnap, remoteChange);
+            onMutationCallback && onMutationCallback(snap, remoteChange);
         });
         // Setup updating functionality: enqueue all updates, process them at next tick in the order they were issued 
         let processQueueTimeout, processPromise = Promise.resolve();
@@ -13457,39 +13601,125 @@ class LiveDataProxy {
                 });
             }
         };
+        const clientSubscriptions = [];
+        const addOnChangeHandler = (target, callback) => {
+            const targetRef = getTargetRef(ref, target);
+            const subscription = targetRef.on('mutated').subscribe(async (snap) => {
+                // await globalMutationEventsFired(); // Wait for the mutated events to fire
+                const context = snap.ref.context();
+                const isRemote = context.proxy_id !== proxyId;
+                // Construct previous value from snapshot (we don't know what it was if the update was done locally) 
+                const currentValue = getTargetValue(cache, target);
+                const newValue = utils_1.cloneObject(currentValue);
+                const previousValue = utils_1.cloneObject(newValue);
+                for (let i = 0, val = newValue, prev = previousValue, arr = path_info_1.PathInfo.getPathKeys(snap.ref.path).slice(path_info_1.PathInfo.getPathKeys(targetRef.path).length); i < arr.length; i++) {
+                    const last = i + 1 === arr.length, key = arr[i];
+                    if (last) {
+                        val[key] = snap.val();
+                        if (val[key] === null) {
+                            delete val[key];
+                        }
+                        prev[key] = snap.previous();
+                        if (prev[key] === null) {
+                            delete prev[key];
+                        }
+                    }
+                    else {
+                        val = val[key] = key in val ? val[key] : {};
+                        prev = prev[key] = key in prev ? prev[key] : {};
+                    }
+                }
+                // const proxyValue = newValue === null ? null : createProxy({ root: { ref, cache }, target, id: proxyId, flag: handleFlag });
+                process.nextTick(() => {
+                    // Run callback with read-only (frozen) values in next tick
+                    const keepSubscription = callback(Object.freeze(newValue), Object.freeze(previousValue), isRemote, context);
+                    if (keepSubscription === false) {
+                        stop();
+                    }
+                });
+            });
+            const stop = () => {
+                subscription.stop();
+                clientSubscriptions.splice(clientSubscriptions.indexOf(subscription), 1);
+            };
+            clientSubscriptions.push(subscription);
+            return { stop };
+        };
+        const handleFlag = (flag, target, args) => {
+            if (flag === 'write') {
+                return flagOverwritten(target);
+            }
+            else if (flag === 'onChange') {
+                return addOnChangeHandler(target, args.callback);
+            }
+            else if (flag === 'observe') {
+                if (!Observable) {
+                    throw new Error(`Cannot observe proxy value because rxjs package could not be loaded. Add it to your project with: npm i rxjs`);
+                }
+                return new Observable(observer => {
+                    const currentValue = getTargetValue(cache, target);
+                    observer.next(currentValue);
+                    const subscription = addOnChangeHandler(target, (value, previous, isRemote, context) => {
+                        observer.next(value);
+                    });
+                    return function unsubscribe() {
+                        subscription.stop();
+                    };
+                });
+            }
+        };
         const snap = await ref.get();
         loaded = true;
         cache = snap.val();
-        let proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: flagOverwritten });
+        let proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
+        const assertProxyAvailable = () => {
+            if (proxy === null) {
+                throw new Error(`Proxy was destroyed`);
+            }
+        };
         return {
             destroy() {
                 subscription.stop();
+                clientSubscriptions.forEach(sub => sub.stop());
                 cache = null; // Remove cache
                 proxy = null;
             },
+            stop() {
+                this.destroy();
+            },
             get value() {
+                assertProxyAvailable();
                 return proxy;
+            },
+            get hasValue() {
+                assertProxyAvailable();
+                return cache !== null;
             },
             set value(val) {
                 // Overwrite the value of the proxied path itself!
-                if (val instanceof Proxy) {
+                assertProxyAvailable();
+                if (typeof val === 'object' && val[isProxy]) {
                     throw new Error(`Cannot set value to another proxy`);
                 }
                 cache = val;
+                proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
                 flagOverwritten([]);
             },
             async reload() {
                 // Manually reloads current value when cache is out of sync, which should only 
                 // be able to happen if an AceBaseClient is used without cache database, 
-                // and the connection to the server was lost for a while. In other other cases, 
+                // and the connection to the server was lost for a while. In all other cases, 
                 // there should be no need to call this method.
+                assertProxyAvailable();
                 const newSnap = await ref.get();
                 cache = newSnap.val();
+                proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
                 newSnap.ref.context({ proxy_id: proxyId, proxy_source: 'reload' });
                 onMutationCallback(newSnap, true);
             },
             onMutation(callback) {
                 // Fires callback each time anything changes
+                assertProxyAvailable();
                 onMutationCallback = (...args) => {
                     try {
                         callback(...args);
@@ -13501,6 +13731,7 @@ class LiveDataProxy {
             },
             onError(callback) {
                 // Fires callback each time anything goes wrong
+                assertProxyAvailable();
                 onErrorCallback = (...args) => {
                     try {
                         callback(...args);
@@ -13530,29 +13761,105 @@ function getTargetRef(ref, target) {
 }
 //update(ref: DataReference, value: any): void
 function createProxy(context) {
-    let targetRef = getTargetRef(context.root.ref, context.target);
+    const targetRef = getTargetRef(context.root.ref, context.target);
+    const childProxies = [];
     const handler = {
         get(target, prop, receiver) {
             target = getTargetValue(context.root.cache, context.target);
-            if (typeof prop === 'symbol') {
+            if (prop === isProxy) {
+                return true;
+            }
+            else if (typeof prop === 'symbol') {
                 return Reflect.get(target, prop, receiver);
             }
             if (typeof target === null || typeof target !== 'object') {
-                throw new Error(`Cannot read property "${prop}" of ${target}. Value of path "/${targetRef.path}" is not an object`);
+                throw new Error(`Cannot read property "${prop}" of ${target}. Value of path "/${targetRef.path}" is not an object (anymore)`);
+            }
+            if (target instanceof Array && typeof prop === 'string' && /^[0-9]+$/.test(prop)) {
+                // Proxy type definitions say prop can be a number, but this is never the case.
+                prop = parseInt(prop);
+            }
+            const value = target[prop];
+            // Check if we have a child proxy for this property already.
+            // If so, and the properties' typeof value did not change, return that
+            const childProxy = childProxies.find(proxy => proxy.prop === prop);
+            if (childProxy) {
+                if (childProxy.typeof === typeof value) {
+                    return childProxy.value;
+                }
+                childProxies.splice(childProxies.indexOf(childProxy), 1);
             }
             // If the property contains a simple value, return it. 
-            const value = target[prop];
             if (['string', 'number', 'boolean'].includes(typeof value)
                 || value instanceof Date
                 || value instanceof path_reference_1.PathReference
                 || value instanceof ArrayBuffer
-                || (typeof value === 'object' && 'buffer' in value)) {
+                || (typeof value === 'object' && 'buffer' in value) // Typed Arrays
+            ) {
                 return value;
             }
             const isArray = target instanceof Array;
+            // TODO: Implement updateWithContext and setWithContext
+            if (!(prop in target)) {
+                if (prop === 'getTarget') {
+                    // Get unproxied readonly (but still live) version of data.
+                    return function getTarget() {
+                        console.warn(`Use getTarget with caution - any changes will not be synchronized!`);
+                        return target;
+                    };
+                }
+                if (prop === 'getRef') {
+                    // Gets the DataReference to this data target
+                    return function getRef() {
+                        const ref = getTargetRef(context.root.ref, context.target);
+                        ref.context({ proxy_id: context.id, proxy_reason: 'getRef' });
+                        return ref;
+                    };
+                }
+                if (prop === 'forEach') {
+                    return function forEach(callback) {
+                        const keys = Object.keys(target);
+                        for (let i = 0; i < keys.length && callback(target[keys[i]], keys[i], i) !== false; i++) { }
+                    };
+                }
+                if (prop === 'toArray') {
+                    return function toArray(sortFn) {
+                        const arr = Object.keys(target).map(key => target[key]);
+                        if (sortFn) {
+                            arr.sort(sortFn);
+                        }
+                        return arr;
+                    };
+                }
+                if (prop === 'onChanged') {
+                    // Starts monitoring the value
+                    return function onChanged(callback) {
+                        return context.flag('onChange', context.target, { callback });
+                    };
+                }
+                if (prop === 'getObservable') {
+                    // Creates an observable for monitoring the value
+                    return function getObservable() {
+                        return context.flag('observe', context.target);
+                    };
+                }
+                if (!isArray && prop === 'remove') {
+                    // Removes target from object collection
+                    return function remove() {
+                        if (context.target.length === 0) {
+                            throw new Error(`Can't remove proxy root value`);
+                        }
+                        const parent = getTargetValue(context.root.cache, context.target.slice(0, -1));
+                        const key = context.target.slice(-1)[0];
+                        delete parent[key];
+                        context.flag('write', context.target);
+                    };
+                }
+            }
             if (isArray && typeof value === 'function') {
+                // Handle array functions
                 const writeArray = ret => {
-                    context.flag(context.target);
+                    context.flag('write', context.target);
                     return ret;
                 };
                 if (prop === 'push') {
@@ -13604,7 +13911,7 @@ function createProxy(context) {
                     };
                 }
             }
-            else if (!isArray && prop === 'push') {
+            else if (!isArray && typeof value === 'undefined' && prop === 'push') {
                 // Push item to an object collection
                 return function push(item) {
                     const childRef = targetRef.push();
@@ -13612,14 +13919,17 @@ function createProxy(context) {
                     target[childRef.key] = item;
                     // // Add it to the database, return promise
                     // return childRef.set(item);
-                    context.flag(context.target.concat(childRef.key)); //(childRef, item);
+                    context.flag('write', context.target.concat(childRef.key)); //(childRef, item);
+                    return childRef.key;
                 };
             }
-            else if (!(prop in target)) {
+            else if (typeof value === 'undefined') { //(!(prop in target)) {
                 return undefined;
             }
             // Proxify any other value
-            return createProxy({ root: context.root, target: context.target.concat(prop), id: context.id, flag: context.flag });
+            const proxy = createProxy({ root: context.root, target: context.target.concat(prop), id: context.id, flag: context.flag });
+            childProxies.push({ typeof: typeof value, prop, value: proxy });
+            return proxy;
         },
         set(target, prop, value, receiver) {
             // Eg: chats.chat1.title = 'New chat title';
@@ -13631,18 +13941,39 @@ function createProxy(context) {
             if (target === null || typeof target !== 'object') {
                 throw new Error(`Cannot set property "${prop}" of ${target}. Value of path "/${targetRef.path}" is not an object`);
             }
-            if (target instanceof Array && (typeof prop !== 'number' && !/^[0-9]+$/.test(prop))) {
-                throw new Error(`Cannot set property "${prop}" on array value of path "/${targetRef.path}"`);
+            if (target instanceof Array && typeof prop === 'string') {
+                if (!/^[0-9]+$/.test(prop)) {
+                    throw new Error(`Cannot set property "${prop}" on array value of path "/${targetRef.path}"`);
+                }
+                prop = parseInt(prop);
+            }
+            if (typeof value === 'object' && value[isProxy]) {
+                // Assigning one proxied value to another
+                value = value.getTarget();
+            }
+            else if (typeof value === 'object' && Object.isFrozen(value)) {
+                // Create a copy to unfreeze it
+                value = utils_1.cloneObject(value);
+            }
+            if (typeof value !== 'object' && target[prop] === value) {
+                // not changing the actual value, ignore
+                return true;
             }
             // Set cached value:
             target[prop] = value;
-            if (target instanceof Array) {
+            if (context.target.some(key => typeof key === 'number')) {
+                // Updating an object property inside an array. Flag the first array in target to be written.
+                // Eg: when chat.members === [{ name: 'Ewout', id: 'someid' }]
+                // --> chat.members[0].name = 'Ewout' --> Rewrite members array instead of chat/members[0]/name
+                context.flag('write', context.target.slice(0, context.target.findIndex(key => typeof key === 'number')));
+            }
+            else if (target instanceof Array) {
                 // Flag the entire array to be overwritten
-                context.flag(context.target); //(targetRef, target);
+                context.flag('write', context.target); //(targetRef, target);
             }
             else {
                 // Flag child property
-                context.flag(context.target.concat(prop)); //(targetRef.child(prop), value);
+                context.flag('write', context.target.concat(prop)); //(targetRef.child(prop), value);
             }
             return true;
         },
@@ -13652,7 +13983,7 @@ function createProxy(context) {
                 return Reflect.deleteProperty(target, prop);
             }
             delete target[prop];
-            context.flag(context.target.concat(prop));
+            context.flag('write', context.target.concat(prop));
             return true;
         },
         ownKeys(target) {
@@ -13678,8 +14009,13 @@ function createProxy(context) {
     };
     return new Proxy({}, handler);
 }
+function proxyAccess(proxiedValue) {
+    return proxiedValue;
+}
+exports.proxyAccess = proxyAccess;
 
-},{"./path-info":160,"./path-reference":161}],155:[function(require,module,exports){
+}).call(this,require('_process'))
+},{"./path-info":161,"./path-reference":162,"./utils":167,"_process":180,"rxjs/internal/observable":65}],156:[function(require,module,exports){
 const { DataSnapshot } = require('./data-snapshot');
 const { EventStream, EventPublisher } = require('./subscription');
 const { ID } = require('./id');
@@ -13770,7 +14106,7 @@ class DataReference {
             get key() { return key; },
             get callbacks() { return callbacks; },
             vars: vars || {},
-            context: null
+            context: {}
         };
         this.db = db; //Object.defineProperty(this, "db", ...)
     }
@@ -14718,7 +15054,7 @@ module.exports = {
     DataRetrievalOptions,
     QueryDataRetrievalOptions
 };
-},{"./data-proxy":154,"./data-snapshot":156,"./debug":157,"./id":158,"./path-info":160,"./path-reference":161,"./subscription":163,"rxjs":49}],156:[function(require,module,exports){
+},{"./data-proxy":155,"./data-snapshot":157,"./debug":158,"./id":159,"./path-info":161,"./path-reference":162,"./subscription":164,"rxjs":49}],157:[function(require,module,exports){
 const { DataReference } = require('./data-reference');
 const { getPathKeys } = require('./path-info');
 
@@ -14841,7 +15177,7 @@ class DataSnapshot {
 }
 
 module.exports = { DataSnapshot };
-},{"./data-reference":155,"./path-info":160}],157:[function(require,module,exports){
+},{"./data-reference":156,"./path-info":161}],158:[function(require,module,exports){
 class DebugLogger {
     constructor(level = "log", prefix = '') {
         this.prefix = prefix;
@@ -14850,16 +15186,16 @@ class DebugLogger {
     setLevel(level) {
         const prefix = this.prefix ? this.prefix : '';
         this.level = level;
-        this.verbose = ["verbose"].includes(level) ? console.log.bind(console, prefix) : () => {};
-        this.log = ["verbose", "log"].includes(level) ? console.log.bind(console, prefix) : () => {};
-        this.warn = ["verbose", "log", "warn"].includes(level) ? console.warn.bind(console, prefix) : () => {};
-        this.error = ["verbose", "log", "warn", "error"].includes(level) ? console.error.bind(console, prefix) : () => {};
+        this.verbose = ["verbose"].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : () => {};
+        this.log = ["verbose", "log"].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : () => {};
+        this.warn = ["verbose", "log", "warn"].includes(level) ? prefix ? console.warn.bind(console, prefix) : console.warn.bind(console) : () => {};
+        this.error = ["verbose", "log", "warn", "error"].includes(level) ? prefix ? console.error.bind(console, prefix) : console.error.bind(console) : () => {};
         this.write = console.log.bind(console);
     }
 }
 
 module.exports = DebugLogger;
-},{}],158:[function(require,module,exports){
+},{}],159:[function(require,module,exports){
 const cuid = require('cuid');
 // const uuid62 = require('uuid62');
 
@@ -14872,7 +15208,7 @@ class ID {
 }
 
 module.exports = { ID };
-},{"cuid":46}],159:[function(require,module,exports){
+},{"cuid":46}],160:[function(require,module,exports){
 const { AceBaseBase, AceBaseSettings } = require('./acebase-base');
 const { Api } = require('./api');
 const { DataReference, DataReferenceQuery, DataRetrievalOptions, QueryDataRetrievalOptions } = require('./data-reference');
@@ -14887,6 +15223,7 @@ const Utils = require('./utils');
 const { PathInfo } = require('./path-info');
 const ascii85 = require('./ascii85');
 const { SimpleCache } = require('./simple-cache');
+const { proxyAccess } = require('./data-proxy');
 
 module.exports = {
     AceBaseBase, AceBaseSettings,
@@ -14902,9 +15239,10 @@ module.exports = {
     Utils,
     PathInfo,
     ascii85,
-    SimpleCache
+    SimpleCache,
+    proxyAccess
 };
-},{"./acebase-base":151,"./api":152,"./ascii85":153,"./data-reference":155,"./data-snapshot":156,"./debug":157,"./id":158,"./path-info":160,"./path-reference":161,"./simple-cache":162,"./subscription":163,"./transport":164,"./type-mappings":165,"./utils":166}],160:[function(require,module,exports){
+},{"./acebase-base":152,"./api":153,"./ascii85":154,"./data-proxy":155,"./data-reference":156,"./data-snapshot":157,"./debug":158,"./id":159,"./path-info":161,"./path-reference":162,"./simple-cache":163,"./subscription":164,"./transport":165,"./type-mappings":166,"./utils":167}],161:[function(require,module,exports){
 /**
  * 
  * @param {string} path 
@@ -15274,7 +15612,7 @@ class PathInfo {
 }
 
 module.exports = { getPathInfo, getChildPath, getPathKeys, PathInfo };
-},{}],161:[function(require,module,exports){
+},{}],162:[function(require,module,exports){
 class PathReference {
     /**
      * Creates a reference to a path that can be stored in the database. Use this to create cross-references to other data in your database
@@ -15285,7 +15623,7 @@ class PathReference {
     }
 }
 module.exports = { PathReference };
-},{}],162:[function(require,module,exports){
+},{}],163:[function(require,module,exports){
 class SimpleCache {
     constructor(expirySeconds) {
         this.expirySeconds = expirySeconds;
@@ -15312,7 +15650,7 @@ class SimpleCache {
 }
 
 module.exports = { SimpleCache };
-},{}],163:[function(require,module,exports){
+},{}],164:[function(require,module,exports){
 class EventSubscription {
     /**
      * 
@@ -15520,7 +15858,7 @@ class EventStream {
 }
 
 module.exports = { EventStream, EventPublisher, EventSubscription };
-},{}],164:[function(require,module,exports){
+},{}],165:[function(require,module,exports){
 const { PathReference } = require('./path-reference');
 //const { DataReference } = require('./data-reference');
 const { cloneObject } = require('./utils');
@@ -15621,7 +15959,7 @@ module.exports = {
         };
     }        
 };
-},{"./ascii85":153,"./path-reference":161,"./utils":166}],165:[function(require,module,exports){
+},{"./ascii85":154,"./path-reference":162,"./utils":167}],166:[function(require,module,exports){
 const { cloneObject } = require('./utils');
 const { PathInfo } = require('./path-info');
 const { AceBaseBase } = require('./acebase-base');
@@ -15969,7 +16307,7 @@ module.exports = {
     TypeMappingOptions
 }
 
-},{"./acebase-base":151,"./data-reference":155,"./data-snapshot":156,"./path-info":160,"./utils":166}],166:[function(require,module,exports){
+},{"./acebase-base":152,"./data-reference":156,"./data-snapshot":157,"./path-info":161,"./utils":167}],167:[function(require,module,exports){
 (function (Buffer){
 const { PathReference } = require('./path-reference');
 
@@ -16300,7 +16638,7 @@ module.exports = {
 };
 
 }).call(this,require("buffer").Buffer)
-},{"./data-snapshot":156,"./path-reference":161,"buffer":169}],167:[function(require,module,exports){
+},{"./data-snapshot":157,"./path-reference":162,"buffer":170}],168:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -16453,9 +16791,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],168:[function(require,module,exports){
-
 },{}],169:[function(require,module,exports){
+
+},{}],170:[function(require,module,exports){
 /*!
  * The buffer module from node.js, for the browser.
  *
@@ -18234,7 +18572,7 @@ function numberIsNaN (obj) {
   return obj !== obj // eslint-disable-line no-self-compare
 }
 
-},{"base64-js":167,"ieee754":174}],170:[function(require,module,exports){
+},{"base64-js":168,"ieee754":175}],171:[function(require,module,exports){
 module.exports = {
   "100": "Continue",
   "101": "Switching Protocols",
@@ -18300,7 +18638,7 @@ module.exports = {
   "511": "Network Authentication Required"
 }
 
-},{}],171:[function(require,module,exports){
+},{}],172:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -18411,7 +18749,7 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../is-buffer/index.js")})
-},{"../../is-buffer/index.js":176}],172:[function(require,module,exports){
+},{"../../is-buffer/index.js":177}],173:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -18936,7 +19274,7 @@ function functionBindPolyfill(context) {
   };
 }
 
-},{}],173:[function(require,module,exports){
+},{}],174:[function(require,module,exports){
 var http = require('http')
 var url = require('url')
 
@@ -18969,7 +19307,7 @@ function validateParams (params) {
   return params
 }
 
-},{"http":194,"url":201}],174:[function(require,module,exports){
+},{"http":195,"url":202}],175:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = (nBytes * 8) - mLen - 1
@@ -19055,7 +19393,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],175:[function(require,module,exports){
+},{}],176:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -19080,7 +19418,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],176:[function(require,module,exports){
+},{}],177:[function(require,module,exports){
 /*!
  * Determine if an object is a Buffer
  *
@@ -19103,9 +19441,9 @@ function isSlowBuffer (obj) {
   return typeof obj.readFloatLE === 'function' && typeof obj.slice === 'function' && isBuffer(obj.slice(0, 0))
 }
 
-},{}],177:[function(require,module,exports){
+},{}],178:[function(require,module,exports){
 arguments[4][26][0].apply(exports,arguments)
-},{"dup":26}],178:[function(require,module,exports){
+},{"dup":26}],179:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -19153,7 +19491,7 @@ function nextTick(fn, arg1, arg2, arg3) {
 
 
 }).call(this,require('_process'))
-},{"_process":179}],179:[function(require,module,exports){
+},{"_process":180}],180:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -19339,7 +19677,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],180:[function(require,module,exports){
+},{}],181:[function(require,module,exports){
 (function (global){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -19876,7 +20214,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],181:[function(require,module,exports){
+},{}],182:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -19962,7 +20300,7 @@ var isArray = Array.isArray || function (xs) {
   return Object.prototype.toString.call(xs) === '[object Array]';
 };
 
-},{}],182:[function(require,module,exports){
+},{}],183:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -20049,13 +20387,13 @@ var objectKeys = Object.keys || function (obj) {
   return res;
 };
 
-},{}],183:[function(require,module,exports){
+},{}],184:[function(require,module,exports){
 'use strict';
 
 exports.decode = exports.parse = require('./decode');
 exports.encode = exports.stringify = require('./encode');
 
-},{"./decode":181,"./encode":182}],184:[function(require,module,exports){
+},{"./decode":182,"./encode":183}],185:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -20187,7 +20525,7 @@ Duplex.prototype._destroy = function (err, cb) {
 
   pna.nextTick(cb, err);
 };
-},{"./_stream_readable":186,"./_stream_writable":188,"core-util-is":171,"inherits":175,"process-nextick-args":178}],185:[function(require,module,exports){
+},{"./_stream_readable":187,"./_stream_writable":189,"core-util-is":172,"inherits":176,"process-nextick-args":179}],186:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -20235,7 +20573,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":187,"core-util-is":171,"inherits":175}],186:[function(require,module,exports){
+},{"./_stream_transform":188,"core-util-is":172,"inherits":176}],187:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -21257,7 +21595,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./_stream_duplex":184,"./internal/streams/BufferList":189,"./internal/streams/destroy":190,"./internal/streams/stream":191,"_process":179,"core-util-is":171,"events":172,"inherits":175,"isarray":177,"process-nextick-args":178,"safe-buffer":193,"string_decoder/":198,"util":168}],187:[function(require,module,exports){
+},{"./_stream_duplex":185,"./internal/streams/BufferList":190,"./internal/streams/destroy":191,"./internal/streams/stream":192,"_process":180,"core-util-is":172,"events":173,"inherits":176,"isarray":178,"process-nextick-args":179,"safe-buffer":194,"string_decoder/":199,"util":169}],188:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -21472,7 +21810,7 @@ function done(stream, er, data) {
 
   return stream.push(null);
 }
-},{"./_stream_duplex":184,"core-util-is":171,"inherits":175}],188:[function(require,module,exports){
+},{"./_stream_duplex":185,"core-util-is":172,"inherits":176}],189:[function(require,module,exports){
 (function (process,global,setImmediate){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -22162,7 +22500,7 @@ Writable.prototype._destroy = function (err, cb) {
   cb(err);
 };
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("timers").setImmediate)
-},{"./_stream_duplex":184,"./internal/streams/destroy":190,"./internal/streams/stream":191,"_process":179,"core-util-is":171,"inherits":175,"process-nextick-args":178,"safe-buffer":193,"timers":199,"util-deprecate":203}],189:[function(require,module,exports){
+},{"./_stream_duplex":185,"./internal/streams/destroy":191,"./internal/streams/stream":192,"_process":180,"core-util-is":172,"inherits":176,"process-nextick-args":179,"safe-buffer":194,"timers":200,"util-deprecate":204}],190:[function(require,module,exports){
 'use strict';
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
@@ -22242,7 +22580,7 @@ if (util && util.inspect && util.inspect.custom) {
     return this.constructor.name + ' ' + obj;
   };
 }
-},{"safe-buffer":193,"util":168}],190:[function(require,module,exports){
+},{"safe-buffer":194,"util":169}],191:[function(require,module,exports){
 'use strict';
 
 /*<replacement>*/
@@ -22317,10 +22655,10 @@ module.exports = {
   destroy: destroy,
   undestroy: undestroy
 };
-},{"process-nextick-args":178}],191:[function(require,module,exports){
+},{"process-nextick-args":179}],192:[function(require,module,exports){
 module.exports = require('events').EventEmitter;
 
-},{"events":172}],192:[function(require,module,exports){
+},{"events":173}],193:[function(require,module,exports){
 exports = module.exports = require('./lib/_stream_readable.js');
 exports.Stream = exports;
 exports.Readable = exports;
@@ -22329,7 +22667,7 @@ exports.Duplex = require('./lib/_stream_duplex.js');
 exports.Transform = require('./lib/_stream_transform.js');
 exports.PassThrough = require('./lib/_stream_passthrough.js');
 
-},{"./lib/_stream_duplex.js":184,"./lib/_stream_passthrough.js":185,"./lib/_stream_readable.js":186,"./lib/_stream_transform.js":187,"./lib/_stream_writable.js":188}],193:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":185,"./lib/_stream_passthrough.js":186,"./lib/_stream_readable.js":187,"./lib/_stream_transform.js":188,"./lib/_stream_writable.js":189}],194:[function(require,module,exports){
 /* eslint-disable node/no-deprecated-api */
 var buffer = require('buffer')
 var Buffer = buffer.Buffer
@@ -22393,7 +22731,7 @@ SafeBuffer.allocUnsafeSlow = function (size) {
   return buffer.SlowBuffer(size)
 }
 
-},{"buffer":169}],194:[function(require,module,exports){
+},{"buffer":170}],195:[function(require,module,exports){
 (function (global){
 var ClientRequest = require('./lib/request')
 var response = require('./lib/response')
@@ -22481,7 +22819,7 @@ http.METHODS = [
 	'UNSUBSCRIBE'
 ]
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./lib/request":196,"./lib/response":197,"builtin-status-codes":170,"url":201,"xtend":204}],195:[function(require,module,exports){
+},{"./lib/request":197,"./lib/response":198,"builtin-status-codes":171,"url":202,"xtend":205}],196:[function(require,module,exports){
 (function (global){
 exports.fetch = isFunction(global.fetch) && isFunction(global.ReadableStream)
 
@@ -22558,7 +22896,7 @@ function isFunction (value) {
 xhr = null // Help gc
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],196:[function(require,module,exports){
+},{}],197:[function(require,module,exports){
 (function (process,global,Buffer){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -22889,7 +23227,7 @@ var unsafeHeaders = [
 ]
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":195,"./response":197,"_process":179,"buffer":169,"inherits":175,"readable-stream":192,"to-arraybuffer":200}],197:[function(require,module,exports){
+},{"./capability":196,"./response":198,"_process":180,"buffer":170,"inherits":176,"readable-stream":193,"to-arraybuffer":201}],198:[function(require,module,exports){
 (function (process,global,Buffer){
 var capability = require('./capability')
 var inherits = require('inherits')
@@ -23117,7 +23455,7 @@ IncomingMessage.prototype._onXHRProgress = function () {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"./capability":195,"_process":179,"buffer":169,"inherits":175,"readable-stream":192}],198:[function(require,module,exports){
+},{"./capability":196,"_process":180,"buffer":170,"inherits":176,"readable-stream":193}],199:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -23414,7 +23752,7 @@ function simpleWrite(buf) {
 function simpleEnd(buf) {
   return buf && buf.length ? this.write(buf) : '';
 }
-},{"safe-buffer":193}],199:[function(require,module,exports){
+},{"safe-buffer":194}],200:[function(require,module,exports){
 (function (setImmediate,clearImmediate){
 var nextTick = require('process/browser.js').nextTick;
 var apply = Function.prototype.apply;
@@ -23493,7 +23831,7 @@ exports.clearImmediate = typeof clearImmediate === "function" ? clearImmediate :
   delete immediateIds[id];
 };
 }).call(this,require("timers").setImmediate,require("timers").clearImmediate)
-},{"process/browser.js":179,"timers":199}],200:[function(require,module,exports){
+},{"process/browser.js":180,"timers":200}],201:[function(require,module,exports){
 var Buffer = require('buffer').Buffer
 
 module.exports = function (buf) {
@@ -23522,7 +23860,7 @@ module.exports = function (buf) {
 	}
 }
 
-},{"buffer":169}],201:[function(require,module,exports){
+},{"buffer":170}],202:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -24256,7 +24594,7 @@ Url.prototype.parseHost = function() {
   if (host) this.hostname = host;
 };
 
-},{"./util":202,"punycode":180,"querystring":183}],202:[function(require,module,exports){
+},{"./util":203,"punycode":181,"querystring":184}],203:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -24274,7 +24612,7 @@ module.exports = {
   }
 };
 
-},{}],203:[function(require,module,exports){
+},{}],204:[function(require,module,exports){
 (function (global){
 
 /**
@@ -24345,7 +24683,7 @@ function config (name) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],204:[function(require,module,exports){
+},{}],205:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;

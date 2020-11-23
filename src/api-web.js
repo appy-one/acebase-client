@@ -315,7 +315,7 @@ class WebApi extends Api {
                         NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
                         because they rely on change notifications from the server - to tackle this problem, 
                         cross-tab communication must be implemented. (TODO: Let cache database change notifications
-                        be sent to other tabs, and let them use the same client ID for server comminications)
+                        be sent to other tabs, and let them use the same client ID for server communications)
                     */
                     const causedByUs = context.acebase_mutation && context.acebase_mutation.client_id === this._id;
                     const cacheEnabled = !!(this._cache && this._cache.db);
@@ -324,7 +324,7 @@ class WebApi extends Api {
                     const fireCacheEvents = false; // See above flow documentation
 
                     // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
-                    console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
+                    // console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
                     const pathSubs = subscriptions[data.subscr_path];
 
                     if (!pathSubs && data.event !== 'mutated') {
@@ -1228,16 +1228,25 @@ class WebApi extends Api {
             return new Promise((resolve, reject) => {
                 let wait = true, done = false;
                 const gotValue = (source, val) => {
+                    // console.log(`Got ${source} value of "${path}":`, val);
                     if (done) { return; }
                     if (source === 'server') {
                         done = true;
-                        console.log(`Using server value for "${path}"`);
+                        // console.log(`Using server value for "${path}"`);
                         resolve(val);
+                    }
+                    else if (val === null) {
+                        // Cached results are not available
+                        if (!wait) {
+                            const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
+                            error.serverError = errors.find(e => e.source === 'server').error;
+                            return reject(error); 
+                        }
                     }
                     else if (!wait) { 
                         // Cached results, don't wait for server value
                         done = true; 
-                        console.log(`Using cache value for "${path}"`);
+                        // console.log(`Using cache value for "${path}"`);
                         resolve(val); 
                     }
                     else {
@@ -1255,7 +1264,7 @@ class WebApi extends Api {
                     errors.push({ source, error });
                     if (errors.length === 2) { 
                         // Both failed, reject with server error
-                        reject(errors.find(e => e.source === 'server'));
+                        reject(errors.find(e => e.source === 'server').error);
                     }
                 };
 

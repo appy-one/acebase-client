@@ -6783,7 +6783,7 @@ class WebApi extends Api {
                         NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
                         because they rely on change notifications from the server - to tackle this problem, 
                         cross-tab communication must be implemented. (TODO: Let cache database change notifications
-                        be sent to other tabs, and let them use the same client ID for server comminications)
+                        be sent to other tabs, and let them use the same client ID for server communications)
                     */
                     const causedByUs = context.acebase_mutation && context.acebase_mutation.client_id === this._id;
                     const cacheEnabled = !!(this._cache && this._cache.db);
@@ -6792,7 +6792,7 @@ class WebApi extends Api {
                     const fireCacheEvents = false; // See above flow documentation
 
                     // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
-                    console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
+                    // console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
                     const pathSubs = subscriptions[data.subscr_path];
 
                     if (!pathSubs && data.event !== 'mutated') {
@@ -7696,16 +7696,25 @@ class WebApi extends Api {
             return new Promise((resolve, reject) => {
                 let wait = true, done = false;
                 const gotValue = (source, val) => {
+                    // console.log(`Got ${source} value of "${path}":`, val);
                     if (done) { return; }
                     if (source === 'server') {
                         done = true;
-                        console.log(`Using server value for "${path}"`);
+                        // console.log(`Using server value for "${path}"`);
                         resolve(val);
+                    }
+                    else if (val === null) {
+                        // Cached results are not available
+                        if (!wait) {
+                            const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
+                            error.serverError = errors.find(e => e.source === 'server').error;
+                            return reject(error); 
+                        }
                     }
                     else if (!wait) { 
                         // Cached results, don't wait for server value
                         done = true; 
-                        console.log(`Using cache value for "${path}"`);
+                        // console.log(`Using cache value for "${path}"`);
                         resolve(val); 
                     }
                     else {
@@ -7723,7 +7732,7 @@ class WebApi extends Api {
                     errors.push({ source, error });
                     if (errors.length === 2) { 
                         // Both failed, reject with server error
-                        reject(errors.find(e => e.source === 'server'));
+                        reject(errors.find(e => e.source === 'server').error);
                     }
                 };
 
@@ -13468,8 +13477,11 @@ module.exports = ascii85;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.proxyAccess = exports.LiveDataProxy = void 0;
 const utils_1 = require("./utils");
-const path_info_1 = require("./path-info");
+const data_snapshot_1 = require("./data-snapshot");
 const path_reference_1 = require("./path-reference");
+const id_1 = require("./id");
+// Import RxJS Observable without throwing errors when not available.
+const { Observable } = require('rxjs'); //'rxjs/internal/observable'
 const isProxy = Symbol('isProxy');
 class LiveDataProxy {
     /**
@@ -13482,76 +13494,131 @@ class LiveDataProxy {
      */
     static async create(ref, defaultValue) {
         let cache, loaded = false;
-        const proxyId = ref.push().key;
+        const proxyId = id_1.ID.generate(); //ref.push().key;
         let onMutationCallback;
         let onErrorCallback = err => {
             console.error(err.message, err.details);
         };
-        // const waitingForMutationEvents = [];
-        // function globalMutationEventsFired() {
-        //     return new Promise(resolve => waitingForMutationEvents.push(resolve));
-        // };
         // Subscribe to mutated events on the target path
-        const subscription = ref.on('mutated').subscribe(async (snap) => {
+        // const subscription = ref.on('mutated').subscribe(async (snap: DataSnapshot) => {
+        //     if (!loaded) { 
+        //         return;
+        //     }
+        //     const context:IProxyContext = snap.ref.context();
+        //     const remoteChange = context.acebase_proxy?.id !== proxyId;
+        //     if (snap.ref.path === ref.path) {
+        //         // cache value itself being mutated (changing types? being removed/created?)
+        //         if (context.acebase_operation === 'update_cache') {
+        //             // Ignore cachedb updates that came from a .get
+        //             return;
+        //         }
+        //         cache = snap.val();
+        //         return;
+        //     }
+        //     let reloadCache = false;
+        //     if (remoteChange) {
+        //         // Make changes to cached object
+        //         const mutatedPath = snap.ref.path;
+        //         const trailPath = mutatedPath.slice(ref.path.length);
+        //         const trailKeys = PathInfo.getPathKeys(trailPath);
+        //         let target = cache;
+        //         while (trailKeys.length > 1) {
+        //             const key = trailKeys.shift();
+        //             if (!(key in target)) {
+        //                 // Have we missed an event, or are local pending mutations creating this conflict?
+        //                 // Do not proceed, reload entire value into cache
+        //                 reloadCache = true;
+        //                 console.warn(`Cached value appears outdated, will be reloaded`);
+        //                 break;
+        //                 // target[key] = typeof trailKeys[0] === 'number' ? [] : {}
+        //             }
+        //             target = target[key];
+        //         }
+        //         if (!reloadCache) {
+        //             const prop = trailKeys.shift();
+        //             // const oldValue = target[prop] || null;
+        //             const newValue = snap.val();
+        //             if (newValue === null) {
+        //                 // Remove it
+        //                 target instanceof Array ? target.splice(prop as number, 1) : delete target[prop];                    
+        //             }
+        //             else {
+        //                 // Set or update it
+        //                 target[prop] = newValue;
+        //             }
+        //         }
+        //     }
+        //     if (reloadCache) {
+        //         const newSnap = await ref.get();
+        //         cache = newSnap.val();
+        //         // Set mutationSnap to our new value snapshot, with conflict context
+        //         const mutationContext = snap.ref.context();
+        //         newSnap.ref.context(<IProxyContext>{ acebase_proxy: { id: proxyId, source: 'conflict', conflict: mutationContext }});
+        //         snap = newSnap;
+        //     }
+        //     onMutationCallback && onMutationCallback(snap, remoteChange);
+        // });
+        const applyChange = (keys, newValue) => {
+            // Make changes to cache
+            if (keys.length === 0) {
+                cache = newValue;
+                return true;
+            }
+            let target = cache;
+            keys = keys.slice();
+            while (keys.length > 1) {
+                const key = keys.shift();
+                if (!(key in target)) {
+                    // Have we missed an event, or are local pending mutations creating this conflict?
+                    return false; // Do not proceed
+                }
+                target = target[key];
+            }
+            const prop = keys.shift();
+            if (newValue === null) {
+                // Remove it
+                target instanceof Array ? target.splice(prop, 1) : delete target[prop];
+            }
+            else {
+                // Set or update it
+                target[prop] = newValue;
+            }
+            return true;
+        };
+        // Subscribe to mutations events on the target path
+        const subscription = ref.on('mutations').subscribe(async (snap) => {
+            var _a;
             if (!loaded) {
                 return;
             }
-            // // alert those that were waiting for mutation events to fire
-            // waitingForMutationEvents.splice(0).forEach(resolve => process.nextTick(resolve));
             const context = snap.ref.context();
-            const remoteChange = context.proxy_id !== proxyId;
-            if (snap.ref.path === ref.path) {
-                // cache value itself being mutated (changing types? being removed/created?)
-                cache = snap.val();
-                return;
+            const isRemote = ((_a = context.acebase_proxy) === null || _a === void 0 ? void 0 : _a.id) !== proxyId;
+            if (!isRemote) {
+                return; // Update was done by us, no need to update cache
             }
-            let reloadCache = false;
-            if (remoteChange) {
-                // Make changes to cached object
-                const mutatedPath = snap.ref.path;
-                const trailPath = mutatedPath.slice(ref.path.length);
-                const trailKeys = path_info_1.PathInfo.getPathKeys(trailPath);
-                let target = cache;
-                while (trailKeys.length > 1) {
-                    const key = trailKeys.shift();
-                    if (!(key in target)) {
-                        // Have we missed an event, or are local pending mutations creating this conflict?
-                        // Do not proceed, reload entire value into cache
-                        reloadCache = true;
-                        console.warn(`Cached value appears outdated, will be reloaded`);
-                        break;
-                        // target[key] = typeof trailKeys[0] === 'number' ? [] : {}
-                    }
-                    target = target[key];
+            const mutations = snap.val(false);
+            const proceed = mutations.every(mutation => {
+                if (!applyChange(mutation.target, mutation.val)) {
+                    return false;
                 }
-                if (!reloadCache) {
-                    const prop = trailKeys.shift();
-                    // const oldValue = target[prop] || null;
-                    const newValue = snap.val();
-                    if (newValue === null) {
-                        // Remove it
-                        target instanceof Array ? target.splice(prop, 1) : delete target[prop];
-                    }
-                    else {
-                        // Set or update it
-                        target[prop] = newValue;
-                    }
-                }
+                const changeRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
+                const changeSnap = new data_snapshot_1.DataSnapshot(changeRef, mutation.val, false, mutation.prev);
+                onMutationCallback && onMutationCallback(changeSnap, isRemote);
+                return true;
+            });
+            if (!proceed) {
+                console.error(`Cached value appears outdated, will be reloaded`);
+                await reload();
             }
-            if (reloadCache) {
-                const newSnap = await ref.get();
-                cache = newSnap.val();
-                // Set mutationSnap to our new value snapshot, with conflict context
-                const mutationContext = snap.ref.context();
-                newSnap.ref.context({ proxy_id: proxyId, proxy_source: 'conflict', proxy_conflict: mutationContext });
-                snap = newSnap;
-            }
-            onMutationCallback && onMutationCallback(snap, remoteChange);
         });
         // Setup updating functionality: enqueue all updates, process them at next tick in the order they were issued 
         let processQueueTimeout, processPromise = Promise.resolve();
         const overwriteQueue = [];
+        const mutations = [];
         const flagOverwritten = (target) => {
+            if (!mutations.find(m => m.target.length === target.length && m.target.every((key, i) => key === target[i]))) {
+                mutations.push({ target, previous: utils_1.cloneObject(getTargetValue(cache, target)), value: null });
+            }
             // flag target for overwriting, if an ancestor (or itself) has not been already.
             // it will remove the flag for any descendants target previously set
             const ancestorOrSelf = overwriteQueue.find(otherTarget => otherTarget.length <= target.length && otherTarget.every((key, i) => key === target[i]));
@@ -13566,6 +13633,7 @@ class LiveDataProxy {
             // schedule database updates
             if (!processQueueTimeout) {
                 processQueueTimeout = setTimeout(() => {
+                    processQueueTimeout = null;
                     const targets = overwriteQueue.splice(0);
                     // Group targets into parent updates
                     const updates = targets.reduce((updates, target) => {
@@ -13591,12 +13659,44 @@ class LiveDataProxy {
                         }
                         return updates;
                     }, []);
-                    console.log(`Proxy: processing ${updates.length} db updates`);
-                    processQueueTimeout = null;
+                    // Schedule local subscription callbacks in next tick
+                    // for super responsiveness
+                    process.nextTick(() => {
+                        // Run onMutation callback for each changed node
+                        mutations.forEach(mutation => {
+                            mutation.value = utils_1.cloneObject(getTargetValue(cache, mutation.target));
+                            const mutationRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
+                            const mutationSnap = new data_snapshot_1.DataSnapshot(mutationRef, mutation.value, false, mutation.previous);
+                            onMutationCallback(mutationSnap, false);
+                        });
+                        mutations.splice(0);
+                        // Run local change subscriptions now
+                        clientSubscriptions
+                            .filter(sub => typeof sub.snapshot !== 'undefined')
+                            .forEach(sub => {
+                            const currentValue = utils_1.cloneObject(getTargetValue(cache, sub.target));
+                            const previousValue = sub.snapshot;
+                            delete sub.snapshot;
+                            let keepSubscription = true;
+                            try {
+                                keepSubscription = false !== sub.callback(Object.freeze(currentValue), Object.freeze(previousValue), false, { proxy: { id: proxyId, source: 'local_update' } });
+                            }
+                            catch (err) {
+                                onErrorCallback({ source: 'local_update', message: `Error running subscription callback`, details: err });
+                            }
+                            if (!keepSubscription) {
+                                sub.subscription.stop();
+                                clientSubscriptions.splice(clientSubscriptions.findIndex(cs => cs.subscription === sub.subscription), 1);
+                            }
+                        });
+                    });
+                    // Update database async
+                    const batchId = id_1.ID.generate();
+                    // console.log(`Proxy: processing ${updates.length} db updates to paths:`, updates.map(update => update.ref.path));
                     processPromise = updates.reduce(async (promise, update) => {
                         await promise;
                         return update.ref
-                            .context({ proxy_id: proxyId, proxy_source: 'update' })[update.type](update.value) // .set or .update
+                            .context({ acebase_proxy: { id: proxyId, source: 'update', update_id: id_1.ID.generate(), batch_id: batchId, batch_updates: updates.length } })[update.type](update.value) // .set or .update
                             .catch(err => {
                             onErrorCallback({ source: 'update', message: `Error processing update of "/${ref.path}"`, details: err });
                         });
@@ -13607,32 +13707,45 @@ class LiveDataProxy {
         const clientSubscriptions = [];
         const addOnChangeHandler = (target, callback) => {
             const targetRef = getTargetRef(ref, target);
-            const subscription = targetRef.on('mutated').subscribe(async (snap) => {
-                // await globalMutationEventsFired(); // Wait for the mutated events to fire
+            const subscription = targetRef.on('mutations').subscribe(async (snap) => {
+                var _a;
                 const context = snap.ref.context();
-                const isRemote = context.proxy_id !== proxyId;
-                // Construct previous value from snapshot (we don't know what it was if the update was done locally) 
-                const currentValue = getTargetValue(cache, target);
-                const newValue = utils_1.cloneObject(currentValue);
-                const previousValue = utils_1.cloneObject(newValue);
-                for (let i = 0, val = newValue, prev = previousValue, arr = path_info_1.PathInfo.getPathKeys(snap.ref.path).slice(path_info_1.PathInfo.getPathKeys(targetRef.path).length); i < arr.length; i++) {
-                    const last = i + 1 === arr.length, key = arr[i];
-                    if (last) {
-                        val[key] = snap.val();
-                        if (val[key] === null) {
-                            delete val[key];
-                        }
-                        prev[key] = snap.previous();
-                        if (prev[key] === null) {
-                            delete prev[key];
-                        }
-                    }
-                    else {
-                        val = val[key] = key in val ? val[key] : {};
-                        prev = prev[key] = key in prev ? prev[key] : {};
-                    }
+                const isRemote = ((_a = context.acebase_proxy) === null || _a === void 0 ? void 0 : _a.id) !== proxyId;
+                if (!isRemote) {
+                    // Any local changes already triggered subscription callbacks
+                    return;
                 }
-                // const proxyValue = newValue === null ? null : createProxy({ root: { ref, cache }, target, id: proxyId, flag: handleFlag });
+                // Construct previous value from snapshot
+                const currentValue = getTargetValue(cache, target);
+                let newValue = utils_1.cloneObject(currentValue);
+                let previousValue = utils_1.cloneObject(newValue);
+                // const mutationPath = snap.ref.path;
+                const mutations = snap.val(false);
+                mutations.every(mutation => {
+                    if (mutation.target.length === 0) {
+                        newValue = mutation.val;
+                        previousValue = mutation.prev;
+                        return true;
+                    }
+                    for (let i = 0, val = newValue, prev = previousValue, arr = mutation.target; i < arr.length; i++) { // arr = PathInfo.getPathKeys(mutationPath).slice(PathInfo.getPathKeys(targetRef.path).length)
+                        const last = i + 1 === arr.length, key = arr[i];
+                        if (last) {
+                            val[key] = mutation.val;
+                            if (val[key] === null) {
+                                delete val[key];
+                            }
+                            prev[key] = mutation.prev;
+                            if (prev[key] === null) {
+                                delete prev[key];
+                            }
+                        }
+                        else {
+                            val = val[key] = key in val ? val[key] : {};
+                            prev = prev[key] = key in prev ? prev[key] : {};
+                        }
+                    }
+                    return true;
+                });
                 process.nextTick(() => {
                     // Run callback with read-only (frozen) values in next tick
                     const keepSubscription = callback(Object.freeze(newValue), Object.freeze(previousValue), isRemote, context);
@@ -13643,21 +13756,28 @@ class LiveDataProxy {
             });
             const stop = () => {
                 subscription.stop();
-                clientSubscriptions.splice(clientSubscriptions.indexOf(subscription), 1);
+                clientSubscriptions.splice(clientSubscriptions.findIndex(cs => cs.subscription === subscription), 1);
             };
-            clientSubscriptions.push(subscription);
+            clientSubscriptions.push({ target, subscription, callback, snapshot: utils_1.cloneObject(getTargetValue(cache, target)) });
             return { stop };
+        };
+        const prepareSnapshots = (target) => {
+            // Add snapshots to onChange subscriptions that don't have them yet
+            clientSubscriptions
+                .filter(sub => typeof sub.snapshot === 'undefined' && sub.target.every((key, i) => i >= target.length || key === target[i]))
+                .forEach(sub => {
+                sub.snapshot = utils_1.cloneObject(getTargetValue(cache, sub.target));
+            });
         };
         const handleFlag = (flag, target, args) => {
             if (flag === 'write') {
-                return flagOverwritten(target);
+                prepareSnapshots(target);
+                return flagOverwritten(target); //, args.previous
             }
             else if (flag === 'onChange') {
                 return addOnChangeHandler(target, args.callback);
             }
             else if (flag === 'observe') {
-                // Import RxJS Observable without throwing errors when not available.
-                const { Observable } = require('rxjs'); //'rxjs/internal/observable'
                 if (!Observable) {
                     throw new Error(`Cannot observe proxy value because rxjs package could not be loaded. Add it to your project with: npm i rxjs`);
                 }
@@ -13672,13 +13792,25 @@ class LiveDataProxy {
                     };
                 });
             }
+            // else if (flag === 'runEvents') {
+            //     clientSubscriptions.filter(cs => cs.target.length <= target.length && cs.target.every((key, index) => key === target[index]))
+            //     .forEach(cs => {
+            //         const value = Object.freeze(cloneObject(getTargetValue(cache, cs.target)));
+            //         try {
+            //             cs.callback(value, value, false, { simulated: true });
+            //         }
+            //         catch(err) {
+            //             console.error(`Error running change callback: `, err);
+            //         }
+            //     });
+            // }
         };
-        const snap = await ref.get();
+        const snap = await ref.get({ allow_cache: true });
         loaded = true;
         cache = snap.val();
         if (cache === null && typeof defaultValue !== 'undefined') {
             cache = defaultValue;
-            flagOverwritten([]);
+            await ref.set(cache);
         }
         let proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
         const assertProxyAvailable = () => {
@@ -13686,10 +13818,24 @@ class LiveDataProxy {
                 throw new Error(`Proxy was destroyed`);
             }
         };
+        const reload = async () => {
+            // Manually reloads current value when cache is out of sync, which should only 
+            // be able to happen if an AceBaseClient is used without cache database, 
+            // and the connection to the server was lost for a while. In all other cases, 
+            // there should be no need to call this method.
+            assertProxyAvailable();
+            const newSnap = await ref.get();
+            cache = newSnap.val();
+            proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
+            newSnap.ref.context({ acebase_proxy: { id: proxyId, source: 'reload' } });
+            onMutationCallback(newSnap, true);
+            // TODO: run all other subscriptions
+        };
         return {
-            destroy() {
+            async destroy() {
+                await processPromise;
                 subscription.stop();
-                clientSubscriptions.forEach(sub => sub.stop());
+                clientSubscriptions.forEach(cs => cs.subscription.stop());
                 cache = null; // Remove cache
                 proxy = null;
             },
@@ -13708,27 +13854,26 @@ class LiveDataProxy {
                 // Overwrite the value of the proxied path itself!
                 assertProxyAvailable();
                 if (typeof val === 'object' && val[isProxy]) {
-                    throw new Error(`Cannot set value to another proxy`);
+                    // Assigning one proxied value to another
+                    val = val.getTarget();
                 }
+                // const previous = cache;
+                flagOverwritten([]);
                 cache = val;
                 proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
-                flagOverwritten([]);
+                // flagOverwritten([], previous);
             },
-            async reload() {
-                // Manually reloads current value when cache is out of sync, which should only 
-                // be able to happen if an AceBaseClient is used without cache database, 
-                // and the connection to the server was lost for a while. In all other cases, 
-                // there should be no need to call this method.
-                assertProxyAvailable();
-                const newSnap = await ref.get();
-                cache = newSnap.val();
-                proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
-                newSnap.ref.context({ proxy_id: proxyId, proxy_source: 'reload' });
-                onMutationCallback(newSnap, true);
-            },
+            reload,
             onMutation(callback) {
                 // Fires callback each time anything changes
                 assertProxyAvailable();
+                // addOnChangeHandler([], (value: T, previous: T, isRemote, context) => {
+                //     const snap = new DataSnapshot(ref.context(context), value, false, previous);
+                //     try { callback(snap, isRemote); }
+                //     catch(err) { 
+                //         onErrorCallback({ source: 'mutation_callback', message: 'Error in dataproxy onMutation callback', details: err });
+                //     }
+                // });
                 onMutationCallback = (...args) => {
                     try {
                         callback(...args);
@@ -13768,7 +13913,6 @@ function getTargetRef(ref, target) {
     }
     return targetRef;
 }
-//update(ref: DataReference, value: any): void
 function createProxy(context) {
     const targetRef = getTargetRef(context.root.ref, context.target);
     const childProxies = [];
@@ -13821,7 +13965,7 @@ function createProxy(context) {
                     // Gets the DataReference to this data target
                     return function getRef() {
                         const ref = getTargetRef(context.root.ref, context.target);
-                        ref.context({ proxy_id: context.id, proxy_reason: 'getRef' });
+                        ref.context({ acebase_proxy: { id: context.id, source: 'getRef' } });
                         return ref;
                     };
                 }
@@ -13852,6 +13996,12 @@ function createProxy(context) {
                         return context.flag('observe', context.target);
                     };
                 }
+                // if (prop === 'runEvents') {
+                //     // Triggers change event subscriptions / observables to be executed with current data
+                //     return function runEvents() {
+                //         return context.flag('runEvents', context.target);
+                //     }
+                // }
                 if (!isArray && prop === 'remove') {
                     // Removes target from object collection
                     return function remove() {
@@ -13860,57 +14010,51 @@ function createProxy(context) {
                         }
                         const parent = getTargetValue(context.root.cache, context.target.slice(0, -1));
                         const key = context.target.slice(-1)[0];
-                        delete parent[key];
+                        // const previous = parent[key];
                         context.flag('write', context.target);
+                        delete parent[key];
                     };
                 }
             }
             if (isArray && typeof value === 'function') {
                 // Handle array functions
-                const writeArray = ret => {
+                const writeArray = (action) => {
                     context.flag('write', context.target);
-                    return ret;
+                    return action();
                 };
                 if (prop === 'push') {
                     return function push(...items) {
-                        const ret = target.push(...items); // push the items to the cache array
-                        return writeArray(ret);
+                        return writeArray(() => target.push(...items)); // push the items to the cache array
                     };
                 }
                 else if (prop === 'pop') {
                     return function pop() {
-                        const ret = target.pop();
-                        return writeArray(ret);
+                        return writeArray(() => target.pop());
                     };
                 }
                 else if (prop === 'splice') {
                     return function splice(start, deleteCount, ...items) {
-                        const ret = target.splice(start, deleteCount, ...items);
-                        return writeArray(ret);
+                        return writeArray(() => target.splice(start, deleteCount, ...items));
                     };
                 }
                 else if (prop === 'shift') {
                     return function shift() {
-                        const ret = target.shift();
-                        return writeArray(ret);
+                        return writeArray(() => target.shift());
                     };
                 }
                 else if (prop === 'unshift') {
                     return function unshift(...items) {
-                        const ret = target.unshift(...items);
-                        return writeArray(ret);
+                        return writeArray(() => target.unshift(...items));
                     };
                 }
                 else if (prop === 'sort') {
                     return function sort(compareFn) {
-                        const ret = target.sort(compareFn);
-                        return writeArray(ret);
+                        return writeArray(() => target.sort(compareFn));
                     };
                 }
                 else if (prop === 'reverse') {
                     return function reverse() {
-                        const ret = target.reverse();
-                        return writeArray(ret);
+                        return writeArray(() => target.reverse());
                     };
                 }
                 else {
@@ -13924,15 +14068,12 @@ function createProxy(context) {
                 // Push item to an object collection
                 return function push(item) {
                     const childRef = targetRef.push();
-                    // Add item to cache collection
+                    context.flag('write', context.target.concat(childRef.key)); //, { previous: null }
                     target[childRef.key] = item;
-                    // // Add it to the database, return promise
-                    // return childRef.set(item);
-                    context.flag('write', context.target.concat(childRef.key)); //(childRef, item);
                     return childRef.key;
                 };
             }
-            else if (typeof value === 'undefined') { //(!(prop in target)) {
+            else if (typeof value === 'undefined') {
                 return undefined;
             }
             // Proxify any other value
@@ -13968,8 +14109,6 @@ function createProxy(context) {
                 // not changing the actual value, ignore
                 return true;
             }
-            // Set cached value:
-            target[prop] = value;
             if (context.target.some(key => typeof key === 'number')) {
                 // Updating an object property inside an array. Flag the first array in target to be written.
                 // Eg: when chat.members === [{ name: 'Ewout', id: 'someid' }]
@@ -13978,21 +14117,29 @@ function createProxy(context) {
             }
             else if (target instanceof Array) {
                 // Flag the entire array to be overwritten
-                context.flag('write', context.target); //(targetRef, target);
+                context.flag('write', context.target);
             }
             else {
                 // Flag child property
-                context.flag('write', context.target.concat(prop)); //(targetRef.child(prop), value);
+                context.flag('write', context.target.concat(prop));
             }
+            // Set cached value:
+            target[prop] = value;
             return true;
         },
         deleteProperty(target, prop) {
             target = getTargetValue(context.root.cache, context.target);
+            if (target === null) {
+                throw new Error(`Cannot delete property ${prop.toString()} of null`);
+            }
             if (typeof prop === 'symbol') {
                 return Reflect.deleteProperty(target, prop);
             }
-            delete target[prop];
+            if (!(prop in target)) {
+                return true; // Nothing to delete
+            }
             context.flag('write', context.target.concat(prop));
+            delete target[prop];
             return true;
         },
         ownKeys(target) {
@@ -14027,8 +14174,8 @@ function proxyAccess(proxiedValue) {
 exports.proxyAccess = proxyAccess;
 
 }).call(this,require('_process'))
-},{"./path-info":160,"./path-reference":161,"./utils":166,"_process":179,"rxjs":49}],155:[function(require,module,exports){
-const { DataSnapshot } = require('./data-snapshot');
+},{"./data-snapshot":156,"./id":158,"./path-reference":161,"./utils":166,"_process":179,"rxjs":49}],155:[function(require,module,exports){
+const { DataSnapshot, MutationsDataSnapshot } = require('./data-snapshot');
 const { EventStream, EventPublisher } = require('./subscription');
 const { ID } = require('./id');
 const debug = require('./debug');
@@ -14152,13 +14299,21 @@ class DataReference {
      *      return balance - 50;
      *  })
      */
-    context(context = undefined) {
+    context(context = undefined, merge = false) {
+        const currentContext = this[_private].context;
         if (typeof context === 'object') {
-            this[_private].context = context;
+            const newContext = context ? merge ? currentContext || {} : context : {};
+            if (context) { 
+                // Merge new with current context
+                Object.keys(context).forEach(key => {
+                    newContext[key] = context[key];
+                });
+            }
+            this[_private].context = newContext;
             return this;
         }
         else if (typeof context === 'undefined') {
-            return this[_private].context;
+            return currentContext;
         }
         else {
             throw new Error('Invalid context argument');
@@ -14400,6 +14555,9 @@ class DataReference {
                     };
                     if (event === 'child_removed') {
                         callbackObject = new DataSnapshot(ref, values.previous, true, values.previous);
+                    }
+                    else if (event === 'mutations') {
+                        callbackObject = new MutationsDataSnapshot(ref, values.current);
                     }
                     else {
                         const isRemoved = event === 'mutated' && values.current === null;
@@ -15067,60 +15225,66 @@ module.exports = {
     QueryDataRetrievalOptions
 };
 },{"./data-proxy":154,"./data-snapshot":156,"./debug":157,"./id":158,"./path-info":160,"./path-reference":161,"./subscription":163,"rxjs":49}],156:[function(require,module,exports){
-const { DataReference } = require('./data-reference');
-const { getPathKeys } = require('./path-info');
-
-const getChild = (snapshot, path) => {
-    if (!snapshot.exists()) { return null; }
-    let child = snapshot.val();
-    //path.split("/").every...
-    getPathKeys(path).every(key => {
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.MutationsDataSnapshot = exports.DataSnapshot = void 0;
+const path_info_1 = require("./path-info");
+function getChild(snapshot, path, previous = false) {
+    if (!snapshot.exists()) {
+        return null;
+    }
+    let child = previous ? snapshot.previous() : snapshot.val();
+    if (typeof path === 'number') {
+        return child[path];
+    }
+    path_info_1.PathInfo.getPathKeys(path).every(key => {
         child = child[key];
-        return typeof child !== "undefined";
+        return typeof child !== 'undefined';
     });
     return child || null;
-};
-
-const getChildren = (snapshot) => {
-    if (!snapshot.exists()) { return []; }
+}
+function getChildren(snapshot) {
+    if (!snapshot.exists()) {
+        return [];
+    }
     let value = snapshot.val();
     if (value instanceof Array) {
-        return new Array(value.length).map((v,i) => i);
+        return new Array(value.length).map((v, i) => i);
     }
-    if (typeof value === "object") {
+    if (typeof value === 'object') {
         return Object.keys(value);
     }
     return [];
-};
-
+}
 class DataSnapshot {
-
     /**
-     * 
-     * @param {DataReference} ref 
-     * @param {any} value 
+     * Creates a new DataSnapshot instance
      */
     constructor(ref, value, isRemoved = false, prevValue) {
         this.ref = ref;
         this.val = () => { return value; };
-        this.previous = () => { return prevValue; }
-        this.exists = () => { 
-            if (isRemoved) { return false; } 
-            return value !== null && typeof value !== "undefined"; 
-        }
+        this.previous = () => { return prevValue; };
+        this.exists = () => {
+            if (isRemoved) {
+                return false;
+            }
+            return value !== null && typeof value !== 'undefined';
+        };
     }
-    
+    val() { }
+    previous() { }
+    exists() { return false; }
     /**
      * Gets a new snapshot for a child node
-     * @param {string} path child key or path
-     * @returns {DataSnapshot}
+     * @param path child key or path
+     * @returns Returns a DataSnapshot of the child
      */
     child(path) {
         // Create new snapshot for child data
-        let child = getChild(this, path);
-        return new DataSnapshot(this.ref.child(path), child);
+        let val = getChild(this, path, false);
+        let prev = getChild(this, path, true);
+        return new DataSnapshot(this.ref.child(path), val, false, prev);
     }
-
     /**
      * Checks if the snapshot's value has a child with the given key or path
      * @param {string} path child key or path
@@ -15129,7 +15293,6 @@ class DataSnapshot {
     hasChild(path) {
         return getChild(this, path) !== null;
     }
-
     /**
      * Indicates whether the the snapshot's value has any child nodes
      * @returns {boolean}
@@ -15137,59 +15300,74 @@ class DataSnapshot {
     hasChildren() {
         return getChildren(this).length > 0;
     }
-
     /**
      * The number of child nodes in this snapshot
      * @returns {number}
      */
     numChildren() {
-        return getChildren(this).length;          
+        return getChildren(this).length;
     }
-
     /**
      * Runs a callback function for each child node in this snapshot until the callback returns false
-     * @param {(child: DataSnapshot) => boolean} callback function that is called with a snapshot of each child node in this snapshot. Must return a boolean value that indicates whether to continue iterating or not.
+     * @param callback function that is called with a snapshot of each child node in this snapshot. Must return a boolean value that indicates whether to continue iterating or not.
      * @returns {void}
      */
     forEach(callback) {
         const value = this.val();
+        const prev = this.previous();
         return getChildren(this).every((key, i) => {
-            const snap = new DataSnapshot(this.ref.child(key), value[key]); 
+            const snap = new DataSnapshot(this.ref.child(key), value[key], false, prev[key]);
             return callback(snap);
         });
     }
-
     /**
      * @type {string|number}
      */
     get key() { return this.ref.key; }
-
-    // /**
-    //  * Convenience method to update this snapshot's value AND commit the changes to the database
-    //  * @param {object} updates 
-    //  */
-    // update(updates) {
-    //     return this.ref.update(updates)
-    //     .then(ref => {
-    //         const isRemoved = updates === null;
-    //         let value = this.val();
-    //         if (!isRemoved && typeof updates === 'object' && typeof value === 'object') {
-    //             Object.assign(value, updates);
-    //         }
-    //         else {
-    //             value = updates;
-    //         }
-    //         this.val = () => { return value; };
-    //         this.exists = () => {
-    //             return value !== null && typeof value !== "undefined"; 
-    //         }
-    //         return this;
-    //     });
-    // }
 }
+exports.DataSnapshot = DataSnapshot;
+class MutationsDataSnapshot extends DataSnapshot {
+    val(warn = true) { return []; }
+    previous() { throw new Error('Iterate values to get previous values for each mutation'); }
+    constructor(ref, mutations) {
+        super(ref, mutations);
+        this.val = (warn = true) => {
+            if (warn) {
+                console.warn(`Unless you know what you are doing, it is best not to use the value of a mutations snapshot directly. Use child methods and forEach to iterate the mutations instead`);
+            }
+            return mutations;
+        };
+    }
+    /**
+     * Runs a callback function for each mutation in this snapshot until the callback returns false
+     * @param callback function that is called with a snapshot of each mutation in this snapshot. Must return a boolean value that indicates whether to continue iterating or not.
+     * @returns Returns whether every child was interated
+     */
+    forEach(callback) {
+        const mutations = this.val();
+        return mutations.every(mutation => {
+            const ref = mutation.target.reduce((ref, key) => ref.child(key), this.ref);
+            const snap = new DataSnapshot(ref, mutation.val, false, mutation.prev);
+            return callback(snap);
+        });
+    }
+    /**
+     * Gets a snapshot of a mutated node
+     * @param index index of the mutation
+     * @returns Returns a DataSnapshot of the mutated node
+     */
+    child(index) {
+        if (typeof index !== 'number') {
+            throw new Error(`child index must be a number`);
+        }
+        const mutation = this.val()[index];
+        const ref = mutation.target.reduce((ref, key) => ref.child(key), this.ref);
+        return new DataSnapshot(ref, mutation.val, false, mutation.prev);
+    }
+}
+exports.MutationsDataSnapshot = MutationsDataSnapshot;
 
-module.exports = { DataSnapshot };
-},{"./data-reference":155,"./path-info":160}],157:[function(require,module,exports){
+},{"./path-info":160}],157:[function(require,module,exports){
 class DebugLogger {
     constructor(level = "log", prefix = '') {
         this.prefix = prefix;

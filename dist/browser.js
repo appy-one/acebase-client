@@ -6806,6 +6806,14 @@ class WebApi extends Api {
                             // and has an event subscription on the root, or private path.
                             // NOTE: fireThisEvent === true, because it is impossible that this mutation was caused by us (well, it should be!)
                         }
+                        else if (data.event === 'mutations') {
+                            // Apply all mutations
+                            const mutations = val.current;
+                            mutations.forEach(m => {
+                                const path = m.target.reduce((path, key) => PathInfo.getChildPath(path, key), PathInfo.getChildPath(`${this.dbname}/cache`, data.path));
+                                this._cache.db.api.set(path, m.val, { suppress_events: !fireCacheEvents, context });
+                            });
+                        }
                         else if (data.event === 'notify_child_removed') {
                             this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
                         }
@@ -13600,9 +13608,11 @@ class LiveDataProxy {
                 if (!applyChange(mutation.target, mutation.val)) {
                     return false;
                 }
-                const changeRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
-                const changeSnap = new data_snapshot_1.DataSnapshot(changeRef, mutation.val, false, mutation.prev);
-                onMutationCallback && onMutationCallback(changeSnap, isRemote);
+                if (onMutationCallback) {
+                    const changeRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
+                    const changeSnap = new data_snapshot_1.DataSnapshot(changeRef, mutation.val, false, mutation.prev);
+                    onMutationCallback(changeSnap, isRemote);
+                }
                 return true;
             });
             if (!proceed) {
@@ -13662,12 +13672,14 @@ class LiveDataProxy {
                     // for super responsiveness
                     process.nextTick(() => {
                         // Run onMutation callback for each changed node
-                        mutations.forEach(mutation => {
-                            mutation.value = utils_1.cloneObject(getTargetValue(cache, mutation.target));
-                            const mutationRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
-                            const mutationSnap = new data_snapshot_1.DataSnapshot(mutationRef, mutation.value, false, mutation.previous);
-                            onMutationCallback(mutationSnap, false);
-                        });
+                        if (onMutationCallback) {
+                            mutations.forEach(mutation => {
+                                mutation.value = utils_1.cloneObject(getTargetValue(cache, mutation.target));
+                                const mutationRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
+                                const mutationSnap = new data_snapshot_1.DataSnapshot(mutationRef, mutation.value, false, mutation.previous);
+                                onMutationCallback(mutationSnap, false);
+                            });
+                        }
                         mutations.splice(0);
                         // Run local change subscriptions now
                         clientSubscriptions
@@ -13834,7 +13846,7 @@ class LiveDataProxy {
             cache = newSnap.val();
             proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
             newSnap.ref.context({ acebase_proxy: { id: proxyId, source: 'reload' } });
-            onMutationCallback(newSnap, true);
+            onMutationCallback && onMutationCallback(newSnap, true);
             // TODO: run all other subscriptions
         };
         return {

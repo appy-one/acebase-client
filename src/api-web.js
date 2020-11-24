@@ -338,6 +338,14 @@ class WebApi extends Api {
                             // and has an event subscription on the root, or private path.
                             // NOTE: fireThisEvent === true, because it is impossible that this mutation was caused by us (well, it should be!)
                         }
+                        else if (data.event === 'mutations') {
+                            // Apply all mutations
+                            const mutations = val.current;
+                            mutations.forEach(m => {
+                                const path = m.target.reduce((path, key) => PathInfo.getChildPath(path, key), PathInfo.getChildPath(`${this.dbname}/cache`, data.path));
+                                this._cache.db.api.set(path, m.val, { suppress_events: !fireCacheEvents, context });
+                            });
+                        }
                         else if (data.event === 'notify_child_removed') {
                             this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
                         }

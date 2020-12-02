@@ -1,6 +1,6 @@
 {
   "name": "acebase-client",
-  "version": "0.9.36",
+  "version": "0.9.37",
   "description": "Client to connect to an AceBase realtime database server",
   "main": "./src/index.js",
   "browser": "./dist/browser.js",
@@ -8,7 +8,7 @@
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {
-    "browserify": "browserify src/browser.js -o dist/browser.js --standalone acebaseclient && terser dist/browser.js -o dist/browser.min.js",
+    "browserify": "browserify src/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -48,7 +48,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "0.9.31",
+    "acebase-core": "0.9.33",
     "socket.io-client": "*"
   }
 }

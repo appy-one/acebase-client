@@ -1,12 +1,54 @@
 import * as acebasecore from 'acebase-core';
 
+export interface AceBaseClientCacheSettings {
+    /**
+     * AceBase database to use as local cache. Any data loaded from the server is 
+     * automatically cached and become available offline. Any changes you make will
+     * update both the server and the cache. When offline, all changes will be 
+     * synchronized with the server upon reconnect.
+     */
+    db: acebasecore.AceBaseBase,
+    /**
+     * Which database to use as primary target for getting and updating data. 
+     * 
+     * Using 'server' (default) is recommended.
+     *  
+     * Using 'cache' will be faster, but has some disadvantages: 
+     * - When getting values, cache is not updated with server data so any remote changes 
+     *    will not be updated in cache unless you have change events setup.
+     * - When storing values, you won't know if the server update failed.
+     * 
+     * Summary: use 'server' unless you know what you're doing.
+     * @default 'server'
+     */
+    priority?: 'cache'|'server',
+    /**
+     * Whether to use cache or not. This value can not be changed while running.
+     * @default true
+     */
+    enabled?: boolean
+}
 export interface AceBaseClientConnectionSettings {
     dbname: string
     host: string
     port: number
+    /**
+     * @default true
+     */
     https?: boolean
+    /**
+     * Whether to connect to the server right away. When set to false, you will have to execute db.connect() manually
+     * @default true
+     */
     autoConnect?: boolean
-    cache?: { db: acebasecore.AceBaseBase }
+    /**
+     * Optional cache settings to enable offline access and synchronization
+     */
+    cache?: AceBaseClientCacheSettings
+    /**
+     * Level of console output logging. It is recommended to set to 'warn' or 'error' for production
+     * @default 'log'
+     */
     logLevel?: 'verbose'|'log'|'warn'|'error'
 }
 

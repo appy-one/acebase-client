@@ -1,4 +1,4 @@
-const { AceBaseBase, DebugLogger } = require('acebase-core');
+const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
 
@@ -62,7 +62,7 @@ class AceBaseClient extends AceBaseBase {
         let ready = false;
         this.on('ready', () => { ready = true; });
         this._connected = false;
-        this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.blue); // `[ ${settings.dbname} ]`
+        this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
 
         let syncRunning = false;
         const syncPendingChanges = () => {

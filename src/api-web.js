@@ -1,4 +1,4 @@
-const { Api, Transport, ID, PathInfo } = require('acebase-core');
+const { Api, Transport, ID, PathInfo, ColorStyle } = require('acebase-core');
 const http = require('http');
 const https = require('https');
 const URL = require('url');
@@ -105,25 +105,27 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     let resolve, reject;
     let promise = new Promise((res, rej) => { resolve = res; reject = rej; });
 
+    const timeout = setTimeout(() => { 
+        socket.off("result", handle);
+        const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond "${event}" request in a timely fashion`);
+        reject(err);
+    }, 10000);
     const handle = response => {
         if (response.req_id === requestId) {
+            clearTimeout(timeout);
             socket.off("result", handle);
             if (response.success) {
                 resolve(response);
             }
             else {
                 // Access denied?
-                // const err = new Error(response.reason.message);
-                // err.code = response.reason.code;
-                // err.request = request;
-                // err.response = response;
                 const code = typeof response.reason === 'object' ? response.reason.code : response.reason;
                 const message = typeof response.reason === 'object' ? response.reason.message : `request failed: ${code}`;
                 const err = new AceBaseRequestError(request, response, code, message);
                 reject(err);
             }
         }
-    };    
+    };
     socket.on("result", handle);
 
     return promise;
@@ -145,7 +147,12 @@ class WebApi extends Api {
         this.dbname = dbname;
         this._connected = false;
         this._connecting = false;
-        this._cache = settings.cache;
+        if (settings.cache && settings.cache.enabled !== false) {
+            this._cache = {
+                db: settings.cache.db,
+                priority: settings.cache.priority || 'server'
+            };
+        }
         this._realtimeQueries = {};
         this.debug = settings.debug;
         this._connectHooks = [];
@@ -171,7 +178,7 @@ class WebApi extends Api {
             this._connecting = true;
             this.debug.log(`Connecting to AceBase server "${this.url}"`);
             if (!this.url.startsWith('https')) {
-                this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.red)
+                this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(ColorStyle.red))
             }
     
             return new Promise((resolve, reject) => {
@@ -269,6 +276,7 @@ class WebApi extends Api {
                 socket.on("data-event", data => {
                     const val = Transport.deserialize(data.val);
                     const context = data.context || {};
+                    context.acebase_event_source = 'server';
 
                     /*
                         Using the new context, we can determine how we should handle this data event.
@@ -327,9 +335,14 @@ class WebApi extends Api {
                     // console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
                     const pathSubs = subscriptions[data.subscr_path];
 
-                    if (!pathSubs && data.event !== 'mutated') {
-                        // weird. we are not subscribed on this path?
-                        this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.path}"`);
+                    if (!pathSubs && data.event !== 'mutated') { 
+                        // NOTE: 'mutated' events fire on the mutated path itself. 'mutations' events fire on subscription path
+
+                        // We are not subscribed on this path. Happens when an event fires while a server unsubscribe 
+                        // has been requested, but not processed yet: the local subscription will be gone already.
+                        // This can be confusing when using cache, an unsubscribe may have been requested after a cache
+                        // event fired - the server event will follow but we're not listening anymore!
+                        // this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.subscr_path}"`);
                         return;
                     }
                     if (updateCache) {
@@ -442,7 +455,7 @@ class WebApi extends Api {
 
         this.unsubscribe = (path, event = undefined, callback = undefined) => {
             let pathSubs = subscriptions[path];
-            if (!pathSubs) { return; }
+            if (!pathSubs) { return Promise.resolve(); }
 
             const unsubscribeFrom = (subscriptions) => {
                 subscriptions.forEach(subscr => {
@@ -924,7 +937,8 @@ class WebApi extends Api {
             if (this._cache && options.fetchFreshData) {
                 // Find out what data to load
                 const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
-                    if (!paths.includes(path)) {
+                    const isWildcardPath = path.includes('*') || path.includes('$');
+                    if (!paths.includes(path) && !isWildcardPath) {
                         const hasValueSubscribers = this._subscriptions[path].some(s => s.event !== 'mutated' && !s.event.startsWith('notify_'));
                         if (hasValueSubscribers) {
                             const pathInfo = PathInfo.get(path);
@@ -1082,8 +1096,8 @@ class WebApi extends Api {
             }
         })
 
-        // Use optimistic approach - return cache promise
-        return cachePromise;
+        // return server promise by default, so caller can handle potential authorization issues
+        return this._cache.priority === 'cache' ? cachePromise : serverPromise;
     }
 
     update(path, updates, options = { allow_cache: true, context: {} }) {
@@ -1169,8 +1183,8 @@ class WebApi extends Api {
             }
         })
 
-        // Use optimistic approach - return cache promise
-        return cachePromise;
+        // return server promise by default, so caller can handle potential authorization issues
+        return this._cache.priority === 'cache' ? cachePromise : serverPromise;
     }
 
     get(path, options = { allow_cache: true }) {
@@ -1228,7 +1242,7 @@ class WebApi extends Api {
         if (!useCache) {
             return getServerValue();
         }
-        else if (!this._connected) {
+        else if (!this._connected || this._cache.priority === 'cache') {
             return getCacheValue();
         }
         else {

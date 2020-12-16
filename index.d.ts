@@ -293,6 +293,8 @@ export class AceBaseUser {
 //     });
 // }
 
+export class ServerDate extends Date {}
+
 export import DataSnapshot = acebasecore.DataSnapshot;
 export import DataReference = acebasecore.DataReference;
 export import EventStream = acebasecore.EventStream;

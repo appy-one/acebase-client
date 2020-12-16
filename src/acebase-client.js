@@ -1,6 +1,7 @@
 const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
+const { setServerBias } = require('./server-date');
 
 class AceBaseClientConnectionSettings {
 
@@ -63,6 +64,20 @@ class AceBaseClient extends AceBaseBase {
         this.on('ready', () => { ready = true; });
         this._connected = false;
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
+
+        this.on('connect', () => {
+            // Synchronize date/time
+            // const start = Date.now(); // performance.now();
+            this.api.getServerInfo()
+            .then(info => {
+                const now = Date.now(),
+                    // roundtrip = now - start, //performance.now() - start,
+                    // expectedTime = now - Math.floor(roundtrip / 2),
+                    // bias = info.time - expectedTime;
+                    bias = info.time - now;
+                setServerBias(bias);
+            });
+        });
 
         let syncRunning = false;
         const syncPendingChanges = () => {

@@ -1,98 +1,8 @@
 const { Api, Transport, ID, PathInfo, ColorStyle } = require('acebase-core');
-const http = require('http');
-const https = require('https');
-const URL = require('url');
 const connectSocket = require('socket.io-client');
 
-class AceBaseRequestError extends Error {
-    constructor(request, response, code, message) {
-        super(message);
-        this.code = code;
-        this.request = request;
-        this.response = response;
-    }
-}
-
-const NOT_CONNECTED_ERROR_MESSAGE = 'remote database is not connected'; //'AceBaseClient is not connected';
-
-const _request = (method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) => {
-    return new Promise((resolve, reject) => {
-        let endpoint = URL.parse(url);
-
-        let postData = options.data;
-        if (typeof postData === 'undefined' || postData === null) {
-            postData = '';
-        }
-        else if (typeof postData === 'object') {
-            postData = JSON.stringify(postData);
-        }
-        const request = {
-            method: method,
-            protocol: endpoint.protocol,
-            host: endpoint.hostname,
-            port: endpoint.port,
-            path: endpoint.path, //.pathname,
-            headers: {
-                'AceBase-Context': JSON.stringify(options.context || null),
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData)
-            }
-        };
-        if (options.accessToken) {
-            request.headers['Authorization'] = `Bearer ${options.accessToken}`;
-        }
-        const client = request.protocol === 'https:' ? https : http;
-        const req = client.request(request, res => {
-            res.setEncoding("utf8");
-            let data = '';
-            if (typeof options.dataReceivedCallback === 'function') {
-                res.on('data', options.dataReceivedCallback);
-            }
-            else {
-                res.on('data', chunk => { data += chunk; });
-            }
-            res.on('end', () => {
-                if (res.statusCode === 200) {
-                    if (data[0] === '{') {
-                        let val = JSON.parse(data);
-                        // console.log('Delaying data retrieval...')
-                        // setTimeout(() => resolve(val), 2500);
-                        resolve(val);
-                    }
-                    else {
-                        resolve(data);
-                    }
-                }
-                else {
-                    request.body = postData;
-                    const response = {
-                        statusCode: res.statusCode,
-                        statusMessage: res.statusMessage,
-                        headers: res.headers,
-                        body: data
-                    };
-                    let code = res.statusCode, message = res.statusMessage;
-                    if (data[0] == '{') {
-                        let err = JSON.parse(data);
-                        if (err.code) { code = err.code; }
-                        if (err.message) { message = err.message; }
-                    }
-                    return reject(new AceBaseRequestError(request, response, code, message));
-                }
-            });
-        });
-
-        req.on('error', (err) => {
-            reject(new AceBaseRequestError(request, null, err.code || err.name, err.message));
-        });
-
-        if (postData.length > 0) {
-            req.write(postData);
-        }
-        req.end();
-    });
-};
-
+const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
+const _request = require('./request');
 const _websocketRequest = (socket, event, data, accessToken) => {
 
     const requestId = ID.generate();
@@ -1470,6 +1380,14 @@ class WebApi extends Api {
         return this._request({ url, dataReceivedCallback: chunk => stream.write(chunk) })
         .catch(err => {
             throw err;
+        });
+    }
+
+    getServerInfo() {
+        return this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
+            // Prior to acebase-server v0.9.37, info was at /info (no dbname attached)
+            this.debug.warn(`Could not get server info, update your acebase server version`);
+            return { version: 'unknown', time: Date.now() }
         });
     }
 }

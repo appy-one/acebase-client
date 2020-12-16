@@ -1,10 +1,15 @@
 /*
-    * This file is used to generate a browser bundle,
+    * This file is used to generate a browser bundle to use as an include
     (re)generate it with: npm run browserify
-    Note to self: if browserify fails, temp remove the "browser" property from package.json and run again.
 
     * To use AceBaseClient in the browser:
-    const db = new AceBaseClient({ dbname: 'dbname', host: 'localhost', port: 3000, https: false });
+    <script type="text/javascript" src="dist/browser.min.js"></script>
+    <script type="text/javascript">
+        const db = new AceBaseClient({ dbname: 'dbname', host: 'localhost', port: 3000, https: false });
+        db.ready(() => {
+            // Ready to do some work
+        })
+    </script>
 */
 
 const acebaseclient = require('./index');

@@ -1,5 +1,5 @@
 const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
-const { AceBaseClient } = require('./acebase-client');
+// const { AceBaseClient } = require('./acebase-client');
 
 class AceBaseClientAuth {
 

@@ -1,5 +1,4 @@
 const { AceBaseRequestError } = require('./error');
-const { Utils } = require('acebase-core');
 
 async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) {
     let postData = options.data;
@@ -18,7 +17,6 @@ async function request(method, url, options = { accessToken: null, data: null, d
         headers
     };
     if (postData.length > 0) {
-        headers['Content-Length'] = Utils.encodeString(postData).byteLength; // Buffer.byteLength(postData)
         init.body = postData;
     }
     if (options.accessToken) {
@@ -37,7 +35,7 @@ async function request(method, url, options = { accessToken: null, data: null, d
             (function readNext() {
                 reader.read()
                 .then(result => {
-                    options.dataReceivedCallback(result.value)
+                    options.dataReceivedCallback(result.value);
                     if (result.done) { return resolve(); }
                     readNext();
                 })

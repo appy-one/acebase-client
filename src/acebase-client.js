@@ -51,7 +51,7 @@ class AceBaseClient extends AceBaseBase {
         if (!(settings instanceof AceBaseClientConnectionSettings)) {
             settings = new AceBaseClientConnectionSettings(settings);
         }
-        super(settings.dbname, {});
+        super(settings.dbname, { info: 'realtime database client' });
 
         /*
             TODO: improve init flow with await/async (requires Node 7.6+) 

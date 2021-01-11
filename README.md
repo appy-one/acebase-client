@@ -23,9 +23,9 @@ OR, if you want to use the client in the browser, use the following code:
 Use the following code the connect to an AceBase webserver:
 
 ```javascript
-const db = new AceBaseClient({ host: "localhost", port: 5757, dbname: 'mydb', https: false });
+const db = new AceBaseClient({ host: 'localhost', port: 5757, dbname: 'mydb', https: false });
 db.ready(() => {
-    console.log("Connected successfully");
+    console.log('Connected successfully');
 });
 ```
 
@@ -181,13 +181,12 @@ db.auth.changeUsername(newUsername)
 
 ### Add miscellaneous data to user account
 
-You can store up to 100 additional fields of data with the user account, to eliminate the need for user data to be added to the main database. You can do this with ```updateUserSettings```:
+You can store up to 100 additional fields of data with the user account, to eliminate the need for user data to be added to the main database. Store data here that doesn't change frequently, such as profile info. You can do this with ```updateUserSettings```:
 
 ```javascript
 let updates = {
     profilePic: 'https://profile.com/pic.jpg',
-    website: 'http://website.com',
-    gameScore: 3459
+    website: 'http://website.com'
 }
 db.auth.updateUserSettings(updates)
 .then(result => {

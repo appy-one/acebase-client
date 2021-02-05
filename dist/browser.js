@@ -222,7 +222,7 @@ function promiseTimeout(ms, promise, comment) {
 
 module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
 },{"./api-web":3,"./auth":4,"./server-date":10,"acebase-core":23}],3:[function(require,module,exports){
-(function (Buffer){
+(function (Buffer){(function (){
 const { Api, Transport, ID, PathInfo, ColorStyle } = require('acebase-core');
 const connectSocket = require('socket.io-client');
 
@@ -1618,7 +1618,7 @@ class WebApi extends Api {
 }
 
 module.exports = { WebApi };
-}).call(this,require("buffer").Buffer)
+}).call(this)}).call(this,require("buffer").Buffer)
 },{"./request":8,"./request/error":9,"acebase-core":23,"buffer":37,"socket.io-client":1}],4:[function(require,module,exports){
 const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
 // const { AceBaseClient } = require('./acebase-client');
@@ -2866,19 +2866,23 @@ class LiveDataProxy {
             else if (flag === 'onChange') {
                 return addOnChangeHandler(target, args.callback);
             }
-            else if (flag === 'observe') {
-                // Try to load Observable
-                const Observable = optional_observable_1.getObservable();
-                return new Observable(observer => {
+            else if (flag === 'subscribe' || flag === 'observe') {
+                const subscribe = subscriber => {
                     const currentValue = getTargetValue(cache, target);
-                    observer.next(currentValue);
+                    subscriber.next(currentValue);
                     const subscription = addOnChangeHandler(target, (value, previous, isRemote, context) => {
-                        observer.next(value);
+                        subscriber.next(value);
                     });
                     return function unsubscribe() {
                         subscription.stop();
                     };
-                });
+                };
+                if (flag === 'subscribe') {
+                    return subscribe;
+                }
+                // Try to load Observable
+                const Observable = optional_observable_1.getObservable();
+                return new Observable(subscribe);
             }
             else if (flag === 'transaction') {
                 const hasConflictingTransaction = transactions.some(t => RelativeNodeTarget.areEqual(target, t.target) || RelativeNodeTarget.isAncestor(target, t.target) || RelativeNodeTarget.isDescendant(target, t.target));
@@ -3093,8 +3097,7 @@ function createProxy(context) {
             }
             const value = target[prop];
             if (value === null) {
-                // Removed property. Should never happen, but if it does...
-                debugger;
+                // Removed property. Should never happen, but if it does:
                 delete target[prop];
                 return; // undefined
             }
@@ -3162,6 +3165,12 @@ function createProxy(context) {
                     // Starts monitoring the value
                     return function onChanged(callback) {
                         return context.flag('onChange', context.target, { callback });
+                    };
+                }
+                if (prop === 'subscribe') {
+                    // Gets subscriber function to use with Observables, or custom handling
+                    return function subscribe() {
+                        return context.flag('subscribe', context.target);
                     };
                 }
                 if (prop === 'getObservable') {
@@ -4469,6 +4478,7 @@ exports.ID = ID;
 },{"./cuid":16}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.DataSnapshot = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
 var acebase_base_1 = require("./acebase-base");
 Object.defineProperty(exports, "AceBaseBase", { enumerable: true, get: function () { return acebase_base_1.AceBaseBase; } });
 Object.defineProperty(exports, "AceBaseBaseSettings", { enumerable: true, get: function () { return acebase_base_1.AceBaseBaseSettings; } });
@@ -5731,7 +5741,7 @@ class TypeMappings {
 exports.TypeMappings = TypeMappings;
 
 },{"./data-reference":19,"./data-snapshot":20,"./path-info":25,"./utils":34}],34:[function(require,module,exports){
-(function (Buffer){
+(function (Buffer){(function (){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.defer = exports.getChildValues = exports.compareValues = exports.cloneObject = exports.concatTypedArrays = exports.decodeString = exports.encodeString = exports.bytesToNumber = exports.numberToBytes = void 0;
@@ -6014,16 +6024,19 @@ function compareValues(oldVal, newVal) {
     else if (typeof oldVal === "object") {
         // Do key-by-key comparison of objects
         const isArray = oldVal instanceof Array;
-        const oldKeys = isArray
-            ? Object.keys(oldVal).map(v => parseInt(v)) //new Array(oldVal.length).map((v,i) => i) 
-            : Object.keys(oldVal);
-        const newKeys = isArray
-            ? Object.keys(newVal).map(v => parseInt(v)) //new Array(newVal.length).map((v,i) => i) 
-            : Object.keys(newVal);
+        const getKeys = obj => {
+            let keys = Object.keys(obj).filter(key => !voids.includes(obj[key]));
+            if (isArray) {
+                keys = keys.map((v) => parseInt(v));
+            }
+            return keys;
+        };
+        const oldKeys = getKeys(oldVal);
+        const newKeys = getKeys(newVal);
         const removedKeys = oldKeys.filter(key => !newKeys.includes(key));
         const addedKeys = newKeys.filter(key => !oldKeys.includes(key));
         const changedKeys = newKeys.reduce((changed, key) => {
-            if (oldKeys.indexOf(key) >= 0) {
+            if (oldKeys.includes(key)) {
                 const val1 = oldVal[key];
                 const val2 = newVal[key];
                 const c = compareValues(val1, val2);
@@ -6068,7 +6081,7 @@ function defer(fn) {
 }
 exports.defer = defer;
 
-}).call(this,require("buffer").Buffer)
+}).call(this)}).call(this,require("buffer").Buffer)
 },{"./data-snapshot":20,"./path-reference":26,"./process":27,"buffer":37}],35:[function(require,module,exports){
 
 },{}],36:[function(require,module,exports){
@@ -6139,7 +6152,8 @@ function toByteArray (b64) {
     ? validLen - 4
     : validLen
 
-  for (var i = 0; i < len; i += 4) {
+  var i
+  for (i = 0; i < len; i += 4) {
     tmp =
       (revLookup[b64.charCodeAt(i)] << 18) |
       (revLookup[b64.charCodeAt(i + 1)] << 12) |
@@ -6198,9 +6212,7 @@ function fromByteArray (uint8) {
 
   // go through the array every three bytes, we'll deal with trailing stuff later
   for (var i = 0, len2 = len - extraBytes; i < len2; i += maxChunkLength) {
-    parts.push(encodeChunk(
-      uint8, i, (i + maxChunkLength) > len2 ? len2 : (i + maxChunkLength)
-    ))
+    parts.push(encodeChunk(uint8, i, (i + maxChunkLength) > len2 ? len2 : (i + maxChunkLength)))
   }
 
   // pad the end with zeros, but make sure to not forget the extra bytes
@@ -6225,6 +6237,7 @@ function fromByteArray (uint8) {
 }
 
 },{}],37:[function(require,module,exports){
+(function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
  *
@@ -8003,7 +8016,9 @@ function numberIsNaN (obj) {
   return obj !== obj // eslint-disable-line no-self-compare
 }
 
-},{"base64-js":36,"ieee754":38}],38:[function(require,module,exports){
+}).call(this)}).call(this,require("buffer").Buffer)
+},{"base64-js":36,"buffer":37,"ieee754":38}],38:[function(require,module,exports){
+/*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = (nBytes * 8) - mLen - 1

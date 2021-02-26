@@ -1,12 +1,13 @@
 {
   "name": "acebase-client",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Client to connect to an AceBase realtime database server",
   "main": "./src/index.js",
   "browser": {
     "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
     "./src/request/index.js": "./src/request/browser.js",
-    "./src/performance/index.js": "./src/performance/browser.js"
+    "./src/performance/index.js": "./src/performance/browser.js",
+    "./src/base64/index.js": "./src/base64/browser.js"
   },
   "types": "./index.d.ts",
   "private": false,
@@ -52,7 +53,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "^1.0.2",
+    "acebase-core": "^1.1.0",
     "socket.io-client": "^2.1.1"
   }
 }

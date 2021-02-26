@@ -156,11 +156,26 @@ export class AceBaseClientAuth {
     // signInWithPopup(providerName: string): Promise<IAceBaseAuthProviderSignInResult>;
 
     /**
+     * When using a cache db, removes all or specific cached data
+     * @param path (optional) specific path to remove
+     */
+    clearCache(path?: string): Promise<void>
+
+    /**
      * Signs out of the current account
-     * @param {boolean} everywhere whether to sign out all clients, or only this one
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
-    signOut(everywhere?: boolean): Promise<void>;
+    signOut(): Promise<void>;
+    /**
+     * @param {boolean} everywhere whether to sign out all clients, or only this one
+     */
+    signOut(everywhere: boolean): Promise<void>;
+    /** 
+     * @param {any} options
+     * @param {boolean} [options.everywhere=false] whether to sign out all clients, or only this one
+     * @param {boolean} [options.clearCache=false] if cache database is used: whether to clear cached data (recommended, currently not enabled by default, might change in next major version)
+     */
+    signOut(options: { everywhere?: boolean, clearCache?: boolean }): Promise<void>;
 
     /**
      * Changes the password of the currrently signed into account

@@ -1,6 +1,6 @@
 const { Api, Transport, ID, PathInfo, ColorStyle } = require('acebase-core');
 const connectSocket = require('socket.io-client');
-
+const Base64 = require('./base64');
 const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
 const _request = require('./request');
 const _websocketRequest = (socket, event, data, accessToken) => {
@@ -102,13 +102,12 @@ class WebApi extends Api {
                     this._connecting = false;
                 });
 
-                socket.on("reconnect_failed", (err) => {
-                    // Reconnecting failed
+                const retryConnect = () => {
                     const scheduleRetry = () => {
                         // Try connecting again in a minute
                         setTimeout(() => { this.connect().catch(err => { scheduleRetry(); }); }, 60 * 1000);
                     };
-                    if (typeof window !== 'undefined') {
+                    if (typeof window !== 'undefined' && window.navigator && !window.navigator.onLine) {
                         // Monitor browser online event
                         const listener = () => {
                             window.removeEventListener('online', listener);
@@ -119,20 +118,27 @@ class WebApi extends Api {
                     else {
                         scheduleRetry();
                     }
+                };
+
+                socket.on("reconnect_failed", (err) => {
+                    // Reconnecting failed
+                    retryConnect();
                 });
 
                 socket.on("connect_error", (data) => {
                     // New connection failed to establish
                     this._connected = false;
                     this.debug.error(`Websocket connection error: ${data}`);
-                    reject(new Error(`connect_error: ${data}`));
+                    // reject(new Error(`connect_error: ${data}`));
+                    retryConnect();
                 });
 
                 socket.on("connect_timeout", (data) => {
                     // New connection failed to establish
                     this._connected = false;
                     this.debug.error(`Websocket connection timeout`);
-                    reject(new Error(`connect_timeout`));
+                    // reject(new Error(`connect_timeout`));
+                    retryConnect();
                 });
 
                 socket.on("connect", (data) => {
@@ -612,7 +618,7 @@ class WebApi extends Api {
             /** @type {{ provider: { name: string, access_token: string, refresh_token: string, expires_in: number }, access_token: string, user: AceBaseUser }} */
             let result;
             try {
-                result = JSON.parse(Buffer.from(callbackResult, 'base64').toString('utf8'));
+                result = JSON.parse(Base64.decode(callbackResult));
                 // TODO: Implement server check
             }
             catch(err) {
@@ -634,16 +640,31 @@ class WebApi extends Api {
             });
         }
 
-        this.signOut = (everywhere = false) => {
+        this.signOut = (options = { everywhere: false, clearCache: false }) => {
+            if (typeof options === 'boolean') {
+                // Old signature signOut(everywhere:boolean = false)
+                options = { everywhere: options };
+            }
+            else if (typeof options !== 'object') {
+                throw new TypeError('options must be an object');
+            }
+            if (typeof options.everywhere !== 'boolean') { options.everywhere = false; }
+            if (typeof options.clearCache !== 'boolean') { options.clearCache = false; }
+
             if (!accessToken) { return Promise.resolve(); }
             if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere } })
+            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere: options.everywhere } })
             .then(() => {
                 this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
                 accessToken = null;
             })
             .catch(err => {
                 throw err;
+            })
+            .then(() => {
+                if (this._cache && options.clearCache) {
+                    return this.clearCache();
+                }
             });
         };
 
@@ -1292,6 +1313,18 @@ class WebApi extends Api {
             url += `?` + data;
         }
         return this._request({ method, url, data: postData, ignoreConnectionState: true });
+    }
+
+    clearCache(path = '') {
+        if (this._cache) {
+            // Clear cache without raising events
+            const value = path === '' ? {} : null;
+            if (path !== '') { path = `cache/${path}`; }
+            return this._cache.db.api.set(path, value, { suppress_events: true });
+        }
+        else {
+            return Promise.resolve();
+        }
     }
 
     /**

@@ -158,17 +158,19 @@ class AceBaseClientAuth {
 
     /**
      * Signs out of the current account
-     * @param {boolean} [everywhere=false] whether to sign out all clients, or only this one
+     * @param {object|boolean} [options] options object, or boolean specifying whether to signout everywhere
+     * @param {boolean} [options.everywhere] whether to sign out all clients, or only this one
+     * @param {boolean} [options.clearCache] whether to clear the cache database (if used)
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
-    signOut(everywhere) {
+    signOut(options) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signOut(everywhere));
+            return this.client.ready().then(() => this.signOut(options));
         }
         else if (!this.user) {
             return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
         }
-        return this.client.api.signOut(everywhere)
+        return this.client.api.signOut(options)
         .then(() => {
             this.accessToken = null;
             let user = this.user;

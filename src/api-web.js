@@ -663,7 +663,10 @@ class WebApi extends Api {
             })
             .then(() => {
                 if (this._cache && options.clearCache) {
-                    return this.clearCache();
+                     // Clear cache, but don't wait for it to finish
+                    this.clearCache().catch(err => {
+                        console.error(`Could not clear cache:`, err);
+                    });
                 }
             });
         };
@@ -870,7 +873,7 @@ class WebApi extends Api {
                 const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
                     const isWildcardPath = path.includes('*') || path.includes('$');
                     if (!paths.includes(path) && !isWildcardPath) {
-                        const hasValueSubscribers = this._subscriptions[path].some(s => s.event !== 'mutated' && !s.event.startsWith('notify_'));
+                        const hasValueSubscribers = this._subscriptions[path].some(s => !['mutated','mutations'].includes(s.event) && !s.event.startsWith('notify_'));
                         if (hasValueSubscribers) {
                             const pathInfo = PathInfo.get(path);
                             const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
@@ -1144,20 +1147,18 @@ class WebApi extends Api {
             .then(data => {
                 let val = Transport.deserialize(data);
                 if (this._cache) {
-                    // Update cache
+                    // Update cache without waiting
                     // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
                     // TODO: do update if no nested filters are used.
                     // if (filtered) {
                     //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
                     // }
-                    // else if (!filtered) { 
                     if (!filtered) {
                         const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-                        return this._cache.db.api.set(cachePath, val, { context: { acebase_operation: 'update_cache' } })
+                        this._cache.db.api.set(cachePath, val, { context: { acebase_operation: 'update_cache' } })
                         .catch(err => {
                             this.debug.error(`Error caching data for "/${path}"`, err)
-                        })
-                        .then(() => val);
+                        });
                     }
                 }
                 return val;

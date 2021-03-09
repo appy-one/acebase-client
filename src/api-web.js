@@ -2,6 +2,7 @@ const { Api, Transport, ID, PathInfo, ColorStyle } = require('acebase-core');
 const connectSocket = require('socket.io-client');
 const Base64 = require('./base64');
 const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
+const { promiseTimeout } = require('./promise-timeout');
 const _request = require('./request');
 const _websocketRequest = (socket, event, data, accessToken) => {
 
@@ -41,6 +42,11 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     return promise;
 }
 
+const CONNECTION_STATE_DISCONNECTED = 'disconnected';
+const CONNECTION_STATE_CONNECTING = 'connecting';
+const CONNECTION_STATE_CONNECTED = 'connected';
+const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
+
 /**
  * Api to connect to a remote AceBase server over http(s)
  */
@@ -55,8 +61,7 @@ class WebApi extends Api {
         this.url = settings.url;
         this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.dbname = dbname;
-        this._connected = false;
-        this._connecting = false;
+        this._connectionState = CONNECTION_STATE_DISCONNECTED;
         if (settings.cache && settings.cache.enabled !== false) {
             this._cache = {
                 db: settings.cache.db,
@@ -85,7 +90,7 @@ class WebApi extends Api {
             if (this.socket !== null && typeof this.socket === 'object') {
                 this.disconnect();
             }
-            this._connecting = true;
+            this._connectionState = CONNECTION_STATE_CONNECTING;
             this.debug.log(`Connecting to AceBase server "${this.url}"`);
             if (!this.url.startsWith('https')) {
                 this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(ColorStyle.red))
@@ -94,57 +99,52 @@ class WebApi extends Api {
             return new Promise((resolve, reject) => {
                 const socket = this.socket = connectSocket(this.url);
 
-                socket.on("reconnect_attempt", () => {
-                    this._connecting = true;
-                });
-
-                socket.on("reconnect_error", (err) => {
-                    this._connecting = false;
-                });
-
+                let retryConnectTimeout;
                 const retryConnect = () => {
-                    const scheduleRetry = () => {
-                        // Try connecting again in a minute
-                        setTimeout(() => { this.connect().catch(err => { scheduleRetry(); }); }, 60 * 1000);
-                    };
+                    const connect = () => {
+                        if (!this.isConnecting) { return; }
+                        this.connect();
+                    }
+
+                    // Try connecting again in a minute
+                    clearTimeout(retryConnectTimeout);
+                    retryConnectTimeout = setTimeout(connect, 60 * 1000);
+
+                    // Or, when browser goes online
                     if (typeof window !== 'undefined' && window.navigator && !window.navigator.onLine) {
                         // Monitor browser online event
-                        const listener = () => {
-                            window.removeEventListener('online', listener);
-                            scheduleRetry();
+                        const handleOnlineEvent = () => {
+                            this.debug.log(`Connecting to server after browser online event`);
+                            window.removeEventListener('online', handleOnlineEvent);
+                            clearTimeout(retryConnectTimeout);
+                            connect();
                         }
-                        window.addEventListener('online', listener);
-                    }
-                    else {
-                        scheduleRetry();
+                        window.addEventListener('online', handleOnlineEvent);
                     }
                 };
 
+                // socket.on("reconnect_attempt", () => {
+                //     this._connecting = true;
+                // });
+
+                // socket.on("reconnect_error", (err) => {
+                //     this._connecting = false;
+                // });
+
                 socket.on("reconnect_failed", (err) => {
-                    // Reconnecting failed
+                    // Reconnecting failed after reconnectionAttempts, which is set to Infinity by default, so this should never happen
                     retryConnect();
                 });
 
                 socket.on("connect_error", (data) => {
                     // New connection failed to establish
-                    this._connected = false;
                     this.debug.error(`Websocket connection error: ${data}`);
-                    // reject(new Error(`connect_error: ${data}`));
-                    retryConnect();
-                });
-
-                socket.on("connect_timeout", (data) => {
-                    // New connection failed to establish
-                    this._connected = false;
-                    this.debug.error(`Websocket connection timeout`);
-                    // reject(new Error(`connect_timeout`));
+                    // Keep connection state at CONNECTING, retry
                     retryConnect();
                 });
 
                 socket.on("connect", (data) => {
-                    this._connecting = false;
-                    this._connected = true;
-                    // eventCallback && eventCallback('connect');
+                    this._connectionState = CONNECTION_STATE_CONNECTED;
 
                     // Sign in
                     let signInPromise = Promise.resolve();
@@ -183,9 +183,17 @@ class WebApi extends Api {
                     });
                 });
 
-                socket.on("disconnect", (data) => {
+                socket.on("disconnect", reason => {
                     // Existing connection was broken, by us or network
-                    this._connected = false;
+                    if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
+                        // disconnect was requested by us: reason === 'client namespace disconnect'
+                        this._connectionState = CONNECTION_STATE_DISCONNECTED;
+                    }
+                    else {
+                        // Automatic reconnect should be done by socket.io
+                        this._connectionState = CONNECTION_STATE_CONNECTING;
+                        retryConnect(); // schedule manual reconnection anyway, won't interfere with socket.io
+                    }
                     eventCallback && eventCallback('disconnect');
                 });
 
@@ -332,11 +340,10 @@ class WebApi extends Api {
 
         this.disconnect = () => {
             if (this.socket !== null && typeof this.socket === 'object') {
+                this._connectionState = CONNECTION_STATE_DISCONNECTING;
                 this.socket.disconnect();
                 this.socket = null;
             }
-            this._connected = false;
-            this._connecting = false;
         }
 
         this.subscribe = (path, event, callback) => {
@@ -353,7 +360,7 @@ class WebApi extends Api {
                 this._cache.db.api.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
             }
 
-            if (serverAlreadyNotifying || !this._connected) {
+            if (serverAlreadyNotifying || !this.isConnected) {
                 return Promise.resolve();
             }
             if (event === 'mutated') {
@@ -405,20 +412,22 @@ class WebApi extends Api {
             if (pathSubs.length === 0) {
                 // Unsubscribed from all events on path
                 delete subscriptions[path];
-                if (this._connected) {
-                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: accessToken }, accessToken);
+                if (this.isConnected) {
+                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: accessToken }, accessToken)
+                        .catch(err => this.debug.error(`Failed to unsubscribe from event(s) on "${path}": ${err.message}`));
                 }
             }
-            else if (this._connected && !pathSubs.some(subscr => subscr.event === event)) {
+            else if (this.isConnected && !pathSubs.some(subscr => subscr.event === event)) {
                 // No callbacks left for specific event
-                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: accessToken }, accessToken);
+                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: accessToken }, accessToken)
+                    .catch(err => this.debug.error(`Failed to unsubscribe from event "${event}" on "${path}": ${err.message}`));
             }
-            if (this._connected && hadMutatedEvents && !hasMutatedEvents) {
+            if (this.isConnected && hadMutatedEvents && !hasMutatedEvents) {
                 // If any descendant paths have mutated events, resubscribe those
                 const promises = Object.keys(subscriptions)
                     .filter(otherPath => PathInfo.get(otherPath).isDescendantOf(path) && subscriptions[otherPath].some(sub => sub.event === 'mutated'))
                     .map(path => _websocketRequest(this.socket, 'subscribe', { path: path, event: 'mutated' }, accessToken))
-                    .map(promise => promise.catch(err => console.error(err)));
+                    .map(promise => promise.catch(err => this.debug.error(`Failed to subscribe to event "${event}" on path "${path}": ${err.message}`)));
                 promise = Promise.all([promise, ...promises]);
             }
             return promise;
@@ -486,7 +495,7 @@ class WebApi extends Api {
                 // TODO: socket.on('disconnect', disconnectedCallback);
                 this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken, context: options.context });
             };
-            if (this._connected) { 
+            if (this.isConnected) { 
                 connectedCallback(); 
             }
             else { 
@@ -521,7 +530,7 @@ class WebApi extends Api {
          * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
          */
         this._request = (options) => {
-            if (this._connected || options.ignoreConnectionState === true) { 
+            if (this.isConnected || options.ignoreConnectionState === true) { 
                 return _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context })
                 .catch(err => {
                     throw err;
@@ -533,35 +542,22 @@ class WebApi extends Api {
                 // are only executed if they are not allowed to use cached responses. Wait for a
                 // connection to be established (max 1s), then retry or fail
 
-                if (!this._connecting) {
+                if (!this.isConnecting) {
                     // We're currently not trying to connect. Fail now
                     return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
                 }
 
-                let resolve, reject, 
-                    promise = new Promise((rs, rj) => { resolve = rs; reject = rj; }),
-                    state = 'wait',
-                    timeout = setTimeout(() => {
-                        if (state !== 'wait') { return; }
-                        state = 'timeout';
-                        this.socket.off('connect', callback); // Cancel connect wait
-                        reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
-                    }, 1000),
-                    callback = () => {
-                        if (state !== 'wait') { return; }
-                        state = 'connected';
-                        clearTimeout(timeout); // Cancel timeout
-                        this._request(options)
-                        .then(resolve)
-                        .catch(reject);
-                    };
-                this.socket.on('connect', callback); // wait for connection
-                return promise;
+                const connectPromise = new Promise(resolve => this.socket.once('connect', resolve));
+                return promiseTimeout(connectPromise, 1000, 'Waiting for connection')
+                .catch(err => {
+                    throw new Error(NOT_CONNECTED_ERROR_MESSAGE);
+                })
+                .then(() => this._request(options));
             }
         };
 
         this.signIn = (username, password) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
@@ -578,7 +574,7 @@ class WebApi extends Api {
         };
 
         this.signInWithEmail = (email, password) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
@@ -591,7 +587,7 @@ class WebApi extends Api {
         };
 
         this.signInWithToken = (token) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
@@ -604,7 +600,7 @@ class WebApi extends Api {
         };
 
         this.startAuthProviderSignIn = (providerName, callbackUrl) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` })
             .then(result => {
                 return { redirectUrl: result.redirectUrl };
@@ -630,7 +626,7 @@ class WebApi extends Api {
         }
 
         this.refreshAuthProviderToken = (providerName, refreshToken) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ url: `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}` })
             .then(result => {
                 return result;
@@ -652,7 +648,7 @@ class WebApi extends Api {
             if (typeof options.clearCache !== 'boolean') { options.clearCache = false; }
 
             if (!accessToken) { return Promise.resolve(); }
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere: options.everywhere } })
             .then(() => {
                 this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
@@ -673,7 +669,7 @@ class WebApi extends Api {
 
         this.changePassword = (uid, currentPassword, newPassword) => {
             if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } })
             .then(result => {
                 accessToken = result.access_token;
@@ -685,7 +681,7 @@ class WebApi extends Api {
         };
     
         this.forgotPassword = (email) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/forgot_password`, data: { email } })
             .catch(err => {
                 throw err;
@@ -693,7 +689,7 @@ class WebApi extends Api {
         };
 
         this.verifyEmailAddress = (verificationCode) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/verify_email`, data: { code: verificationCode } })
             .catch(err => {
                 throw err;
@@ -701,7 +697,7 @@ class WebApi extends Api {
         };
 
         this.resetPassword = (resetCode, newPassword) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/reset_password`, data: { code: resetCode, password: newPassword } })
             .catch(err => {
                 throw err;
@@ -709,7 +705,7 @@ class WebApi extends Api {
         };
 
         this.signUp = (details, signIn = true) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signup`, data: details })
             .then(result => {
                 if (signIn) {
@@ -724,7 +720,7 @@ class WebApi extends Api {
         };
 
         this.updateUserDetails = (details) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/update`, data: details })
             .then(result => {
                 return { user: result.user };
@@ -735,7 +731,7 @@ class WebApi extends Api {
         }
 
         this.deleteAccount = (uid, signOut = true) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } })
             .then(result => {
                 if (signOut) {
@@ -750,18 +746,20 @@ class WebApi extends Api {
         }
     }
 
+    get isConnected() {
+        return this._connectionState === CONNECTION_STATE_CONNECTED;
+    }
+    get isConnecting() {
+        return this._connectionState === CONNECTION_STATE_CONNECTING;
+    }
+
     stats(options = undefined) {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
     sync(options = { fetchFreshData: true, eventCallback: null }) {
         // Sync cache
-        if (!this._connected) {
-            return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
-        }
-        // if (!this._cache) {
-        //     return Promise.reject(new Error(`no cache database is used`));
-        // }
+        if (!this.isConnected) {  return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
         if (this._cache && !this._cache.db.isReady) {
             return Promise.reject(new Error(`cache database is not ready yet`));
         }
@@ -831,7 +829,7 @@ class WebApi extends Api {
                             .catch(err => {
                                 // Updating remote db failed
                                 this.debug.error(`SYNC change ${id} failed: ${err.message}`);
-                                if (!this._connected) {
+                                if (!this.isConnected) {
                                     // Connection was broken, should retry later
                                     throw err;
                                 }
@@ -929,7 +927,8 @@ class WebApi extends Api {
                     const subs = this._subscriptions[path];
                     const valueSubscriptions = subs.filter(s => s.event === 'value');
                     if (valueSubscriptions.length === 0) {
-                        return subs.forEach(sub => this.debug.warn(`Subscription "${sub.event}" on path "${path}" might have missed events while offline. Data should be reloaded!`));
+                        const events = subs.reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
+                        return events.forEach(event => this.debug.warn(`Subscription "${event}" on path "${path}" might have missed events while offline. Data should be reloaded!`));
                     }
                     const p = this.get(path, { allow_cache: false }).then(value => {
                         valueSubscriptions.forEach(subscr => subscr.callback(null, path, value));
@@ -955,7 +954,7 @@ class WebApi extends Api {
     set(path, value, options = { allow_cache: true, context: {} }) {
         if (!options.context) { options.context = {}; }
         const useCache = this._cache && options.allow_cache !== false;
-        const useServer = this._connected;
+        const useServer = this.isConnected;
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -1028,7 +1027,12 @@ class WebApi extends Api {
                     });
                 });
             }
-        })
+        });
+
+        if (!useServer) {
+            // Fixes issue #7
+            return cachePromise;
+        }
 
         // return server promise by default, so caller can handle potential authorization issues
         return this._cache.priority === 'cache' ? cachePromise : serverPromise;
@@ -1036,7 +1040,7 @@ class WebApi extends Api {
 
     update(path, updates, options = { allow_cache: true, context: {} }) {
         const useCache = this._cache && options && options.allow_cache !== false;
-        const useServer = this._connected;
+        const useServer = this.isConnected;
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -1117,6 +1121,11 @@ class WebApi extends Api {
             }
         })
 
+        if (!useServer) {
+            // Fixes issue #7
+            return cachePromise;
+        }
+
         // return server promise by default, so caller can handle potential authorization issues
         return this._cache.priority === 'cache' ? cachePromise : serverPromise;
     }
@@ -1174,7 +1183,7 @@ class WebApi extends Api {
         if (!useCache) {
             return getServerValue();
         }
-        else if (!this._connected || this._cache.priority === 'cache') {
+        else if (!this.isConnected || this._cache.priority === 'cache') {
             return getCacheValue();
         }
         else {
@@ -1248,7 +1257,7 @@ class WebApi extends Api {
         if (!useCache) {
             return getServerExists();
         }
-        else if (!this._connected) {
+        else if (!this.isConnected) {
             return getCacheExists();
         }
         else {
@@ -1351,7 +1360,7 @@ class WebApi extends Api {
      */
     query(path, query, options = { snapshots: false, allow_cache: true, eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
         const allowCache = options && options.allow_cache === true;
-        if (allowCache && !this._connected && this._cache) {
+        if (allowCache && !this.isConnected && this._cache) {
             // Not connected, query cache db
             return this._cache.db.api.query(PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
         }

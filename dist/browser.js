@@ -11,7 +11,7 @@ var u,f,l,d=String.fromCharCode;t.exports={version:"2.1.2",encode:a,decode:h}},f
 
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":38}],2:[function(require,module,exports){
+},{"buffer":39}],2:[function(require,module,exports){
 const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
@@ -93,7 +93,7 @@ class AceBaseClient extends AceBaseBase {
             });
         });
 
-        let syncRunning = false;
+        let syncRunning = false, firstSync = true;
         const syncPendingChanges = () => {
             if (syncRunning) { 
                 // Already syncing
@@ -105,7 +105,7 @@ class AceBaseClient extends AceBaseBase {
             syncRunning = true;
             return cacheReadyPromise.then(() => {
                 return this.api.sync({
-                    fetchFreshData: ready,
+                    fetchFreshData: !firstSync,
                     eventCallback: (eventName, args) => {
                         this.debug.log(eventName, args || '');
                         this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
@@ -118,59 +118,25 @@ class AceBaseClient extends AceBaseBase {
             })
             .then(() => {
                 syncRunning = false;
+                firstSync = false;
             });
         }
         let syncTimeout = 0;
         this.on('connect', () => {
             syncTimeout && clearTimeout(syncTimeout);
-            syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow client to sign in first
+            syncTimeout = setTimeout(syncPendingChanges, 2500); // Start sync with a short delay to allow client to sign in first
         });
         this.on('signin', () => {
             syncTimeout && clearTimeout(syncTimeout);
             syncPendingChanges();
         });
-        if (cacheDb) {
-            const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
-            const syncDonePromise = new Promise(resolve => this.once('sync_done', resolve));
-            cacheReadyPromise.then(() => {
-                // Cache database is ready. Is remote database ready?
-                let waitForSyncEvent = true;
-                return promiseTimeout(
-                    1000, 
-                    remoteConnectPromise, 
-                    'remote connection'
-                )
-                .catch(err => {
-                    // If the connect promise timed out, we'll emit the ready event and use the cache.
-                    // Any other error should halt execution
-                    if (err instanceof PromiseTimeoutError) {
-                        waitForSyncEvent = false;
-                    }
-                    else {
-                        this.debug.error(`Error: ${err.message}`);
-                        throw err;
-                    }
-                })
-                .then(() => {
-                    if (waitForSyncEvent) {
-                        return syncDonePromise;
-                    }
-                })
-                .then(() => {
-                    this.emit('ready');
-                });
-            });
-        }
 
         this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, cache: settings.cache }, evt => {
             if (evt === 'connect') {
                 this._connected = true;
                 this.emit('connect');
                 if (!ready) {
-                    // If no local cache is used, we can emit the ready event now.
-                    if (!settings.cache) {
-                        this.emit('ready');
-                    }
+                    this.emit('ready');
                 }
             }
             else if (evt === 'disconnect') {
@@ -200,36 +166,13 @@ class AceBaseClient extends AceBaseBase {
     }
 }
 
-class PromiseTimeoutError extends Error {}
-function promiseTimeout(ms, promise, comment) {
-    let id;
-    if (!promise) { promise = new Promise(() => { /* never resolves */}); }
-    let timeout = new Promise((resolve, reject) => {
-      id = setTimeout(() => {
-        reject(new PromiseTimeoutError(`Promise timed out after ${ms}ms: ${comment}`))
-      }, ms)
-    })
-  
-    return Promise.race([
-      promise,
-      timeout
-    ])
-    .then((result) => {
-      clearTimeout(id)
-  
-      /**
-       * ... we also need to pass the result back
-       */
-      return result
-    })
-}
-
 module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
-},{"./api-web":3,"./auth":4,"./server-date":11,"acebase-core":24}],3:[function(require,module,exports){
+},{"./api-web":3,"./auth":4,"./server-date":12,"acebase-core":25}],3:[function(require,module,exports){
 const { Api, Transport, ID, PathInfo, ColorStyle } = require('acebase-core');
 const connectSocket = require('socket.io-client');
 const Base64 = require('./base64');
 const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
+const { promiseTimeout } = require('./promise-timeout');
 const _request = require('./request');
 const _websocketRequest = (socket, event, data, accessToken) => {
 
@@ -269,6 +212,11 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     return promise;
 }
 
+const CONNECTION_STATE_DISCONNECTED = 'disconnected';
+const CONNECTION_STATE_CONNECTING = 'connecting';
+const CONNECTION_STATE_CONNECTED = 'connected';
+const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
+
 /**
  * Api to connect to a remote AceBase server over http(s)
  */
@@ -283,8 +231,7 @@ class WebApi extends Api {
         this.url = settings.url;
         this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.dbname = dbname;
-        this._connected = false;
-        this._connecting = false;
+        this._connectionState = CONNECTION_STATE_DISCONNECTED;
         if (settings.cache && settings.cache.enabled !== false) {
             this._cache = {
                 db: settings.cache.db,
@@ -313,7 +260,7 @@ class WebApi extends Api {
             if (this.socket !== null && typeof this.socket === 'object') {
                 this.disconnect();
             }
-            this._connecting = true;
+            this._connectionState = CONNECTION_STATE_CONNECTING;
             this.debug.log(`Connecting to AceBase server "${this.url}"`);
             if (!this.url.startsWith('https')) {
                 this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(ColorStyle.red))
@@ -322,57 +269,52 @@ class WebApi extends Api {
             return new Promise((resolve, reject) => {
                 const socket = this.socket = connectSocket(this.url);
 
-                socket.on("reconnect_attempt", () => {
-                    this._connecting = true;
-                });
-
-                socket.on("reconnect_error", (err) => {
-                    this._connecting = false;
-                });
-
+                let retryConnectTimeout;
                 const retryConnect = () => {
-                    const scheduleRetry = () => {
-                        // Try connecting again in a minute
-                        setTimeout(() => { this.connect().catch(err => { scheduleRetry(); }); }, 60 * 1000);
-                    };
+                    const connect = () => {
+                        if (!this.isConnecting) { return; }
+                        this.connect();
+                    }
+
+                    // Try connecting again in a minute
+                    clearTimeout(retryConnectTimeout);
+                    retryConnectTimeout = setTimeout(connect, 60 * 1000);
+
+                    // Or, when browser goes online
                     if (typeof window !== 'undefined' && window.navigator && !window.navigator.onLine) {
                         // Monitor browser online event
-                        const listener = () => {
-                            window.removeEventListener('online', listener);
-                            scheduleRetry();
+                        const handleOnlineEvent = () => {
+                            this.debug.log(`Connecting to server after browser online event`);
+                            window.removeEventListener('online', handleOnlineEvent);
+                            clearTimeout(retryConnectTimeout);
+                            connect();
                         }
-                        window.addEventListener('online', listener);
-                    }
-                    else {
-                        scheduleRetry();
+                        window.addEventListener('online', handleOnlineEvent);
                     }
                 };
 
+                // socket.on("reconnect_attempt", () => {
+                //     this._connecting = true;
+                // });
+
+                // socket.on("reconnect_error", (err) => {
+                //     this._connecting = false;
+                // });
+
                 socket.on("reconnect_failed", (err) => {
-                    // Reconnecting failed
+                    // Reconnecting failed after reconnectionAttempts, which is set to Infinity by default, so this should never happen
                     retryConnect();
                 });
 
                 socket.on("connect_error", (data) => {
                     // New connection failed to establish
-                    this._connected = false;
                     this.debug.error(`Websocket connection error: ${data}`);
-                    // reject(new Error(`connect_error: ${data}`));
-                    retryConnect();
-                });
-
-                socket.on("connect_timeout", (data) => {
-                    // New connection failed to establish
-                    this._connected = false;
-                    this.debug.error(`Websocket connection timeout`);
-                    // reject(new Error(`connect_timeout`));
+                    // Keep connection state at CONNECTING, retry
                     retryConnect();
                 });
 
                 socket.on("connect", (data) => {
-                    this._connecting = false;
-                    this._connected = true;
-                    // eventCallback && eventCallback('connect');
+                    this._connectionState = CONNECTION_STATE_CONNECTED;
 
                     // Sign in
                     let signInPromise = Promise.resolve();
@@ -411,9 +353,17 @@ class WebApi extends Api {
                     });
                 });
 
-                socket.on("disconnect", (data) => {
+                socket.on("disconnect", reason => {
                     // Existing connection was broken, by us or network
-                    this._connected = false;
+                    if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
+                        // disconnect was requested by us: reason === 'client namespace disconnect'
+                        this._connectionState = CONNECTION_STATE_DISCONNECTED;
+                    }
+                    else {
+                        // Automatic reconnect should be done by socket.io
+                        this._connectionState = CONNECTION_STATE_CONNECTING;
+                        retryConnect(); // schedule manual reconnection anyway, won't interfere with socket.io
+                    }
                     eventCallback && eventCallback('disconnect');
                 });
 
@@ -560,11 +510,10 @@ class WebApi extends Api {
 
         this.disconnect = () => {
             if (this.socket !== null && typeof this.socket === 'object') {
+                this._connectionState = CONNECTION_STATE_DISCONNECTING;
                 this.socket.disconnect();
                 this.socket = null;
             }
-            this._connected = false;
-            this._connecting = false;
         }
 
         this.subscribe = (path, event, callback) => {
@@ -581,7 +530,7 @@ class WebApi extends Api {
                 this._cache.db.api.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
             }
 
-            if (serverAlreadyNotifying || !this._connected) {
+            if (serverAlreadyNotifying || !this.isConnected) {
                 return Promise.resolve();
             }
             if (event === 'mutated') {
@@ -633,20 +582,22 @@ class WebApi extends Api {
             if (pathSubs.length === 0) {
                 // Unsubscribed from all events on path
                 delete subscriptions[path];
-                if (this._connected) {
-                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: accessToken }, accessToken);
+                if (this.isConnected) {
+                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: accessToken }, accessToken)
+                        .catch(err => this.debug.error(`Failed to unsubscribe from event(s) on "${path}": ${err.message}`));
                 }
             }
-            else if (this._connected && !pathSubs.some(subscr => subscr.event === event)) {
+            else if (this.isConnected && !pathSubs.some(subscr => subscr.event === event)) {
                 // No callbacks left for specific event
-                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: accessToken }, accessToken);
+                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: accessToken }, accessToken)
+                    .catch(err => this.debug.error(`Failed to unsubscribe from event "${event}" on "${path}": ${err.message}`));
             }
-            if (this._connected && hadMutatedEvents && !hasMutatedEvents) {
+            if (this.isConnected && hadMutatedEvents && !hasMutatedEvents) {
                 // If any descendant paths have mutated events, resubscribe those
                 const promises = Object.keys(subscriptions)
                     .filter(otherPath => PathInfo.get(otherPath).isDescendantOf(path) && subscriptions[otherPath].some(sub => sub.event === 'mutated'))
                     .map(path => _websocketRequest(this.socket, 'subscribe', { path: path, event: 'mutated' }, accessToken))
-                    .map(promise => promise.catch(err => console.error(err)));
+                    .map(promise => promise.catch(err => this.debug.error(`Failed to subscribe to event "${event}" on path "${path}": ${err.message}`)));
                 promise = Promise.all([promise, ...promises]);
             }
             return promise;
@@ -714,7 +665,7 @@ class WebApi extends Api {
                 // TODO: socket.on('disconnect', disconnectedCallback);
                 this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken, context: options.context });
             };
-            if (this._connected) { 
+            if (this.isConnected) { 
                 connectedCallback(); 
             }
             else { 
@@ -749,7 +700,7 @@ class WebApi extends Api {
          * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
          */
         this._request = (options) => {
-            if (this._connected || options.ignoreConnectionState === true) { 
+            if (this.isConnected || options.ignoreConnectionState === true) { 
                 return _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context })
                 .catch(err => {
                     throw err;
@@ -761,35 +712,22 @@ class WebApi extends Api {
                 // are only executed if they are not allowed to use cached responses. Wait for a
                 // connection to be established (max 1s), then retry or fail
 
-                if (!this._connecting) {
+                if (!this.isConnecting) {
                     // We're currently not trying to connect. Fail now
                     return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
                 }
 
-                let resolve, reject, 
-                    promise = new Promise((rs, rj) => { resolve = rs; reject = rj; }),
-                    state = 'wait',
-                    timeout = setTimeout(() => {
-                        if (state !== 'wait') { return; }
-                        state = 'timeout';
-                        this.socket.off('connect', callback); // Cancel connect wait
-                        reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
-                    }, 1000),
-                    callback = () => {
-                        if (state !== 'wait') { return; }
-                        state = 'connected';
-                        clearTimeout(timeout); // Cancel timeout
-                        this._request(options)
-                        .then(resolve)
-                        .catch(reject);
-                    };
-                this.socket.on('connect', callback); // wait for connection
-                return promise;
+                const connectPromise = new Promise(resolve => this.socket.once('connect', resolve));
+                return promiseTimeout(connectPromise, 1000, 'Waiting for connection')
+                .catch(err => {
+                    throw new Error(NOT_CONNECTED_ERROR_MESSAGE);
+                })
+                .then(() => this._request(options));
             }
         };
 
         this.signIn = (username, password) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
@@ -806,7 +744,7 @@ class WebApi extends Api {
         };
 
         this.signInWithEmail = (email, password) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
@@ -819,7 +757,7 @@ class WebApi extends Api {
         };
 
         this.signInWithToken = (token) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } })
             .then(result => {
                 accessToken = result.access_token;
@@ -832,7 +770,7 @@ class WebApi extends Api {
         };
 
         this.startAuthProviderSignIn = (providerName, callbackUrl) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` })
             .then(result => {
                 return { redirectUrl: result.redirectUrl };
@@ -858,7 +796,7 @@ class WebApi extends Api {
         }
 
         this.refreshAuthProviderToken = (providerName, refreshToken) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ url: `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}` })
             .then(result => {
                 return result;
@@ -880,7 +818,7 @@ class WebApi extends Api {
             if (typeof options.clearCache !== 'boolean') { options.clearCache = false; }
 
             if (!accessToken) { return Promise.resolve(); }
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere: options.everywhere } })
             .then(() => {
                 this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
@@ -901,7 +839,7 @@ class WebApi extends Api {
 
         this.changePassword = (uid, currentPassword, newPassword) => {
             if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } })
             .then(result => {
                 accessToken = result.access_token;
@@ -913,7 +851,7 @@ class WebApi extends Api {
         };
     
         this.forgotPassword = (email) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/forgot_password`, data: { email } })
             .catch(err => {
                 throw err;
@@ -921,7 +859,7 @@ class WebApi extends Api {
         };
 
         this.verifyEmailAddress = (verificationCode) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/verify_email`, data: { code: verificationCode } })
             .catch(err => {
                 throw err;
@@ -929,7 +867,7 @@ class WebApi extends Api {
         };
 
         this.resetPassword = (resetCode, newPassword) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/reset_password`, data: { code: resetCode, password: newPassword } })
             .catch(err => {
                 throw err;
@@ -937,7 +875,7 @@ class WebApi extends Api {
         };
 
         this.signUp = (details, signIn = true) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signup`, data: details })
             .then(result => {
                 if (signIn) {
@@ -952,7 +890,7 @@ class WebApi extends Api {
         };
 
         this.updateUserDetails = (details) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/update`, data: details })
             .then(result => {
                 return { user: result.user };
@@ -963,7 +901,7 @@ class WebApi extends Api {
         }
 
         this.deleteAccount = (uid, signOut = true) => {
-            if (!this._connected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
             return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } })
             .then(result => {
                 if (signOut) {
@@ -978,18 +916,20 @@ class WebApi extends Api {
         }
     }
 
+    get isConnected() {
+        return this._connectionState === CONNECTION_STATE_CONNECTED;
+    }
+    get isConnecting() {
+        return this._connectionState === CONNECTION_STATE_CONNECTING;
+    }
+
     stats(options = undefined) {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
     sync(options = { fetchFreshData: true, eventCallback: null }) {
         // Sync cache
-        if (!this._connected) {
-            return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
-        }
-        // if (!this._cache) {
-        //     return Promise.reject(new Error(`no cache database is used`));
-        // }
+        if (!this.isConnected) {  return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
         if (this._cache && !this._cache.db.isReady) {
             return Promise.reject(new Error(`cache database is not ready yet`));
         }
@@ -1059,7 +999,7 @@ class WebApi extends Api {
                             .catch(err => {
                                 // Updating remote db failed
                                 this.debug.error(`SYNC change ${id} failed: ${err.message}`);
-                                if (!this._connected) {
+                                if (!this.isConnected) {
                                     // Connection was broken, should retry later
                                     throw err;
                                 }
@@ -1157,7 +1097,8 @@ class WebApi extends Api {
                     const subs = this._subscriptions[path];
                     const valueSubscriptions = subs.filter(s => s.event === 'value');
                     if (valueSubscriptions.length === 0) {
-                        return subs.forEach(sub => this.debug.warn(`Subscription "${sub.event}" on path "${path}" might have missed events while offline. Data should be reloaded!`));
+                        const events = subs.reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
+                        return events.forEach(event => this.debug.warn(`Subscription "${event}" on path "${path}" might have missed events while offline. Data should be reloaded!`));
                     }
                     const p = this.get(path, { allow_cache: false }).then(value => {
                         valueSubscriptions.forEach(subscr => subscr.callback(null, path, value));
@@ -1183,7 +1124,7 @@ class WebApi extends Api {
     set(path, value, options = { allow_cache: true, context: {} }) {
         if (!options.context) { options.context = {}; }
         const useCache = this._cache && options.allow_cache !== false;
-        const useServer = this._connected;
+        const useServer = this.isConnected;
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -1256,7 +1197,12 @@ class WebApi extends Api {
                     });
                 });
             }
-        })
+        });
+
+        if (!useServer) {
+            // Fixes issue #7
+            return cachePromise;
+        }
 
         // return server promise by default, so caller can handle potential authorization issues
         return this._cache.priority === 'cache' ? cachePromise : serverPromise;
@@ -1264,7 +1210,7 @@ class WebApi extends Api {
 
     update(path, updates, options = { allow_cache: true, context: {} }) {
         const useCache = this._cache && options && options.allow_cache !== false;
-        const useServer = this._connected;
+        const useServer = this.isConnected;
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -1345,6 +1291,11 @@ class WebApi extends Api {
             }
         })
 
+        if (!useServer) {
+            // Fixes issue #7
+            return cachePromise;
+        }
+
         // return server promise by default, so caller can handle potential authorization issues
         return this._cache.priority === 'cache' ? cachePromise : serverPromise;
     }
@@ -1402,7 +1353,7 @@ class WebApi extends Api {
         if (!useCache) {
             return getServerValue();
         }
-        else if (!this._connected || this._cache.priority === 'cache') {
+        else if (!this.isConnected || this._cache.priority === 'cache') {
             return getCacheValue();
         }
         else {
@@ -1476,7 +1427,7 @@ class WebApi extends Api {
         if (!useCache) {
             return getServerExists();
         }
-        else if (!this._connected) {
+        else if (!this.isConnected) {
             return getCacheExists();
         }
         else {
@@ -1579,7 +1530,7 @@ class WebApi extends Api {
      */
     query(path, query, options = { snapshots: false, allow_cache: true, eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
         const allowCache = options && options.allow_cache === true;
-        if (allowCache && !this._connected && this._cache) {
+        if (allowCache && !this.isConnected && this._cache) {
             // Not connected, query cache db
             return this._cache.db.api.query(PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
         }
@@ -1655,7 +1606,7 @@ class WebApi extends Api {
 }
 
 module.exports = { WebApi };
-},{"./base64":5,"./request":9,"./request/error":10,"acebase-core":24,"socket.io-client":1}],4:[function(require,module,exports){
+},{"./base64":5,"./promise-timeout":9,"./request":10,"./request/error":11,"acebase-core":25,"socket.io-client":1}],4:[function(require,module,exports){
 const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
 // const { AceBaseClient } = require('./acebase-client');
 
@@ -2020,7 +1971,7 @@ class AceBaseClientAuth {
 }
 
 module.exports = { AceBaseClientAuth };
-},{"./user":12}],5:[function(require,module,exports){
+},{"./user":13}],5:[function(require,module,exports){
 const Base64 = {
     encode(str) {
         return btoa(unescape(encodeURIComponent(str)));
@@ -2066,9 +2017,32 @@ module.exports = {
     proxyAccess,
     ServerDate
 };
-},{"./acebase-client":2,"./server-date":11,"acebase-core":24}],8:[function(require,module,exports){
+},{"./acebase-client":2,"./server-date":12,"acebase-core":25}],8:[function(require,module,exports){
 module.exports = performance;
 },{}],9:[function(require,module,exports){
+class PromiseTimeoutError extends Error {}
+function promiseTimeout(promise, ms, comment) {
+    let id;
+    const timeout = new Promise(resolve => {
+        id = setTimeout(() => {
+            resolve(new PromiseTimeoutError(`Promise timed out after ${ms}ms: ${comment}`))
+        }, ms);
+    });
+  
+    return Promise.race([
+        promise,
+        timeout
+    ])
+    .then(result => {
+        if (result instanceof PromiseTimeoutError) {
+            throw result;
+        }
+        clearTimeout(id);
+        return result;
+    });
+}
+module.exports = { PromiseTimeoutError, promiseTimeout };
+},{}],10:[function(require,module,exports){
 const { AceBaseRequestError } = require('./error');
 
 async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) {
@@ -2150,7 +2124,7 @@ async function request(method, url, options = { accessToken: null, data: null, d
 }
 
 module.exports = request;
-},{"./error":10}],10:[function(require,module,exports){
+},{"./error":11}],11:[function(require,module,exports){
 class AceBaseRequestError extends Error {
     constructor(request, response, code, message) {
         super(message);
@@ -2162,7 +2136,7 @@ class AceBaseRequestError extends Error {
 const NOT_CONNECTED_ERROR_MESSAGE = 'remote database is not connected'; //'AceBaseClient is not connected';
 
 module.exports = { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE };
-},{}],11:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 const { ID } = require('acebase-core');
 const performance = require('./performance');
 
@@ -2216,7 +2190,7 @@ class ServerDate extends Date {
 }
 
 module.exports = { ServerDate, setServerBias };
-},{"./performance":8,"acebase-core":24}],12:[function(require,module,exports){
+},{"./performance":8,"acebase-core":25}],13:[function(require,module,exports){
 
 class AceBaseUser {
     /**
@@ -2279,7 +2253,7 @@ class AceBaseAuthResult {
 }
 
 module.exports = { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult };
-},{}],13:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AceBaseBase = exports.AceBaseBaseSettings = void 0;
@@ -2433,7 +2407,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
 }
 exports.AceBaseBase = AceBaseBase;
 
-},{"./data-reference":20,"./debug":22,"./optional-observable":25,"./simple-colors":30,"./simple-event-emitter":31,"./type-mappings":34}],14:[function(require,module,exports){
+},{"./data-reference":21,"./debug":23,"./optional-observable":26,"./simple-colors":31,"./simple-event-emitter":32,"./type-mappings":35}],15:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Api = void 0;
@@ -2468,7 +2442,7 @@ class Api {
 }
 exports.Api = Api;
 
-},{}],15:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ascii85 = void 0;
@@ -2550,7 +2524,7 @@ exports.ascii85 = {
     }
 };
 
-},{}],16:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const pad_1 = require("../pad");
@@ -2562,7 +2536,7 @@ function fingerprint() {
 }
 exports.default = fingerprint;
 
-},{"../pad":18}],17:[function(require,module,exports){
+},{"../pad":19}],18:[function(require,module,exports){
 "use strict";
 /**
  * cuid.js
@@ -2615,7 +2589,7 @@ function cuid(timebias = 0) {
 exports.default = cuid;
 // Not using slugs, removed code
 
-},{"./fingerprint":16,"./pad":18}],18:[function(require,module,exports){
+},{"./fingerprint":17,"./pad":19}],19:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function pad(num, size) {
@@ -2625,7 +2599,7 @@ function pad(num, size) {
 exports.default = pad;
 ;
 
-},{}],19:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.proxyAccess = exports.LiveDataProxy = void 0;
@@ -2715,7 +2689,7 @@ class LiveDataProxy {
                 return true;
             });
             if (!proceed) {
-                console.error(`Cached value appears outdated, will be reloaded`);
+                console.warn(`Cached value of live data proxy on "${ref.path}" appears outdated, will be reloaded`);
                 await reload();
             }
         });
@@ -3042,11 +3016,36 @@ class LiveDataProxy {
             onMutationCallback && onMutationCallback(newSnap, true);
             // TODO: run all other subscriptions
         };
+        let waitingForReconnectSync = false; // Prevent quick connect/disconnect pulses to stack sync_done event handlers
+        ref.db.on('disconnect', () => {
+            // Handle disconnect, can only happen when connected to a remote server with an AceBaseClient
+            // Wait for server to connect again
+            ref.db.once('connect', () => {
+                // We're connected again
+                // Now wait for sync_end event, so any proxy changes will have been pushed to the server
+                if (waitingForReconnectSync || proxy === null) {
+                    return;
+                }
+                waitingForReconnectSync = true;
+                ref.db.once('sync_done', () => {
+                    // Reload proxy value now
+                    waitingForReconnectSync = false;
+                    if (proxy === null) {
+                        return;
+                    }
+                    console.log(`Reloading proxy value after connect & sync`);
+                    reload();
+                });
+            });
+        });
         return {
             async destroy() {
                 await processPromise;
-                subscription.stop();
-                clientSubscriptions.forEach(cs => cs.subscription.stop());
+                const promises = [
+                    subscription.stop(),
+                    ...clientSubscriptions.map(cs => cs.subscription.stop())
+                ];
+                await Promise.all(promises);
                 cache = null; // Remove cache
                 proxy = null;
             },
@@ -3137,10 +3136,16 @@ function createProxy(context) {
         get(target, prop, receiver) {
             target = getTargetValue(context.root.cache, context.target);
             if (typeof prop === 'symbol') {
-                if (prop.toString() === isProxy.toString()) {
+                if (prop.toString() === Symbol.iterator.toString()) {
+                    // Use .values for @@iterator symbol
+                    prop = 'values';
+                }
+                else if (prop.toString() === isProxy.toString()) {
                     return true;
                 }
-                return Reflect.get(target, prop, receiver);
+                else {
+                    return Reflect.get(target, prop, receiver);
+                }
             }
             if (target === null || typeof target !== 'object') {
                 throw new Error(`Cannot read property "${prop}" of ${target}. Value of path "/${targetRef.path}" is not an object (anymore)`);
@@ -3164,6 +3169,28 @@ function createProxy(context) {
                 }
                 childProxies.splice(childProxies.indexOf(childProxy), 1);
             }
+            const proxifyChildValue = (prop) => {
+                const value = target[prop]; //
+                let childProxy = childProxies.find(child => child.prop === prop);
+                if (childProxy) {
+                    if (childProxy.typeof === typeof value) {
+                        return childProxy.value;
+                    }
+                    childProxies.splice(childProxies.indexOf(childProxy), 1);
+                }
+                if (typeof value !== 'object') {
+                    // Can't proxify non-object values
+                    return value;
+                }
+                const newChildProxy = createProxy({ root: context.root, target: context.target.concat(prop), id: context.id, flag: context.flag });
+                childProxies.push({ typeof: typeof value, prop, value: newChildProxy });
+                return newChildProxy;
+            };
+            const unproxyValue = (value) => {
+                return value !== null && typeof value === 'object' && value[isProxy]
+                    ? value.getTarget()
+                    : value;
+            };
             // If the property contains a simple value, return it. 
             if (['string', 'number', 'boolean'].includes(typeof value)
                 || value instanceof Date
@@ -3174,6 +3201,19 @@ function createProxy(context) {
                 return value;
             }
             const isArray = target instanceof Array;
+            function valueOf(warn = true) {
+                warn && console.warn(`Use getTarget with caution - any changes will not be synchronized!`);
+                return target;
+            }
+            ;
+            if (prop === 'valueOf') {
+                return valueOf.bind(this, false);
+            }
+            else if (prop === 'toString') {
+                return function toString() {
+                    return `[LiveDataProxy for "${targetRef.path}"]`;
+                };
+            }
             if (typeof value === 'undefined') {
                 if (prop === 'push') {
                     // Push item to an object collection
@@ -3186,10 +3226,7 @@ function createProxy(context) {
                 }
                 if (prop === 'getTarget') {
                     // Get unproxied readonly (but still live) version of data.
-                    return function getTarget(warn = true) {
-                        warn && console.warn(`Use getTarget with caution - any changes will not be synchronized!`);
-                        return target;
-                    };
+                    return valueOf;
                 }
                 if (prop === 'getRef') {
                     // Gets the DataReference to this data target
@@ -3201,12 +3238,37 @@ function createProxy(context) {
                 if (prop === 'forEach') {
                     return function forEach(callback) {
                         const keys = Object.keys(target);
-                        for (let i = 0; i < keys.length && callback(target[keys[i]], keys[i], i) !== false; i++) { }
+                        // Fix: callback with unproxied value
+                        let stop = false;
+                        for (let i = 0; !stop && i < keys.length; i++) {
+                            const key = keys[i];
+                            const value = proxifyChildValue(key); //, target[key]
+                            stop = callback(value, key, i) === false;
+                        }
+                    };
+                }
+                if (['values', 'entries', 'keys'].includes(prop)) {
+                    return function* generator() {
+                        const keys = Object.keys(target);
+                        for (let key of keys) {
+                            if (prop === 'keys') {
+                                yield key;
+                            }
+                            else {
+                                const value = proxifyChildValue(key); //, target[key]
+                                if (prop === 'entries') {
+                                    yield [key, value];
+                                }
+                                else {
+                                    yield value;
+                                }
+                            }
+                        }
                     };
                 }
                 if (prop === 'toArray') {
                     return function toArray(sortFn) {
-                        const arr = Object.keys(target).map(key => target[key]);
+                        const arr = Object.keys(target).map(key => proxifyChildValue(key)); //, target[key]
                         if (sortFn) {
                             arr.sort(sortFn);
                         }
@@ -3252,14 +3314,20 @@ function createProxy(context) {
             }
             else if (typeof value === 'function') {
                 if (isArray) {
-                    // Handle array functions
+                    // Handle array methods
                     const writeArray = (action) => {
                         context.flag('write', context.target);
                         return action();
                     };
+                    const cleanArrayValues = values => values.map(value => {
+                        value = unproxyValue(value);
+                        removeVoidProperties(value);
+                        return value;
+                    });
+                    // Methods that directly change the array:
                     if (prop === 'push') {
                         return function push(...items) {
-                            items.forEach(item => removeVoidProperties(item));
+                            items = cleanArrayValues(items);
                             return writeArray(() => target.push(...items)); // push the items to the cache array
                         };
                     }
@@ -3270,7 +3338,7 @@ function createProxy(context) {
                     }
                     if (prop === 'splice') {
                         return function splice(start, deleteCount, ...items) {
-                            items.forEach(item => removeVoidProperties(item));
+                            items = cleanArrayValues(items);
                             return writeArray(() => target.splice(start, deleteCount, ...items));
                         };
                     }
@@ -3281,7 +3349,7 @@ function createProxy(context) {
                     }
                     if (prop === 'unshift') {
                         return function unshift(...items) {
-                            items.forEach(item => removeVoidProperties(item));
+                            items = cleanArrayValues(items);
                             return writeArray(() => target.unshift(...items));
                         };
                     }
@@ -3295,25 +3363,70 @@ function createProxy(context) {
                             return writeArray(() => target.reverse());
                         };
                     }
-                    if (prop === 'indexOf') {
-                        return function indexOf(value) {
-                            if (value[isProxy]) {
+                    // Methods that do not change the array themselves, but
+                    // have callbacks that might, or return child values:
+                    if (['indexOf', 'lastIndexOf'].includes(prop)) {
+                        return function indexOf(item, start) {
+                            if (item !== null && typeof item === 'object' && item[isProxy]) {
                                 // Use unproxied value, or array.indexOf will return -1 (fixes issue #1)
-                                value = value.getTarget(false);
+                                item = item.getTarget(false);
                             }
-                            return target.indexOf(value);
+                            return target[prop](item, start);
+                        };
+                    }
+                    if (['forEach', 'every', 'some', 'filter', 'map'].includes(prop)) {
+                        return function iterate(callback) {
+                            return target[prop]((value, i) => {
+                                return callback(proxifyChildValue(i), i, proxy); //, value
+                            });
+                        };
+                    }
+                    if (['reduce', 'reduceRight'].includes(prop)) {
+                        return function reduce(callback) {
+                            return target[prop]((prev, value, i) => {
+                                return callback(prev, proxifyChildValue(i), i, proxy); //, value
+                            });
+                        };
+                    }
+                    if (['find', 'findIndex'].includes(prop)) {
+                        return function find(callback) {
+                            let value = target[prop]((value, i) => {
+                                return callback(proxifyChildValue(i), i, proxy); // , value
+                            });
+                            if (prop === 'find' && value) {
+                                let index = target.indexOf(value);
+                                value = proxifyChildValue(index); //, value
+                            }
+                            return value;
+                        };
+                    }
+                    if (['values', 'entries', 'keys'].includes(prop)) {
+                        return function* generator() {
+                            for (let i = 0; i < target.length; i++) {
+                                if (prop === 'keys') {
+                                    yield i;
+                                }
+                                else {
+                                    const value = proxifyChildValue(i); //, target[i]
+                                    if (prop === 'entries') {
+                                        yield [i, value];
+                                    }
+                                    else {
+                                        yield value;
+                                    }
+                                }
+                            }
                         };
                     }
                 }
-                // Other function, should not alter its value
-                return function fn(...args) {
-                    return target[prop](...args);
-                };
+                // Other function (or not an array), should not alter its value
+                // return function fn(...args) {
+                //     return target[prop](...args);
+                // }
+                return value;
             }
             // Proxify any other value
-            const proxy = createProxy({ root: context.root, target: context.target.concat(prop), id: context.id, flag: context.flag });
-            childProxies.push({ typeof: typeof value, prop, value: proxy });
-            return proxy;
+            return proxifyChildValue(prop); //, value
         },
         set(target, prop, value, receiver) {
             // Eg: chats.chat1.title = 'New chat title';
@@ -3405,7 +3518,8 @@ function createProxy(context) {
             return Reflect.getPrototypeOf(target);
         }
     };
-    return new Proxy({}, handler);
+    const proxy = new Proxy({}, handler);
+    return proxy;
 }
 function removeVoidProperties(obj) {
     if (typeof obj !== 'object') {
@@ -3429,7 +3543,7 @@ function proxyAccess(proxiedValue) {
 }
 exports.proxyAccess = proxyAccess;
 
-},{"./data-snapshot":21,"./id":23,"./optional-observable":25,"./path-reference":27,"./process":28,"./utils":35}],20:[function(require,module,exports){
+},{"./data-snapshot":22,"./id":24,"./optional-observable":26,"./path-reference":28,"./process":29,"./utils":36}],21:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataReferenceQuery = exports.DataReference = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = void 0;
@@ -4341,7 +4455,7 @@ class DataReferencesArray extends Array {
 }
 exports.DataReferencesArray = DataReferencesArray;
 
-},{"./data-proxy":19,"./data-snapshot":21,"./id":23,"./optional-observable":25,"./path-info":26,"./subscription":32}],21:[function(require,module,exports){
+},{"./data-proxy":20,"./data-snapshot":22,"./id":24,"./optional-observable":26,"./path-info":27,"./subscription":33}],22:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MutationsDataSnapshot = exports.DataSnapshot = void 0;
@@ -4492,7 +4606,7 @@ class MutationsDataSnapshot extends DataSnapshot {
 }
 exports.MutationsDataSnapshot = MutationsDataSnapshot;
 
-},{"./path-info":26}],22:[function(require,module,exports){
+},{"./path-info":27}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DebugLogger = void 0;
@@ -4522,7 +4636,7 @@ class DebugLogger {
 }
 exports.DebugLogger = DebugLogger;
 
-},{"./process":28}],23:[function(require,module,exports){
+},{"./process":29}],24:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ID = void 0;
@@ -4544,7 +4658,7 @@ class ID {
 }
 exports.ID = ID;
 
-},{"./cuid":17}],24:[function(require,module,exports){
+},{"./cuid":18}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.DataSnapshot = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
@@ -4589,7 +4703,7 @@ var simple_colors_1 = require("./simple-colors");
 Object.defineProperty(exports, "ColorStyle", { enumerable: true, get: function () { return simple_colors_1.ColorStyle; } });
 Object.defineProperty(exports, "Colorize", { enumerable: true, get: function () { return simple_colors_1.Colorize; } });
 
-},{"./acebase-base":13,"./api":14,"./ascii85":15,"./data-proxy":19,"./data-reference":20,"./data-snapshot":21,"./debug":22,"./id":23,"./path-info":26,"./path-reference":27,"./simple-cache":29,"./simple-colors":30,"./simple-event-emitter":31,"./subscription":32,"./transport":33,"./type-mappings":34,"./utils":35}],25:[function(require,module,exports){
+},{"./acebase-base":14,"./api":15,"./ascii85":16,"./data-proxy":20,"./data-reference":21,"./data-snapshot":22,"./debug":23,"./id":24,"./path-info":27,"./path-reference":28,"./simple-cache":30,"./simple-colors":31,"./simple-event-emitter":32,"./subscription":33,"./transport":34,"./type-mappings":35,"./utils":36}],26:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.setObservable = exports.getObservable = void 0;
@@ -4620,7 +4734,7 @@ function setObservable(Observable) {
 }
 exports.setObservable = setObservable;
 
-},{"rxjs":36}],26:[function(require,module,exports){
+},{"rxjs":37}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathInfo = exports.getChildPath = exports.getPathInfo = exports.getPathKeys = void 0;
@@ -4925,7 +5039,7 @@ class PathInfo {
 }
 exports.PathInfo = PathInfo;
 
-},{}],27:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathReference = void 0;
@@ -4940,7 +5054,7 @@ class PathReference {
 }
 exports.PathReference = PathReference;
 
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = {
@@ -4949,7 +5063,7 @@ exports.default = {
     }
 };
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleCache = void 0;
@@ -4983,7 +5097,7 @@ class SimpleCache {
 }
 exports.SimpleCache = SimpleCache;
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Colorize = exports.SetColorsEnabled = exports.ColorsSupported = exports.ColorStyle = void 0;
@@ -5135,7 +5249,7 @@ String.prototype.colorize = function (style) {
     return Colorize(this, style);
 };
 
-},{"./process":28}],31:[function(require,module,exports){
+},{"./process":29}],32:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleEventEmitter = void 0;
@@ -5220,7 +5334,7 @@ class SimpleEventEmitter {
 }
 exports.SimpleEventEmitter = SimpleEventEmitter;
 
-},{}],32:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EventStream = exports.EventPublisher = exports.EventSubscription = void 0;
@@ -5408,7 +5522,7 @@ class EventStream {
 }
 exports.EventStream = EventStream;
 
-},{}],33:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Transport = void 0;
@@ -5505,7 +5619,7 @@ exports.Transport = {
     }
 };
 
-},{"./ascii85":15,"./path-info":26,"./path-reference":27,"./utils":35}],34:[function(require,module,exports){
+},{"./ascii85":16,"./path-info":27,"./path-reference":28,"./utils":36}],35:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TypeMappings = void 0;
@@ -5809,7 +5923,7 @@ class TypeMappings {
 }
 exports.TypeMappings = TypeMappings;
 
-},{"./data-reference":20,"./data-snapshot":21,"./path-info":26,"./utils":35}],35:[function(require,module,exports){
+},{"./data-reference":21,"./data-snapshot":22,"./path-info":27,"./utils":36}],36:[function(require,module,exports){
 (function (Buffer){(function (){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -6151,9 +6265,9 @@ function defer(fn) {
 exports.defer = defer;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./data-snapshot":21,"./path-reference":27,"./process":28,"buffer":38}],36:[function(require,module,exports){
+},{"./data-snapshot":22,"./path-reference":28,"./process":29,"buffer":39}],37:[function(require,module,exports){
 
-},{}],37:[function(require,module,exports){
+},{}],38:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -6305,7 +6419,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],38:[function(require,module,exports){
+},{}],39:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -8086,7 +8200,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":37,"buffer":38,"ieee754":39}],39:[function(require,module,exports){
+},{"base64-js":38,"buffer":39,"ieee754":40}],40:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m

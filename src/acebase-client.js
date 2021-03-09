@@ -79,7 +79,7 @@ class AceBaseClient extends AceBaseBase {
             });
         });
 
-        let syncRunning = false;
+        let syncRunning = false, firstSync = true;
         const syncPendingChanges = () => {
             if (syncRunning) { 
                 // Already syncing
@@ -91,7 +91,7 @@ class AceBaseClient extends AceBaseBase {
             syncRunning = true;
             return cacheReadyPromise.then(() => {
                 return this.api.sync({
-                    fetchFreshData: ready,
+                    fetchFreshData: !firstSync,
                     eventCallback: (eventName, args) => {
                         this.debug.log(eventName, args || '');
                         this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
@@ -104,59 +104,25 @@ class AceBaseClient extends AceBaseBase {
             })
             .then(() => {
                 syncRunning = false;
+                firstSync = false;
             });
         }
         let syncTimeout = 0;
         this.on('connect', () => {
             syncTimeout && clearTimeout(syncTimeout);
-            syncTimeout = setTimeout(syncPendingChanges, 1000); // Start sync with a short delay to allow client to sign in first
+            syncTimeout = setTimeout(syncPendingChanges, 2500); // Start sync with a short delay to allow client to sign in first
         });
         this.on('signin', () => {
             syncTimeout && clearTimeout(syncTimeout);
             syncPendingChanges();
         });
-        if (cacheDb) {
-            const remoteConnectPromise = new Promise(resolve => this.once('connect', resolve));
-            const syncDonePromise = new Promise(resolve => this.once('sync_done', resolve));
-            cacheReadyPromise.then(() => {
-                // Cache database is ready. Is remote database ready?
-                let waitForSyncEvent = true;
-                return promiseTimeout(
-                    1000, 
-                    remoteConnectPromise, 
-                    'remote connection'
-                )
-                .catch(err => {
-                    // If the connect promise timed out, we'll emit the ready event and use the cache.
-                    // Any other error should halt execution
-                    if (err instanceof PromiseTimeoutError) {
-                        waitForSyncEvent = false;
-                    }
-                    else {
-                        this.debug.error(`Error: ${err.message}`);
-                        throw err;
-                    }
-                })
-                .then(() => {
-                    if (waitForSyncEvent) {
-                        return syncDonePromise;
-                    }
-                })
-                .then(() => {
-                    this.emit('ready');
-                });
-            });
-        }
 
         this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, cache: settings.cache }, evt => {
             if (evt === 'connect') {
                 this._connected = true;
                 this.emit('connect');
                 if (!ready) {
-                    // If no local cache is used, we can emit the ready event now.
-                    if (!settings.cache) {
-                        this.emit('ready');
-                    }
+                    this.emit('ready');
                 }
             }
             else if (evt === 'disconnect') {
@@ -184,30 +150,6 @@ class AceBaseClient extends AceBaseBase {
     callExtension(method, path, data) {
         return this.api.callExtension(method, path, data);
     }
-}
-
-class PromiseTimeoutError extends Error {}
-function promiseTimeout(ms, promise, comment) {
-    let id;
-    if (!promise) { promise = new Promise(() => { /* never resolves */}); }
-    let timeout = new Promise((resolve, reject) => {
-      id = setTimeout(() => {
-        reject(new PromiseTimeoutError(`Promise timed out after ${ms}ms: ${comment}`))
-      }, ms)
-    })
-  
-    return Promise.race([
-      promise,
-      timeout
-    ])
-    .then((result) => {
-      clearTimeout(id)
-  
-      /**
-       * ... we also need to pass the result back
-       */
-      return result
-    })
 }
 
 module.exports = { AceBaseClient, AceBaseClientConnectionSettings };

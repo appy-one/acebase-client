@@ -2595,6 +2595,7 @@ exports.default = pad;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.proxyAccess = exports.LiveDataProxy = void 0;
 const utils_1 = require("./utils");
+const data_reference_1 = require("./data-reference");
 const data_snapshot_1 = require("./data-snapshot");
 const path_reference_1 = require("./path-reference");
 const id_1 = require("./id");
@@ -2622,7 +2623,9 @@ class LiveDataProxy {
      * be written to the database.
      */
     static async create(ref, defaultValue) {
+        ref = new data_reference_1.DataReference(ref.db, ref.path); // Use copy to prevent context pollution on original reference
         let cache, loaded = false;
+        let proxy;
         const proxyId = id_1.ID.generate(); //ref.push().key;
         let onMutationCallback;
         let onErrorCallback = err => {
@@ -2665,7 +2668,7 @@ class LiveDataProxy {
             const context = snap.context();
             const isRemote = ((_a = context.acebase_proxy) === null || _a === void 0 ? void 0 : _a.id) !== proxyId;
             if (!isRemote) {
-                return; // Update was done by us, no need to update cache
+                return; // Update was done through this proxy, no need to update cache
             }
             const mutations = snap.val(false);
             const proceed = mutations.every(mutation => {
@@ -2991,9 +2994,11 @@ class LiveDataProxy {
         cache = snap.val();
         if (cache === null && typeof defaultValue !== 'undefined') {
             cache = defaultValue;
-            await ref.set(cache);
+            await ref
+                .context({ acebase_proxy: { id: proxyId, source: 'defaultvalue', update_id: id_1.ID.generate() } })
+                .set(cache);
         }
-        let proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
+        proxy = createProxy({ root: { ref, get cache() { return cache; } }, target: [], id: proxyId, flag: handleFlag });
         const assertProxyAvailable = () => {
             if (proxy === null) {
                 throw new Error(`Proxy was destroyed`);
@@ -3008,7 +3013,6 @@ class LiveDataProxy {
             mutationQueue.splice(0); // Remove pending mutations. Will be empty in production, but might not be while debugging, leading to weird behaviour.
             const newSnap = await ref.get();
             cache = newSnap.val();
-            proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
             newSnap.ref.context({ acebase_proxy: { id: proxyId, source: 'reload' } });
             onMutationCallback && onMutationCallback(newSnap, true);
             // TODO: run all other subscriptions
@@ -3060,13 +3064,12 @@ class LiveDataProxy {
             set value(val) {
                 // Overwrite the value of the proxied path itself!
                 assertProxyAvailable();
-                if (typeof val === 'object' && val[isProxy]) {
+                if (val !== null && typeof val === 'object' && val[isProxy]) {
                     // Assigning one proxied value to another
-                    val = val.getTarget(false);
+                    val = val.valueOf();
                 }
                 flagOverwritten([]);
                 cache = val;
-                proxy = createProxy({ root: { ref, cache }, target: [], id: proxyId, flag: handleFlag });
             },
             reload,
             onMutation(callback) {
@@ -3144,6 +3147,9 @@ function createProxy(context) {
                     return Reflect.get(target, prop, receiver);
                 }
             }
+            if (prop === 'valueOf') {
+                return function valueOf() { return target; };
+            }
             if (target === null || typeof target !== 'object') {
                 throw new Error(`Cannot read property "${prop}" of ${target}. Value of path "/${targetRef.path}" is not an object (anymore)`);
             }
@@ -3198,15 +3204,7 @@ function createProxy(context) {
                 return value;
             }
             const isArray = target instanceof Array;
-            function valueOf(warn = true) {
-                warn && console.warn(`Use getTarget with caution - any changes will not be synchronized!`);
-                return target;
-            }
-            ;
-            if (prop === 'valueOf') {
-                return valueOf.bind(this, false);
-            }
-            else if (prop === 'toString') {
+            if (prop === 'toString') {
                 return function toString() {
                     return `[LiveDataProxy for "${targetRef.path}"]`;
                 };
@@ -3223,7 +3221,10 @@ function createProxy(context) {
                 }
                 if (prop === 'getTarget') {
                     // Get unproxied readonly (but still live) version of data.
-                    return valueOf;
+                    return function (warn = true) {
+                        warn && console.warn(`Use getTarget with caution - any changes will not be synchronized!`);
+                        return target;
+                    };
                 }
                 if (prop === 'getRef') {
                     // Gets the DataReference to this data target
@@ -3540,7 +3541,7 @@ function proxyAccess(proxiedValue) {
 }
 exports.proxyAccess = proxyAccess;
 
-},{"./data-snapshot":22,"./id":24,"./optional-observable":26,"./path-reference":28,"./process":29,"./utils":36}],21:[function(require,module,exports){
+},{"./data-reference":21,"./data-snapshot":22,"./id":24,"./optional-observable":26,"./path-reference":28,"./process":29,"./utils":36}],21:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataReferenceQuery = exports.DataReference = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = void 0;

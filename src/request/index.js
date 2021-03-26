@@ -40,8 +40,9 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
                 res.on('data', chunk => { data += chunk; });
             }
             res.on('end', () => {
+                const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
                 if (res.statusCode === 200) {
-                    if (data[0] === '{') {
+                    if (isJSON) {
                         let val = JSON.parse(data);
                         // console.log('Delaying data retrieval...')
                         // setTimeout(() => resolve(val), 2500);
@@ -60,7 +61,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
                         body: data
                     };
                     let code = res.statusCode, message = res.statusMessage;
-                    if (data[0] == '{') {
+                    if (isJSON) {
                         let err = JSON.parse(data);
                         if (err.code) { code = err.code; }
                         if (err.message) { message = err.message; }

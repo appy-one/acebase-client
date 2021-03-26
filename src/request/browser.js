@@ -50,8 +50,9 @@ async function request(method, url, options = { accessToken: null, data: null, d
         data = await res.text();
     }
 
+    const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
     if (res.status === 200) {
-        if (data[0] === '{') {
+        if (isJSON) {
             let val = JSON.parse(data);
             return val;
         }
@@ -68,7 +69,7 @@ async function request(method, url, options = { accessToken: null, data: null, d
             body: data
         };
         let code = res.status, message = res.statusText;
-        if (data[0] == '{') {
+        if (isJSON) {
             let err = JSON.parse(data);
             if (err.code) { code = err.code; }
             if (err.message) { message = err.message; }

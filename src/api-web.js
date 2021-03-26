@@ -1433,6 +1433,32 @@ class WebApi extends Api {
             return { version: 'unknown', time: Date.now() }
         });
     }
+
+    setSchema(path, schema) {
+        const data = JSON.stringify({ action: "set", path, schema });
+        return this._request({ method: "POST", url: `${this.url}/schema/${this.dbname}`, data })
+        .catch(err => {
+            throw err;
+        });
+    }
+
+    getSchema(path) {
+        return this._request({ url: `${this.url}/schema/${this.dbname}/${path}` })
+        .catch(err => {
+            throw err;
+        });
+    }
+
+    getSchemas() {
+        return this._request({ url: `${this.url}/schema/${this.dbname}` })
+        .catch(err => {
+            throw err;
+        });
+    }
+
+    validateSchema(path, value, isUpdate) {
+        throw new Error(`Manual schema validation can only be used on standalone databases`);
+    }
 }
 
 module.exports = { WebApi };

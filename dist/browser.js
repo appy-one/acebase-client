@@ -1603,6 +1603,32 @@ class WebApi extends Api {
             return { version: 'unknown', time: Date.now() }
         });
     }
+
+    setSchema(path, schema) {
+        const data = JSON.stringify({ action: "set", path, schema });
+        return this._request({ method: "POST", url: `${this.url}/schema/${this.dbname}`, data })
+        .catch(err => {
+            throw err;
+        });
+    }
+
+    getSchema(path) {
+        return this._request({ url: `${this.url}/schema/${this.dbname}/${path}` })
+        .catch(err => {
+            throw err;
+        });
+    }
+
+    getSchemas() {
+        return this._request({ url: `${this.url}/schema/${this.dbname}` })
+        .catch(err => {
+            throw err;
+        });
+    }
+
+    validateSchema(path, value, isUpdate) {
+        throw new Error(`Manual schema validation can only be used on standalone databases`);
+    }
 }
 
 module.exports = { WebApi };
@@ -2086,8 +2112,9 @@ async function request(method, url, options = { accessToken: null, data: null, d
         data = await res.text();
     }
 
+    const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
     if (res.status === 200) {
-        if (data[0] === '{') {
+        if (isJSON) {
             let val = JSON.parse(data);
             return val;
         }
@@ -2104,7 +2131,7 @@ async function request(method, url, options = { accessToken: null, data: null, d
             body: data
         };
         let code = res.status, message = res.statusText;
-        if (data[0] == '{') {
+        if (isJSON) {
             let err = JSON.parse(data);
             if (err.code) { code = err.code; }
             if (err.message) { message = err.message; }
@@ -2395,6 +2422,22 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
             }
         };
     }
+    get schema() {
+        return {
+            get: (path) => {
+                return this.api.getSchema(path);
+            },
+            set: (path, schema) => {
+                return this.api.setSchema(path, schema);
+            },
+            all: () => {
+                return this.api.getSchemas();
+            },
+            check: (path, value, isUpdate) => {
+                return this.api.validateSchema(path, value, isUpdate);
+            }
+        };
+    }
 }
 exports.AceBaseBase = AceBaseBase;
 
@@ -2430,6 +2473,10 @@ class Api {
     /** Creates an index on key for all child nodes at path */
     createIndex(path, key, options) { throw new NotImplementedError('createIndex'); }
     getIndexes() { throw new NotImplementedError('getIndexes'); }
+    setSchema(path, schema) { throw new NotImplementedError('setSchema'); }
+    getSchema(path) { throw new NotImplementedError('getSchema'); }
+    getSchemas() { throw new NotImplementedError('getSchemas'); }
+    validateSchema(path, value, isUpdate) { throw new NotImplementedError('validateSchema'); }
 }
 exports.Api = Api;
 
@@ -4194,6 +4241,43 @@ class DataReference {
             };
         });
     }
+    async forEach(callbackOrOptions, callback) {
+        let options;
+        if (typeof callbackOrOptions === 'function') {
+            callback = callbackOrOptions;
+        }
+        else {
+            options = callbackOrOptions;
+        }
+        if (typeof callback !== 'function') {
+            throw new TypeError(`No callback function given`);
+        }
+        // Get all children through reflection. This could be tweaked further using paging
+        const info = await this.reflect('children', { limit: 0, skip: 0 }); // Gets ALL child keys
+        const summary = {
+            canceled: false,
+            total: info.list.length,
+            processed: 0
+        };
+        // Iterate through all children until callback returns false
+        for (let i = 0; i < info.list.length; i++) {
+            const key = info.list[i].key;
+            // Get child data
+            const snapshot = await this.child(key).get(options);
+            summary.processed++;
+            if (!snapshot.exists()) {
+                // Was removed in the meantime, skip
+                continue;
+            }
+            // Run callback
+            const result = await callback(snapshot);
+            if (result === false) {
+                summary.canceled = true;
+                break; // Stop looping
+            }
+        }
+        return summary;
+    }
 }
 exports.DataReference = DataReference;
 class DataReferenceQuery {
@@ -4262,8 +4346,8 @@ class DataReferenceQuery {
      * Sorts the query results
      */
     sort(key, ascending = true) {
-        if (typeof key !== "string") {
-            throw `key must be a string`;
+        if (!['string', 'number'].includes(typeof key)) {
+            throw `key must be a string or number`;
         }
         this[_private].order.push({ key, ascending });
         return this;
@@ -4427,6 +4511,43 @@ class DataReferenceQuery {
         }
         this[_private].events[event].splice(index, 1);
         return this;
+    }
+    async forEach(callbackOrOptions, callback) {
+        let options;
+        if (typeof callbackOrOptions === 'function') {
+            callback = callbackOrOptions;
+        }
+        else {
+            options = callbackOrOptions;
+        }
+        if (typeof callback !== 'function') {
+            throw new TypeError(`No callback function given`);
+        }
+        // Get all query results. This could be tweaked further using paging
+        const refs = await this.getRefs();
+        const summary = {
+            canceled: false,
+            total: refs.length,
+            processed: 0
+        };
+        // Iterate through all children until callback returns false
+        for (let i = 0; i < refs.length; i++) {
+            const ref = refs[i];
+            // Get child data
+            const snapshot = await ref.get(options);
+            summary.processed++;
+            if (!snapshot.exists()) {
+                // Was removed in the meantime, skip
+                continue;
+            }
+            // Run callback
+            const result = await callback(snapshot);
+            if (result === false) {
+                summary.canceled = true;
+                break; // Stop looping
+            }
+        }
+        return summary;
     }
 }
 exports.DataReferenceQuery = DataReferenceQuery;

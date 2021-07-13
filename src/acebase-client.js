@@ -13,6 +13,7 @@ class AceBaseClientConnectionSettings {
      * @param {number} settings.port Port number the server is running on
      * @param {boolean} [settings.https=true] Use SSL (https) to access the server or not. Default: true
      * @param {boolean} [settings.autoConnect=true] Automatically connect to the server, or wait until .connect is called
+     * @param {number} [settings.autoConnectDelay=0] Delay before auto connection. Useful for testing scenarios where both server and client start at the same time, and server needs to come online first.
      * @param {object} [settings.cache] Settings for local cache
      * @param {AceBase} [settings.cache.db] AceBase database instance to use for local cache
      * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
@@ -24,6 +25,7 @@ class AceBaseClientConnectionSettings {
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
     }
@@ -66,6 +68,9 @@ class AceBaseClient extends AceBaseBase {
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
 
         this.on('connect', () => {
+            // Disable cache db's ipc events, we are already notified of data changes by the server (prevents double event callbacks)
+            if (cacheDb) { cacheDb.settings.ipcEvents = false; }
+
             // Synchronize date/time
             // const start = Date.now(); // performance.now();
             this.api.getServerInfo()
@@ -77,6 +82,11 @@ class AceBaseClient extends AceBaseBase {
                     bias = info.time - now;
                 setServerBias(bias);
             });
+        });
+
+        this.on('disconnect', () => {
+            // Enable cache db's ipc events, so we get event notifications of changes by other ipc peers while offline
+            if (cacheDb) { cacheDb.settings.ipcEvents = true; }
         });
 
         let syncRunning = false, firstSync = true;
@@ -117,7 +127,7 @@ class AceBaseClient extends AceBaseBase {
             syncPendingChanges();
         });
 
-        this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, cache: settings.cache }, evt => {
+        this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
             if (evt === 'connect') {
                 this._connected = true;
                 this.emit('connect');
@@ -125,6 +135,12 @@ class AceBaseClient extends AceBaseBase {
                     this.emit('ready');
                 }
             }
+            else if (evt === 'connect_error') {
+                this.emit('connect_error', data);
+                if (!ready && cacheDb) { // If cache db is used, we can work without connection
+                    this.emit('ready');
+                }
+            }            
             else if (evt === 'disconnect') {
                 this._connected = false;
                 this.emit('disconnect');

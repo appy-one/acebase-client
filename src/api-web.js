@@ -60,6 +60,7 @@ class WebApi extends Api {
         this._id = ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
         this.url = settings.url;
         this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this._autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.dbname = dbname;
         this._connectionState = CONNECTION_STATE_DISCONNECTED;
         if (settings.cache && settings.cache.enabled !== false) {
@@ -97,50 +98,22 @@ class WebApi extends Api {
             }
     
             return new Promise((resolve, reject) => {
-                const socket = this.socket = connectSocket(this.url);
-
-                let retryConnectTimeout;
-                const retryConnect = () => {
-                    const connect = () => {
-                        if (!this.isConnecting) { return; }
-                        this.connect();
-                    }
-
-                    // Try connecting again in a minute
-                    clearTimeout(retryConnectTimeout);
-                    retryConnectTimeout = setTimeout(connect, 60 * 1000);
-
-                    // Or, when browser goes online
-                    if (typeof window !== 'undefined' && window.navigator && !window.navigator.onLine) {
-                        // Monitor browser online event
-                        const handleOnlineEvent = () => {
-                            this.debug.log(`Connecting to server after browser online event`);
-                            window.removeEventListener('online', handleOnlineEvent);
-                            clearTimeout(retryConnectTimeout);
-                            connect();
-                        }
-                        window.addEventListener('online', handleOnlineEvent);
-                    }
-                };
-
-                // socket.on("reconnect_attempt", () => {
-                //     this._connecting = true;
-                // });
-
-                // socket.on("reconnect_error", (err) => {
-                //     this._connecting = false;
-                // });
-
-                socket.on("reconnect_failed", (err) => {
-                    // Reconnecting failed after reconnectionAttempts, which is set to Infinity by default, so this should never happen
-                    retryConnect();
+                const socket = this.socket = connectSocket(this.url, {
+                    // Use default socket.io connection settings:
+                    autoConnect: true,
+                    reconnection: true,
+                    reconnectionAttempts: Infinity,
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: 5000,
+                    timeout: 20000,
+                    randomizationFactor: 0.5
                 });
 
-                socket.on("connect_error", (data) => {
-                    // New connection failed to establish
-                    this.debug.error(`Websocket connection error: ${data}`);
-                    // Keep connection state at CONNECTING, retry
-                    retryConnect();
+                socket.on("connect_error", err => {
+                    // New connection failed to establish. Attempts will be made to reconnect, but fail for now
+                    this.debug.error(`Websocket connection error: ${err}`);
+                    eventCallback('connect_error', err);
+                    reject(err);
                 });
 
                 socket.on("connect", (data) => {
@@ -192,7 +165,6 @@ class WebApi extends Api {
                     else {
                         // Automatic reconnect should be done by socket.io
                         this._connectionState = CONNECTION_STATE_CONNECTING;
-                        retryConnect(); // schedule manual reconnection anyway, won't interfere with socket.io
                     }
                     eventCallback && eventCallback('disconnect');
                 });
@@ -246,8 +218,8 @@ class WebApi extends Api {
 
                         NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
                         because they rely on change notifications from the server - to tackle this problem, 
-                        cross-tab communication must be implemented. (TODO: Let cache database change notifications
-                        be sent to other tabs, and let them use the same client ID for server communications)
+                        cross-tab communication has been implemented. (TODO: let cache db's use the same client 
+                        ID for server communications)
                     */
                     const causedByUs = context.acebase_mutation && context.acebase_mutation.client_id === this._id;
                     const cacheEnabled = !!(this._cache && this._cache.db);
@@ -335,7 +307,8 @@ class WebApi extends Api {
         };
 
         if (this._autoConnect) {
-            this.connect();
+            if (this._autoConnectDelay) { setTimeout(() => this.connect(), this._autoConnectDelay); }
+            else { this.connect(); }
         }
 
         this.disconnect = () => {
@@ -556,58 +529,34 @@ class WebApi extends Api {
             }
         };
 
-        this.signIn = (username, password) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } })
-            .then(result => {
-                accessToken = result.access_token;
-                // Make sure the connected websocket server knows who we are as well. 
-                // (this is currently not necessary because the server does not support clustering yet, 
-                // but future versions might be connected to a different instance than the one that 
-                // handled the signin http request just now)
-                this.socket.emit("signin", accessToken);
-                return { user: result.user, accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.signIn = async (username, password) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } });
+            accessToken = result.access_token;
+            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well.
+            return { user: result.user, accessToken };
         };
 
-        this.signInWithEmail = (email, password) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } })
-            .then(result => {
-                accessToken = result.access_token;
-                this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
-                return { user: result.user, accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.signInWithEmail = async (email, password) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } });
+            accessToken = result.access_token;
+            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
+            return { user: result.user, accessToken };
         };
 
-        this.signInWithToken = (token) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } })
-            .then(result => {
-                accessToken = result.access_token;
-                this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
-                return { user: result.user, accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.signInWithToken = async (token) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } });
+            accessToken = result.access_token;            
+            this.socket.emit("signin", accessToken);  // Make sure the connected websocket server knows who we are as well
+            return { user: result.user, accessToken };
         };
 
-        this.startAuthProviderSignIn = (providerName, callbackUrl) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` })
-            .then(result => {
-                return { redirectUrl: result.redirectUrl };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.startAuthProviderSignIn = async (providerName, callbackUrl) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` });
+            return { redirectUrl: result.redirectUrl };
         }
 
         this.finishAuthProviderSignIn = (callbackResult) => {
@@ -757,115 +706,145 @@ class WebApi extends Api {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
-    sync(options = { fetchFreshData: true, eventCallback: null }) {
+    async sync(options = { fetchFreshData: true, eventCallback: null }) {
         // Sync cache
-        if (!this.isConnected) {  return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+        if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
         if (this._cache && !this._cache.db.isReady) {
-            return Promise.reject(new Error(`cache database is not ready yet`));
+            throw new Error(`cache database is not ready yet`);
         }
 
         options.eventCallback && options.eventCallback('sync_start');
         const handleStatsUpdateError = err => {
             this.debug.error(`Failed to update cache db stats:`, err);
-        }
-        let totalPendingChanges = 0;
-        const cacheApi = this._cache && this._cache.db.api;
-        let syncPushPromise = Promise.resolve();
-        if (this._cache) {
-            syncPushPromise = cacheApi.get(`${this.dbname}/pending`)
-            .then(pendingChanges => {
+        };
+
+        try {
+            let totalPendingChanges = 0;
+            const cacheApi = this._cache && this._cache.db.api;
+            if (this._cache) {
+                const pendingChanges = await cacheApi.get(`${this.dbname}/pending`);
                 cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
-                if (pendingChanges === null) {
-                    return; // No updates
-                }
-                return Object.keys(pendingChanges)
-                    .sort((a,b) => a < b ? 1 : -1) // sort z-a
-                    .reduce((netChangeIds, id) => {
-                        // Only get effective changes: 
-                        // ignore operations preceeding a 'set' or 'remove' operation on the same and descendant paths
-                        const change = pendingChanges[id];
-                        // Check if the change is about a path that is 'set' or 'remove'd later (earlier in our sort order...)
-                        const pathInfo = PathInfo.get(change.path);
-                        const ignore = netChangeIds.some(id => {
-                            const laterChange = pendingChanges[id];
-                            return (laterChange.path === change.path || pathInfo.isDescendantOf(laterChange.path)) && ['set','remove'].includes(laterChange.type);
+                try {
+                    // Merge mutations to multiple properties into single updates (again)
+                    // This prevents single property updates failing because of schema restrictions
+                    // Eg:
+                    // 1. set users/ewout/name: 'Ewout'
+                    // 2. set users/ewout/address: { street: 'My street', nr: 1 }
+                    // 3. remove users/ewout/age
+                    // 4. remove users/ewout/address/street
+                    // --> should merge into:
+                    // 1. update users/ewout: { name: address: { street: 'My street', nr: 1 }, age: null }
+                    // 4. remove users/ewout/address/street (does not attempt to merge with nested properties of previous updates)
+
+                    debugger;
+                    const ids = Object.keys(pendingChanges || {}).sort(); // sort a-z, process oldest mutation first
+                    const compatibilityMode = ids.map(id => pendingChanges[id]).some(m => m.type === 'update');
+                    const mutations = compatibilityMode
+                        ? ids.map(id => {
+                            // If any "update" mutations are in the db, these are old mutations. Process them unaltered. This is for backward compatibility only, can be removed later. (if code was able to update, mutations could have already been synced too, right?)
+                            const mutation = pendingChanges[id];
+                            mutation.id = id;
+                            return mutation;
                         })
-                        if (!ignore) {
-                            netChangeIds.push(id);
-                        }
-                        else {
-                            delete pendingChanges[id];
-                            cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
-                        }
-                        return netChangeIds;
-                    }, [])
-                    .sort() // sort a-z
-                    .reduce((prevPromise, id) => {
-                        // Now process the net changes
-                        const change = pendingChanges[id];
-                        this.debug.verbose(`SYNC processing change ${id}: `, change);
-                        totalPendingChanges++;
-                        const go = () => {
-                            let promise;
-                            if (change.type === 'update') { 
-                                promise = this.update(change.path, change.data, { allow_cache: false, context: change.context });
-                            }
-                            else if (change.type === 'set') { 
-                                if (!change.data) { change.data = null; } // Before type 'remove' was implemented
-                                promise = this.set(change.path, change.data, { allow_cache: false, context: change.context });
-                            }
-                            else if (change.type === 'remove') {
-                                promise = this.set(change.path, null, { allow_cache: false, context: change.context });
+                        : ids.reduce((mutations, id) => {
+                            const change = pendingChanges[id];
+                            console.assert(['set', 'remove'].includes(change.type), 'Only "set" and "remove" mutations should be present');
+                            if (change.path === '') {
+                                // 'set' on the root path - can't turn this into an update on the parent.
+
+                                // With new approach, there should be no previous 'set' or 'remove' mutation on any node because they 
+                                // have been removed by _addCacheSetMutation. But... if there are old mutations in the db 
+                                // without 'update' mutations (because then we'd have been in compatibilityMode above) - we'll filter
+                                // them out here. In the future we could just add this change without checking, but code below doesn't
+                                // harm the process, so it's ok to stay.
+                                const rootUpdate = mutations.find(u => u.path === '');
+                                if (rootUpdate) { rootUpdate.data = change.data; }
+                                else { change.id = id; mutations.push(change); }
                             }
                             else {
-                                throw new Error(`unsupported change type "${change.type}"`);
+                                const pathInfo = PathInfo.get(change.path);
+                                const parentPath = pathInfo.parentPath;
+                                const parentUpdate = mutations.find(u => u.path === parentPath);
+                                const value =  change.type === 'remove' || change.data === null || typeof change.data === 'undefined' ? null : change.data;
+                                if (!parentUpdate) {
+                                    // Create new parent update
+                                    // change.context.acebase_sync = { }; // TODO: Think about what context we could add to let receivers know why this merged update happens
+                                    mutations.push({ id, type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
+                                }
+                                else {
+                                    // Add this change to parent update
+                                    parentUpdate.data[pathInfo.key] = value;
+                                }
                             }
-                            return promise
-                            .then(() => {
-                                this.debug.verbose(`SYNC change ${id} processed ok`);
-                                delete pendingChanges[id];
-                                cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
-                            })
-                            .catch(err => {
-                                // Updating remote db failed
-                                this.debug.error(`SYNC change ${id} failed: ${err.message}`);
-                                if (!this.isConnected) {
-                                    // Connection was broken, should retry later
-                                    throw err;
-                                }
-                                // We are connected, so the change is not allowed or otherwise denied.
-                                if (typeof err === 'string') { 
-                                    err = { code: 'unknown', message: err, stack: 'n/a' }; 
-                                }
-                                cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
-                                // Delete the change and cached data
-                                cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                                cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, change.data.path), null);
-                                options.eventCallback && options.eventCallback('sync_change_error', { error: err, change });
-                            });
-                        };
-                        return prevPromise.then(go); // Chain to previous promise
-                    }, Promise.resolve());
-            })
-            .then(() => {
-                this.debug.verbose(`SYNC push done`);
-                cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
-                return totalPendingChanges;
-            })
-            .catch(err => {
-                // 1 or more pending changes could not be processed.
-                this.debug.error(`SYNC push error: ${err.message}`);
-                if (typeof err === 'string') { 
-                    err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                            return mutations;
+                        }, []);
+
+                    // for (let id of Object.keys(pendingChanges || {}).sort()) { // sort a-z, process oldest mutation first
+                    //     const change = pendingChanges[id];
+                    for (let m of mutations) {
+                        const id = m.id;
+                        this.debug.verbose(`SYNC processing mutation ${id}: `, m);
+                        totalPendingChanges++;
+
+                        try {
+                            if (m.type === 'update') {
+                                await this.update(m.path, m.data, { allow_cache: false, context: m.context });
+                            }
+                            else if (m.type === 'set') {
+                                if (!m.data) { m.data = null; } // Before type 'remove' was implemented
+                                await this.set(m.path, m.data, { allow_cache: false, context: m.context });
+                            }
+                            else if (m.type === 'remove') {
+                                await this.set(m.path, null, { allow_cache: false, context: m.context });
+                            }
+                            else {
+                                throw new Error(`unsupported mutation type "${m.type}"`);
+                            }
+                            this.debug.verbose(`SYNC mutation ${id} processed ok`);
+                            // delete pendingChanges[id];
+                            // cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                        }
+                        catch(err) {
+                            // Updating remote db failed
+                            this.debug.error(`SYNC mutation ${id} failed: ${err.message}`);
+                            if (!this.isConnected) {
+                                // Connection was broken, should retry later
+                                throw err;
+                            }
+                            // We are connected, so the mutation is not allowed or otherwise denied.
+                            if (typeof err === 'string') { 
+                                err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                            }
+                            cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                            // Delete the mutation and cached data
+                            // cacheApi.set(`${this.dbname}/pending/${id}`, null);
+                            // cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, m.data.path), null);
+                            options.eventCallback && options.eventCallback('sync_change_error', { error: err, change: m });
+                        }
+                    }
+
+                    this.debug.verbose(`SYNC push done`);
+                    
+                    // Remove processed mutations
+                    const removePending = ids.reduce((updates, id) => { updates[id] = null; return updates; }, {});
+                    cacheApi.update(`${this.dbname}/pending`, removePending);
+
+                    // Update stats
+                    cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
                 }
-                cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
-                throw err;
-            });            
-        }
-        let totalRemoteChanges = 0;
-        return syncPushPromise
-        .then(() => {
+                catch(err) {
+                    // 1 or more pending changes could not be processed.
+                    this.debug.error(`SYNC push error: ${err.message}`);
+                    if (typeof err === 'string') { 
+                        err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                    }
+                    cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                    throw err;
+                }            
+            }
+
             // We've pushed our changes, now get fresh data for all paths with active subscriptions
+            let totalRemoteChanges = 0;
             if (this._cache && options.fetchFreshData) {
                 // Find out what data to load
                 const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
@@ -898,21 +877,19 @@ class WebApi extends Api {
                         options.eventCallback && options.eventCallback('sync_pull_error', err);
                     });
                 });
-                return Promise.all(syncPullPromises)
-                .then(() => {
-                    // Unsubscribe temp cache subscriptions
-                    Object.keys(this._subscriptions).forEach(path => {
-                        this._subscriptions[path].forEach(subscr => {
-                            if (typeof subscr.tempCallback !== 'function') { 
-                                // If a subscription was added while synchronizing, it won't have a tempCallback.
-                                // This is no big deal, since our tempCallback is only to update sync statistics.
-                                // Before acebase-client v0.9.29, this caused all subscriptions with current path
-                                // and type to be removed.
-                                return; 
-                            }
-                            cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
-                            delete subscr.tempCallback;
-                        });
+                await Promise.all(syncPullPromises);
+                // Unsubscribe temp cache subscriptions
+                Object.keys(this._subscriptions).forEach(path => {
+                    this._subscriptions[path].forEach(subscr => {
+                        if (typeof subscr.tempCallback !== 'function') { 
+                            // If a subscription was added while synchronizing, it won't have a tempCallback.
+                            // This is no big deal, since our tempCallback is only to update sync statistics.
+                            // Before acebase-client v0.9.29, this caused all subscriptions with current path
+                            // and type to be removed.
+                            return; 
+                        }
+                        cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
+                        delete subscr.tempCallback;
                     });
                 });
             }
@@ -935,20 +912,31 @@ class WebApi extends Api {
                     });
                     syncPullPromises.push(p);
                 });
-                return Promise.all(syncPullPromises);
+                await Promise.all(syncPullPromises);
             }
-        })
-        .then(() => {
+
             this.debug.verbose(`SYNC done`);
             const info = { local: totalPendingChanges, remote: totalRemoteChanges };
             options.eventCallback && options.eventCallback('sync_done', info);
             return info;
-        })
-        .catch(err => {
+        }
+        catch(err) {
             this.debug.error(`SYNC error`, err);
             options.eventCallback && options.eventCallback('sync_error', err);
             throw err;
-        });
+        }
+    }
+
+    async _addCacheSetMutation(path, value, context) {
+        // Remove all previous mutations on this exact path, and descendants
+        const escapedPath = path.replace(/([.*+?\\$^\(\)\[\]\{\}])/g, '\\$1'); // Replace any character that could cripple the regex. NOTE: nobody should use these characters in their data paths in the first place.
+        const re = new RegExp(`^${escapedPath}(?:\\[|/|$)`); // matches path, path/child, path[0], path[0]/etc, path/child/etc/etc
+        await this._cache.db.query(`${this.dbname}/pending`)
+            .filter('path', 'matches', re)
+            .remove();
+
+        // Add new mutation
+        return this._cache.db.api.set(`${this.dbname}/pending/${ID.generate()}`, { type: value !== null ? 'set' : 'remove', path, data: value, context });
     }
 
     set(path, value, options = { allow_cache: true, context: {} }) {
@@ -981,8 +969,8 @@ class WebApi extends Api {
         const rollbackCache = () => {
             return this._cache.db.api.set(cachePath, rollbackValue, { context: options.context });
         };
-        const addPendingTransaction = () => {
-            return this._cache.db.api.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'set', path, data: value, context: options.context });
+        const addPendingTransaction = async () => {
+            await this._addCacheSetMutation(path, value, options.context);
         };
 
         const cachePromise = updateCache()
@@ -1073,8 +1061,58 @@ class WebApi extends Api {
         const rollbackCache = () => {
             return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
-        const addPendingTransaction = () => {
-            return cacheApi.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'update', path, data: updates, context: options.context });
+        const addPendingTransaction = async () => {
+            /*
+
+            In the old method, making multiple changes to the same data would store AND SYNC each
+            mutation separately. To only store net changes to the db, having mixed 'update' and 'set' mutations
+            make this hard. Consider the following mutations:
+
+                1. update 'users/ewout': { name: 'Ewout', surname: 'Stortenbeker' }
+                2. update 'users/ewout/address': { street: 'Main street', nr: 3 }
+                3. update 'users/ewout': { name: 'E', address: null }
+                4. update 'users/ewout': { name: 'E', address: { street: '2nd Ave', nr: 48 } }
+                5. set 'users/ewout/address/street': 'Main street'
+                6. set 'users/ewout/address/nr': 3
+                7. set 'users/ewout/name': 'Ewout'
+
+            If all updated properties are saved as 'set' operations, things become easier:
+
+                1a. set 'users/ewout/name': 'Ewout'
+                1b. set 'users/ewout/surname': 'Stortenbeker'
+                2a. set 'users/ewout/address/street': 'Main street'
+                2b. set 'users/ewout/address/nr': 3
+                3a. set 'users/ewout/name': 'E'
+                3b. set 'users/ewout/address': null
+                4a. set 'users/ewout/name': 'E'
+                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
+                5.  set 'users/ewout/address/street': 'Main street'
+                6.  set 'users/ewout/address/nr': 3
+                7.  set 'users/ewout/name': 'Ewout'
+
+            Now it's easy to remove obsolete mutations, only keeping the last ones:
+
+                1b. set 'users/ewout/surname': 'Stortenbeker'
+                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
+                5.  set 'users/ewout/address/street': 'Main street'
+                6.  set 'users/ewout/address/nr': 3
+                7.  set 'users/ewout/name': 'Ewout'
+
+            */
+
+            // Create 'set' mutations for all of this 'update's properties
+            const pathInfo = PathInfo.get(path);
+            const mutations = Object.keys(updates).map(prop => {
+                if (updates instanceof Array) { prop = parseInt(prop); }
+                return {
+                    path: pathInfo.childPath(prop),
+                    value: updates[prop]
+                };
+            });
+
+            // Store new pending 'set' operations (null values will be stored as 'remove')
+            const promises = mutations.map(m => this._addCacheSetMutation(m.path, m.value, options.context));
+            await Promise.all(promises);
         };
 
         const cachePromise = updateCache()

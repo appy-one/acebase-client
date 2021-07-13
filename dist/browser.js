@@ -27,6 +27,7 @@ class AceBaseClientConnectionSettings {
      * @param {number} settings.port Port number the server is running on
      * @param {boolean} [settings.https=true] Use SSL (https) to access the server or not. Default: true
      * @param {boolean} [settings.autoConnect=true] Automatically connect to the server, or wait until .connect is called
+     * @param {number} [settings.autoConnectDelay=0] Delay before auto connection. Useful for testing scenarios where both server and client start at the same time, and server needs to come online first.
      * @param {object} [settings.cache] Settings for local cache
      * @param {AceBase} [settings.cache.db] AceBase database instance to use for local cache
      * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
@@ -38,6 +39,7 @@ class AceBaseClientConnectionSettings {
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
     }
@@ -80,6 +82,9 @@ class AceBaseClient extends AceBaseBase {
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
 
         this.on('connect', () => {
+            // Disable cache db's ipc events, we are already notified of data changes by the server (prevents double event callbacks)
+            if (cacheDb) { cacheDb.settings.ipcEvents = false; }
+
             // Synchronize date/time
             // const start = Date.now(); // performance.now();
             this.api.getServerInfo()
@@ -91,6 +96,11 @@ class AceBaseClient extends AceBaseBase {
                     bias = info.time - now;
                 setServerBias(bias);
             });
+        });
+
+        this.on('disconnect', () => {
+            // Enable cache db's ipc events, so we get event notifications of changes by other ipc peers while offline
+            if (cacheDb) { cacheDb.settings.ipcEvents = true; }
         });
 
         let syncRunning = false, firstSync = true;
@@ -131,7 +141,7 @@ class AceBaseClient extends AceBaseBase {
             syncPendingChanges();
         });
 
-        this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, cache: settings.cache }, evt => {
+        this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
             if (evt === 'connect') {
                 this._connected = true;
                 this.emit('connect');
@@ -139,6 +149,12 @@ class AceBaseClient extends AceBaseBase {
                     this.emit('ready');
                 }
             }
+            else if (evt === 'connect_error') {
+                this.emit('connect_error', data);
+                if (!ready && cacheDb) { // If cache db is used, we can work without connection
+                    this.emit('ready');
+                }
+            }            
             else if (evt === 'disconnect') {
                 this._connected = false;
                 this.emit('disconnect');
@@ -230,6 +246,7 @@ class WebApi extends Api {
         this._id = ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
         this.url = settings.url;
         this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this._autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.dbname = dbname;
         this._connectionState = CONNECTION_STATE_DISCONNECTED;
         if (settings.cache && settings.cache.enabled !== false) {
@@ -267,50 +284,22 @@ class WebApi extends Api {
             }
     
             return new Promise((resolve, reject) => {
-                const socket = this.socket = connectSocket(this.url);
-
-                let retryConnectTimeout;
-                const retryConnect = () => {
-                    const connect = () => {
-                        if (!this.isConnecting) { return; }
-                        this.connect();
-                    }
-
-                    // Try connecting again in a minute
-                    clearTimeout(retryConnectTimeout);
-                    retryConnectTimeout = setTimeout(connect, 60 * 1000);
-
-                    // Or, when browser goes online
-                    if (typeof window !== 'undefined' && window.navigator && !window.navigator.onLine) {
-                        // Monitor browser online event
-                        const handleOnlineEvent = () => {
-                            this.debug.log(`Connecting to server after browser online event`);
-                            window.removeEventListener('online', handleOnlineEvent);
-                            clearTimeout(retryConnectTimeout);
-                            connect();
-                        }
-                        window.addEventListener('online', handleOnlineEvent);
-                    }
-                };
-
-                // socket.on("reconnect_attempt", () => {
-                //     this._connecting = true;
-                // });
-
-                // socket.on("reconnect_error", (err) => {
-                //     this._connecting = false;
-                // });
-
-                socket.on("reconnect_failed", (err) => {
-                    // Reconnecting failed after reconnectionAttempts, which is set to Infinity by default, so this should never happen
-                    retryConnect();
+                const socket = this.socket = connectSocket(this.url, {
+                    // Use default socket.io connection settings:
+                    autoConnect: true,
+                    reconnection: true,
+                    reconnectionAttempts: Infinity,
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: 5000,
+                    timeout: 20000,
+                    randomizationFactor: 0.5
                 });
 
-                socket.on("connect_error", (data) => {
-                    // New connection failed to establish
-                    this.debug.error(`Websocket connection error: ${data}`);
-                    // Keep connection state at CONNECTING, retry
-                    retryConnect();
+                socket.on("connect_error", err => {
+                    // New connection failed to establish. Attempts will be made to reconnect, but fail for now
+                    this.debug.error(`Websocket connection error: ${err}`);
+                    eventCallback('connect_error', err);
+                    reject(err);
                 });
 
                 socket.on("connect", (data) => {
@@ -362,7 +351,6 @@ class WebApi extends Api {
                     else {
                         // Automatic reconnect should be done by socket.io
                         this._connectionState = CONNECTION_STATE_CONNECTING;
-                        retryConnect(); // schedule manual reconnection anyway, won't interfere with socket.io
                     }
                     eventCallback && eventCallback('disconnect');
                 });
@@ -416,8 +404,8 @@ class WebApi extends Api {
 
                         NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
                         because they rely on change notifications from the server - to tackle this problem, 
-                        cross-tab communication must be implemented. (TODO: Let cache database change notifications
-                        be sent to other tabs, and let them use the same client ID for server communications)
+                        cross-tab communication has been implemented. (TODO: let cache db's use the same client 
+                        ID for server communications)
                     */
                     const causedByUs = context.acebase_mutation && context.acebase_mutation.client_id === this._id;
                     const cacheEnabled = !!(this._cache && this._cache.db);
@@ -505,7 +493,8 @@ class WebApi extends Api {
         };
 
         if (this._autoConnect) {
-            this.connect();
+            if (this._autoConnectDelay) { setTimeout(() => this.connect(), this._autoConnectDelay); }
+            else { this.connect(); }
         }
 
         this.disconnect = () => {
@@ -726,58 +715,34 @@ class WebApi extends Api {
             }
         };
 
-        this.signIn = (username, password) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } })
-            .then(result => {
-                accessToken = result.access_token;
-                // Make sure the connected websocket server knows who we are as well. 
-                // (this is currently not necessary because the server does not support clustering yet, 
-                // but future versions might be connected to a different instance than the one that 
-                // handled the signin http request just now)
-                this.socket.emit("signin", accessToken);
-                return { user: result.user, accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.signIn = async (username, password) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } });
+            accessToken = result.access_token;
+            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well.
+            return { user: result.user, accessToken };
         };
 
-        this.signInWithEmail = (email, password) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } })
-            .then(result => {
-                accessToken = result.access_token;
-                this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
-                return { user: result.user, accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.signInWithEmail = async (email, password) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } });
+            accessToken = result.access_token;
+            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
+            return { user: result.user, accessToken };
         };
 
-        this.signInWithToken = (token) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } })
-            .then(result => {
-                accessToken = result.access_token;
-                this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
-                return { user: result.user, accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.signInWithToken = async (token) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } });
+            accessToken = result.access_token;            
+            this.socket.emit("signin", accessToken);  // Make sure the connected websocket server knows who we are as well
+            return { user: result.user, accessToken };
         };
 
-        this.startAuthProviderSignIn = (providerName, callbackUrl) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` })
-            .then(result => {
-                return { redirectUrl: result.redirectUrl };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.startAuthProviderSignIn = async (providerName, callbackUrl) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` });
+            return { redirectUrl: result.redirectUrl };
         }
 
         this.finishAuthProviderSignIn = (callbackResult) => {
@@ -927,115 +892,145 @@ class WebApi extends Api {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
-    sync(options = { fetchFreshData: true, eventCallback: null }) {
+    async sync(options = { fetchFreshData: true, eventCallback: null }) {
         // Sync cache
-        if (!this.isConnected) {  return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
+        if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
         if (this._cache && !this._cache.db.isReady) {
-            return Promise.reject(new Error(`cache database is not ready yet`));
+            throw new Error(`cache database is not ready yet`);
         }
 
         options.eventCallback && options.eventCallback('sync_start');
         const handleStatsUpdateError = err => {
             this.debug.error(`Failed to update cache db stats:`, err);
-        }
-        let totalPendingChanges = 0;
-        const cacheApi = this._cache && this._cache.db.api;
-        let syncPushPromise = Promise.resolve();
-        if (this._cache) {
-            syncPushPromise = cacheApi.get(`${this.dbname}/pending`)
-            .then(pendingChanges => {
+        };
+
+        try {
+            let totalPendingChanges = 0;
+            const cacheApi = this._cache && this._cache.db.api;
+            if (this._cache) {
+                const pendingChanges = await cacheApi.get(`${this.dbname}/pending`);
                 cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
-                if (pendingChanges === null) {
-                    return; // No updates
-                }
-                return Object.keys(pendingChanges)
-                    .sort((a,b) => a < b ? 1 : -1) // sort z-a
-                    .reduce((netChangeIds, id) => {
-                        // Only get effective changes: 
-                        // ignore operations preceeding a 'set' or 'remove' operation on the same and descendant paths
-                        const change = pendingChanges[id];
-                        // Check if the change is about a path that is 'set' or 'remove'd later (earlier in our sort order...)
-                        const pathInfo = PathInfo.get(change.path);
-                        const ignore = netChangeIds.some(id => {
-                            const laterChange = pendingChanges[id];
-                            return (laterChange.path === change.path || pathInfo.isDescendantOf(laterChange.path)) && ['set','remove'].includes(laterChange.type);
+                try {
+                    // Merge mutations to multiple properties into single updates (again)
+                    // This prevents single property updates failing because of schema restrictions
+                    // Eg:
+                    // 1. set users/ewout/name: 'Ewout'
+                    // 2. set users/ewout/address: { street: 'My street', nr: 1 }
+                    // 3. remove users/ewout/age
+                    // 4. remove users/ewout/address/street
+                    // --> should merge into:
+                    // 1. update users/ewout: { name: address: { street: 'My street', nr: 1 }, age: null }
+                    // 4. remove users/ewout/address/street (does not attempt to merge with nested properties of previous updates)
+
+                    debugger;
+                    const ids = Object.keys(pendingChanges || {}).sort(); // sort a-z, process oldest mutation first
+                    const compatibilityMode = ids.map(id => pendingChanges[id]).some(m => m.type === 'update');
+                    const mutations = compatibilityMode
+                        ? ids.map(id => {
+                            // If any "update" mutations are in the db, these are old mutations. Process them unaltered. This is for backward compatibility only, can be removed later. (if code was able to update, mutations could have already been synced too, right?)
+                            const mutation = pendingChanges[id];
+                            mutation.id = id;
+                            return mutation;
                         })
-                        if (!ignore) {
-                            netChangeIds.push(id);
-                        }
-                        else {
-                            delete pendingChanges[id];
-                            cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
-                        }
-                        return netChangeIds;
-                    }, [])
-                    .sort() // sort a-z
-                    .reduce((prevPromise, id) => {
-                        // Now process the net changes
-                        const change = pendingChanges[id];
-                        this.debug.verbose(`SYNC processing change ${id}: `, change);
-                        totalPendingChanges++;
-                        const go = () => {
-                            let promise;
-                            if (change.type === 'update') { 
-                                promise = this.update(change.path, change.data, { allow_cache: false, context: change.context });
-                            }
-                            else if (change.type === 'set') { 
-                                if (!change.data) { change.data = null; } // Before type 'remove' was implemented
-                                promise = this.set(change.path, change.data, { allow_cache: false, context: change.context });
-                            }
-                            else if (change.type === 'remove') {
-                                promise = this.set(change.path, null, { allow_cache: false, context: change.context });
+                        : ids.reduce((mutations, id) => {
+                            const change = pendingChanges[id];
+                            console.assert(['set', 'remove'].includes(change.type), 'Only "set" and "remove" mutations should be present');
+                            if (change.path === '') {
+                                // 'set' on the root path - can't turn this into an update on the parent.
+
+                                // With new approach, there should be no previous 'set' or 'remove' mutation on any node because they 
+                                // have been removed by _addCacheSetMutation. But... if there are old mutations in the db 
+                                // without 'update' mutations (because then we'd have been in compatibilityMode above) - we'll filter
+                                // them out here. In the future we could just add this change without checking, but code below doesn't
+                                // harm the process, so it's ok to stay.
+                                const rootUpdate = mutations.find(u => u.path === '');
+                                if (rootUpdate) { rootUpdate.data = change.data; }
+                                else { change.id = id; mutations.push(change); }
                             }
                             else {
-                                throw new Error(`unsupported change type "${change.type}"`);
+                                const pathInfo = PathInfo.get(change.path);
+                                const parentPath = pathInfo.parentPath;
+                                const parentUpdate = mutations.find(u => u.path === parentPath);
+                                const value =  change.type === 'remove' || change.data === null || typeof change.data === 'undefined' ? null : change.data;
+                                if (!parentUpdate) {
+                                    // Create new parent update
+                                    // change.context.acebase_sync = { }; // TODO: Think about what context we could add to let receivers know why this merged update happens
+                                    mutations.push({ id, type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
+                                }
+                                else {
+                                    // Add this change to parent update
+                                    parentUpdate.data[pathInfo.key] = value;
+                                }
                             }
-                            return promise
-                            .then(() => {
-                                this.debug.verbose(`SYNC change ${id} processed ok`);
-                                delete pendingChanges[id];
-                                cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
-                            })
-                            .catch(err => {
-                                // Updating remote db failed
-                                this.debug.error(`SYNC change ${id} failed: ${err.message}`);
-                                if (!this.isConnected) {
-                                    // Connection was broken, should retry later
-                                    throw err;
-                                }
-                                // We are connected, so the change is not allowed or otherwise denied.
-                                if (typeof err === 'string') { 
-                                    err = { code: 'unknown', message: err, stack: 'n/a' }; 
-                                }
-                                cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
-                                // Delete the change and cached data
-                                cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                                cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, change.data.path), null);
-                                options.eventCallback && options.eventCallback('sync_change_error', { error: err, change });
-                            });
-                        };
-                        return prevPromise.then(go); // Chain to previous promise
-                    }, Promise.resolve());
-            })
-            .then(() => {
-                this.debug.verbose(`SYNC push done`);
-                cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
-                return totalPendingChanges;
-            })
-            .catch(err => {
-                // 1 or more pending changes could not be processed.
-                this.debug.error(`SYNC push error: ${err.message}`);
-                if (typeof err === 'string') { 
-                    err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                            return mutations;
+                        }, []);
+
+                    // for (let id of Object.keys(pendingChanges || {}).sort()) { // sort a-z, process oldest mutation first
+                    //     const change = pendingChanges[id];
+                    for (let m of mutations) {
+                        const id = m.id;
+                        this.debug.verbose(`SYNC processing mutation ${id}: `, m);
+                        totalPendingChanges++;
+
+                        try {
+                            if (m.type === 'update') {
+                                await this.update(m.path, m.data, { allow_cache: false, context: m.context });
+                            }
+                            else if (m.type === 'set') {
+                                if (!m.data) { m.data = null; } // Before type 'remove' was implemented
+                                await this.set(m.path, m.data, { allow_cache: false, context: m.context });
+                            }
+                            else if (m.type === 'remove') {
+                                await this.set(m.path, null, { allow_cache: false, context: m.context });
+                            }
+                            else {
+                                throw new Error(`unsupported mutation type "${m.type}"`);
+                            }
+                            this.debug.verbose(`SYNC mutation ${id} processed ok`);
+                            // delete pendingChanges[id];
+                            // cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                        }
+                        catch(err) {
+                            // Updating remote db failed
+                            this.debug.error(`SYNC mutation ${id} failed: ${err.message}`);
+                            if (!this.isConnected) {
+                                // Connection was broken, should retry later
+                                throw err;
+                            }
+                            // We are connected, so the mutation is not allowed or otherwise denied.
+                            if (typeof err === 'string') { 
+                                err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                            }
+                            cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                            // Delete the mutation and cached data
+                            // cacheApi.set(`${this.dbname}/pending/${id}`, null);
+                            // cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, m.data.path), null);
+                            options.eventCallback && options.eventCallback('sync_change_error', { error: err, change: m });
+                        }
+                    }
+
+                    this.debug.verbose(`SYNC push done`);
+                    
+                    // Remove processed mutations
+                    const removePending = ids.reduce((updates, id) => { updates[id] = null; return updates; }, {});
+                    cacheApi.update(`${this.dbname}/pending`, removePending);
+
+                    // Update stats
+                    cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
                 }
-                cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
-                throw err;
-            });            
-        }
-        let totalRemoteChanges = 0;
-        return syncPushPromise
-        .then(() => {
+                catch(err) {
+                    // 1 or more pending changes could not be processed.
+                    this.debug.error(`SYNC push error: ${err.message}`);
+                    if (typeof err === 'string') { 
+                        err = { code: 'unknown', message: err, stack: 'n/a' }; 
+                    }
+                    cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                    throw err;
+                }            
+            }
+
             // We've pushed our changes, now get fresh data for all paths with active subscriptions
+            let totalRemoteChanges = 0;
             if (this._cache && options.fetchFreshData) {
                 // Find out what data to load
                 const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
@@ -1068,21 +1063,19 @@ class WebApi extends Api {
                         options.eventCallback && options.eventCallback('sync_pull_error', err);
                     });
                 });
-                return Promise.all(syncPullPromises)
-                .then(() => {
-                    // Unsubscribe temp cache subscriptions
-                    Object.keys(this._subscriptions).forEach(path => {
-                        this._subscriptions[path].forEach(subscr => {
-                            if (typeof subscr.tempCallback !== 'function') { 
-                                // If a subscription was added while synchronizing, it won't have a tempCallback.
-                                // This is no big deal, since our tempCallback is only to update sync statistics.
-                                // Before acebase-client v0.9.29, this caused all subscriptions with current path
-                                // and type to be removed.
-                                return; 
-                            }
-                            cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
-                            delete subscr.tempCallback;
-                        });
+                await Promise.all(syncPullPromises);
+                // Unsubscribe temp cache subscriptions
+                Object.keys(this._subscriptions).forEach(path => {
+                    this._subscriptions[path].forEach(subscr => {
+                        if (typeof subscr.tempCallback !== 'function') { 
+                            // If a subscription was added while synchronizing, it won't have a tempCallback.
+                            // This is no big deal, since our tempCallback is only to update sync statistics.
+                            // Before acebase-client v0.9.29, this caused all subscriptions with current path
+                            // and type to be removed.
+                            return; 
+                        }
+                        cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
+                        delete subscr.tempCallback;
                     });
                 });
             }
@@ -1105,20 +1098,31 @@ class WebApi extends Api {
                     });
                     syncPullPromises.push(p);
                 });
-                return Promise.all(syncPullPromises);
+                await Promise.all(syncPullPromises);
             }
-        })
-        .then(() => {
+
             this.debug.verbose(`SYNC done`);
             const info = { local: totalPendingChanges, remote: totalRemoteChanges };
             options.eventCallback && options.eventCallback('sync_done', info);
             return info;
-        })
-        .catch(err => {
+        }
+        catch(err) {
             this.debug.error(`SYNC error`, err);
             options.eventCallback && options.eventCallback('sync_error', err);
             throw err;
-        });
+        }
+    }
+
+    async _addCacheSetMutation(path, value, context) {
+        // Remove all previous mutations on this exact path, and descendants
+        const escapedPath = path.replace(/([.*+?\\$^\(\)\[\]\{\}])/g, '\\$1'); // Replace any character that could cripple the regex. NOTE: nobody should use these characters in their data paths in the first place.
+        const re = new RegExp(`^${escapedPath}(?:\\[|/|$)`); // matches path, path/child, path[0], path[0]/etc, path/child/etc/etc
+        await this._cache.db.query(`${this.dbname}/pending`)
+            .filter('path', 'matches', re)
+            .remove();
+
+        // Add new mutation
+        return this._cache.db.api.set(`${this.dbname}/pending/${ID.generate()}`, { type: value !== null ? 'set' : 'remove', path, data: value, context });
     }
 
     set(path, value, options = { allow_cache: true, context: {} }) {
@@ -1151,8 +1155,8 @@ class WebApi extends Api {
         const rollbackCache = () => {
             return this._cache.db.api.set(cachePath, rollbackValue, { context: options.context });
         };
-        const addPendingTransaction = () => {
-            return this._cache.db.api.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'set', path, data: value, context: options.context });
+        const addPendingTransaction = async () => {
+            await this._addCacheSetMutation(path, value, options.context);
         };
 
         const cachePromise = updateCache()
@@ -1243,8 +1247,58 @@ class WebApi extends Api {
         const rollbackCache = () => {
             return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
-        const addPendingTransaction = () => {
-            return cacheApi.set(`${this.dbname}/pending/${options.context.acebase_mutation.id}`, { type: 'update', path, data: updates, context: options.context });
+        const addPendingTransaction = async () => {
+            /*
+
+            In the old method, making multiple changes to the same data would store AND SYNC each
+            mutation separately. To only store net changes to the db, having mixed 'update' and 'set' mutations
+            make this hard. Consider the following mutations:
+
+                1. update 'users/ewout': { name: 'Ewout', surname: 'Stortenbeker' }
+                2. update 'users/ewout/address': { street: 'Main street', nr: 3 }
+                3. update 'users/ewout': { name: 'E', address: null }
+                4. update 'users/ewout': { name: 'E', address: { street: '2nd Ave', nr: 48 } }
+                5. set 'users/ewout/address/street': 'Main street'
+                6. set 'users/ewout/address/nr': 3
+                7. set 'users/ewout/name': 'Ewout'
+
+            If all updated properties are saved as 'set' operations, things become easier:
+
+                1a. set 'users/ewout/name': 'Ewout'
+                1b. set 'users/ewout/surname': 'Stortenbeker'
+                2a. set 'users/ewout/address/street': 'Main street'
+                2b. set 'users/ewout/address/nr': 3
+                3a. set 'users/ewout/name': 'E'
+                3b. set 'users/ewout/address': null
+                4a. set 'users/ewout/name': 'E'
+                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
+                5.  set 'users/ewout/address/street': 'Main street'
+                6.  set 'users/ewout/address/nr': 3
+                7.  set 'users/ewout/name': 'Ewout'
+
+            Now it's easy to remove obsolete mutations, only keeping the last ones:
+
+                1b. set 'users/ewout/surname': 'Stortenbeker'
+                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
+                5.  set 'users/ewout/address/street': 'Main street'
+                6.  set 'users/ewout/address/nr': 3
+                7.  set 'users/ewout/name': 'Ewout'
+
+            */
+
+            // Create 'set' mutations for all of this 'update's properties
+            const pathInfo = PathInfo.get(path);
+            const mutations = Object.keys(updates).map(prop => {
+                if (updates instanceof Array) { prop = parseInt(prop); }
+                return {
+                    path: pathInfo.childPath(prop),
+                    value: updates[prop]
+                };
+            });
+
+            // Store new pending 'set' operations (null values will be stored as 'remove')
+            const promises = mutations.map(m => this._addCacheSetMutation(m.path, m.value, options.context));
+            await Promise.all(promises);
         };
 
         const cachePromise = updateCache()
@@ -1798,20 +1852,20 @@ class AceBaseClientAuth {
      * @param {boolean} [options.clearCache] whether to clear the cache database (if used)
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
-    signOut(options) {
+    async signOut(options) {
         if (!this.client.isReady) {
             return this.client.ready().then(() => this.signOut(options));
         }
         else if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
-        return this.client.api.signOut(options)
-        .then(() => {
-            this.accessToken = null;
-            let user = this.user;
-            this.user = null;
-            this.eventCallback("signout", { source: 'signout', user });
-        });
+        if (this.client.isConnected) {
+            await this.client.api.signOut(options);
+        }
+        this.accessToken = null;
+        let user = this.user;
+        this.user = null;
+        this.eventCallback("signout", { source: 'signout', user });
     }
 
     /**
@@ -2640,7 +2694,7 @@ exports.default = pad;
 },{}],20:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.proxyAccess = exports.LiveDataProxy = void 0;
+exports.OrderedCollectionProxy = exports.proxyAccess = exports.LiveDataProxy = void 0;
 const utils_1 = require("./utils");
 const data_reference_1 = require("./data-reference");
 const data_snapshot_1 = require("./data-snapshot");
@@ -3338,6 +3392,11 @@ function createProxy(context) {
                         return context.flag('observe', context.target);
                     };
                 }
+                if (prop === 'getOrderedCollection') {
+                    return function getOrderedCollection(orderProperty, orderIncrement) {
+                        return new OrderedCollectionProxy(this, orderProperty, orderIncrement);
+                    };
+                }
                 if (prop === 'startTransaction') {
                     return function startTransaction() {
                         return context.flag('transaction', context.target);
@@ -3427,10 +3486,10 @@ function createProxy(context) {
                         };
                     }
                     if (['reduce', 'reduceRight'].includes(prop)) {
-                        return function reduce(callback) {
+                        return function reduce(callback, initialValue) {
                             return target[prop]((prev, value, i) => {
                                 return callback(prev, proxifyChildValue(i), i, proxy); //, value
-                            });
+                            }, initialValue);
                         };
                     }
                     if (['find', 'findIndex'].includes(prop)) {
@@ -3490,13 +3549,16 @@ function createProxy(context) {
                 prop = parseInt(prop);
             }
             if (value !== null) {
-                if (typeof value === 'object' && value[isProxy]) {
-                    // Assigning one proxied value to another
-                    value = value.getTarget(false);
-                }
-                else if (typeof value === 'object' && Object.isFrozen(value)) {
-                    // Create a copy to unfreeze it
-                    value = utils_1.cloneObject(value);
+                if (typeof value === 'object') {
+                    if (value[isProxy]) {
+                        // Assigning one proxied value to another
+                        value = value.valueOf();
+                    }
+                    // else if (Object.isFrozen(value)) {
+                    //     // Create a copy to unfreeze it
+                    //     value = cloneObject(value);
+                    // }
+                    value = utils_1.cloneObject(value); // Fix #10, always clone objects so changes made through the proxy won't change the original object (and vice versa)
                 }
                 if (typeof value !== 'object' && target[prop] === value) {
                     // not changing the actual value, ignore
@@ -3587,6 +3649,179 @@ function proxyAccess(proxiedValue) {
     return proxiedValue;
 }
 exports.proxyAccess = proxyAccess;
+/**
+ * Provides functionality to work with ordered collections through a live data proxy. Eliminates
+ * the need for arrays to handle ordered data by adding a 'sort' properties to child objects in a
+ * collection, and provides functionality to sort and reorder items with a minimal amount of database
+ * updates.
+ */
+class OrderedCollectionProxy {
+    constructor(collection, orderProperty = 'order', orderIncrement = 10) {
+        this.collection = collection;
+        this.orderProperty = orderProperty;
+        this.orderIncrement = orderIncrement;
+        if (typeof collection !== 'object' || !collection[isProxy]) {
+            throw new Error(`Collection is not proxied`);
+        }
+        if (collection.valueOf() instanceof Array) {
+            throw new Error(`Collection is an array, not an object collection`);
+        }
+        if (!Object.keys(collection).every(key => typeof collection[key] === 'object')) {
+            throw new Error(`Collection has non-object children`);
+        }
+        // Check if the collection has order properties. If not, assign them now
+        const ok = Object.keys(collection).every(key => typeof collection[key][orderProperty] === 'number');
+        if (!ok) {
+            // Assign order properties now. Database will be updated automatically
+            const keys = Object.keys(collection);
+            for (let i = 0; i < keys.length; i++) {
+                const item = collection[keys[i]];
+                item[orderProperty] = i * orderIncrement; // 0, 10, 20, 30 etc
+            }
+        }
+    }
+    /**
+     * Gets an observable for the target object collection. Same as calling `collection.getObservable()`
+     * @returns
+     */
+    getObservable() {
+        return proxyAccess(this.collection).getObservable();
+    }
+    /**
+     * Gets an observable that emits a new ordered array representation of the object collection each time
+     * the unlaying data is changed. Same as calling `getArray()` in a `getObservable().subscribe` callback
+     * @returns
+     */
+    getArrayObservable() {
+        const Observable = optional_observable_1.getObservable();
+        return new Observable(subscriber => {
+            const subscription = this.getObservable().subscribe(value => {
+                const newArray = this.getArray();
+                subscriber.next(newArray);
+            });
+            return function unsubscribe() {
+                subscription.unsubscribe();
+            };
+        });
+    }
+    /**
+     * Gets an ordered array representation of the items in your object collection. The items in the array
+     * are proxied values, changes will be in sync with the database. Note that the array itself
+     * is not mutable: adding or removing items to it will NOT update the collection in the
+     * the database and vice versa. Use `add`, `delete`, `sort` and `move` methods to make changes
+     * that impact the collection's sorting order
+     * @returns order array
+     */
+    getArray() {
+        const arr = proxyAccess(this.collection).toArray((a, b) => a[this.orderProperty] - b[this.orderProperty]);
+        // arr.push = (...items: T[]) => {
+        //     items.forEach(item => this.add(item));
+        //     return arr.length;
+        // };
+        return arr;
+    }
+    add(item, index, from) {
+        let arr = this.getArray();
+        let minOrder = Number.POSITIVE_INFINITY, maxOrder = Number.NEGATIVE_INFINITY;
+        for (let i = 0; i < arr.length; i++) {
+            const order = arr[i][this.orderProperty];
+            minOrder = Math.min(order, minOrder);
+            maxOrder = Math.max(order, maxOrder);
+        }
+        let fromKey;
+        if (typeof from === 'number') {
+            // Moving existing item
+            fromKey = Object.keys(this.collection).find(key => this.collection[key] === item);
+            if (!fromKey) {
+                throw new Error(`item not found in collection`);
+            }
+            if (from === index) {
+                return { key: fromKey, index };
+            }
+            if (Math.abs(from - index) === 1) {
+                // Position being swapped, swap their order property values
+                const otherItem = arr[index];
+                const otherOrder = otherItem[this.orderProperty];
+                otherItem[this.orderProperty] = item[this.orderProperty];
+                item[this.orderProperty] = otherOrder;
+                return { key: fromKey, index };
+            }
+            else {
+                // Remove from array, code below will add again
+                arr.splice(from, 1);
+            }
+        }
+        if (typeof index !== 'number' || index >= arr.length) {
+            // append at the end
+            index = arr.length;
+            item[this.orderProperty] = arr.length == 0 ? 0 : maxOrder + this.orderIncrement;
+        }
+        else if (index === 0) {
+            // insert before all others
+            item[this.orderProperty] = arr.length == 0 ? 0 : minOrder - this.orderIncrement;
+        }
+        else {
+            // insert between 2 others
+            const orders = arr.map(item => item[this.orderProperty]);
+            const gap = orders[index] - orders[index - 1];
+            if (gap > 1) {
+                item[this.orderProperty] = orders[index] - Math.floor(gap / 2);
+            }
+            else {
+                // TODO: Can this gap be enlarged by moving one of both orders?
+                // For now, change all other orders
+                arr.splice(index, 0, item);
+                for (let i = 0; i < arr.length; i++) {
+                    arr[i][this.orderProperty] = i * this.orderIncrement;
+                }
+            }
+        }
+        const key = typeof fromKey === 'string'
+            ? fromKey // Moved item, don't add it
+            : proxyAccess(this.collection).push(item);
+        return { key, index };
+    }
+    /**
+     * Deletes an item from the object collection using the their index in the sorted array representation
+     * @param index
+     * @returns the key of the collection's child that was deleted
+     */
+    delete(index) {
+        const arr = this.getArray();
+        const item = arr[index];
+        if (!item) {
+            throw new Error(`Item at index ${index} not found`);
+        }
+        const key = Object.keys(this.collection).find(key => this.collection[key] === item);
+        if (!key) {
+            throw new Error(`Cannot find target object to delete`);
+        }
+        this.collection[key] = null; // Deletes it from db
+        return { key, index };
+    }
+    /**
+     * Moves an item in the object collection by reordering it
+     * @param fromIndex Current index in the array (the ordered representation of the object collection)
+     * @param toIndex Target index in the array
+     * @returns
+     */
+    move(fromIndex, toIndex) {
+        const arr = this.getArray();
+        return this.add(arr[fromIndex], toIndex, fromIndex);
+    }
+    /**
+     * Reorders the object collection using given sort function. Allows quick reordering of the collection which is persisted in the database
+     * @param sortFn
+     */
+    sort(sortFn) {
+        const arr = this.getArray();
+        arr.sort(sortFn);
+        for (let i = 0; i < arr.length; i++) {
+            arr[i][this.orderProperty] = i * this.orderIncrement;
+        }
+    }
+}
+exports.OrderedCollectionProxy = OrderedCollectionProxy;
 
 },{"./data-reference":21,"./data-snapshot":22,"./id":24,"./optional-observable":26,"./path-reference":28,"./process":29,"./utils":36}],21:[function(require,module,exports){
 "use strict";
@@ -3731,8 +3966,32 @@ class DataReference {
      * @param onComplete completion callback to use instead of returning promise
      * @returns promise that resolves with this reference when completed (when not using onComplete callback)
      */
-    set(value, onComplete) {
-        const handleError = err => {
+    async set(value, onComplete) {
+        try {
+            if (this.isWildcardPath) {
+                throw new Error(`Cannot set the value of wildcard path "/${this.path}"`);
+            }
+            if (this.parent === null) {
+                throw new Error(`Cannot set the root object. Use update, or set individual child properties`);
+            }
+            if (typeof value === 'undefined') {
+                throw new TypeError(`Cannot store undefined value in "/${this.path}"`);
+            }
+            if (!this.db.isReady) {
+                await this.db.ready();
+            }
+            value = this.db.types.serialize(this.path, value);
+            await this.db.api.set(this.path, value, { context: this[_private].context });
+            if (typeof onComplete === 'function') {
+                try {
+                    onComplete(null, this);
+                }
+                catch (err) {
+                    console.error(`Error in onComplete callback:`, err);
+                }
+            }
+        }
+        catch (err) {
             if (typeof onComplete === 'function') {
                 try {
                     onComplete(err, this);
@@ -3743,39 +4002,10 @@ class DataReference {
             }
             else {
                 // throw again
-                return Promise.reject(err);
+                throw err;
             }
-        };
-        if (this.isWildcardPath) {
-            return handleError(new Error(`Cannot set the value of wildcard path "/${this.path}"`));
         }
-        if (this.parent === null) {
-            return handleError(new Error(`Cannot set the root object. Use update, or set individual child properties`));
-        }
-        if (typeof value === 'undefined') {
-            return handleError(new TypeError(`Cannot store undefined value in "/${this.path}"`));
-        }
-        if (!this.db.isReady) {
-            return this.db.ready().then(() => this.set(value, onComplete));
-        }
-        value = this.db.types.serialize(this.path, value);
-        return this.db.api.set(this.path, value, { context: this[_private].context })
-            .then(res => {
-            if (typeof onComplete === 'function') {
-                try {
-                    onComplete(null, this);
-                }
-                catch (err) {
-                    console.error(`Error in onComplete callback:`, err);
-                }
-            }
-        })
-            .catch(err => {
-            return handleError(err);
-        })
-            .then(() => {
-            return this;
-        });
+        return this;
     }
     /**
      * Updates properties of the referenced node
@@ -3783,8 +4013,34 @@ class DataReference {
      * @param onComplete completion callback to use instead of returning promise
      * @return returns promise that resolves with this reference once completed (when not using onComplete callback)
      */
-    update(updates, onComplete) {
-        const handleError = err => {
+    async update(updates, onComplete) {
+        try {
+            if (this.isWildcardPath) {
+                throw new Error(`Cannot update the value of wildcard path "/${this.path}"`);
+            }
+            if (!this.db.isReady) {
+                await this.db.ready();
+            }
+            if (typeof updates !== "object" || updates instanceof Array || updates instanceof ArrayBuffer || updates instanceof Date) {
+                await this.set(updates);
+            }
+            else if (Object.keys(updates).length === 0) {
+                console.warn(`update called on path "/${this.path}", but there is nothing to update`);
+            }
+            else {
+                updates = this.db.types.serialize(this.path, updates);
+                await this.db.api.update(this.path, updates, { context: this[_private].context });
+            }
+            if (typeof onComplete === 'function') {
+                try {
+                    onComplete(null, this);
+                }
+                catch (err) {
+                    console.error(`Error in onComplete callback:`, err);
+                }
+            }
+        }
+        catch (err) {
             if (typeof onComplete === 'function') {
                 try {
                     onComplete(err, this);
@@ -3795,43 +4051,10 @@ class DataReference {
             }
             else {
                 // throw again
-                return Promise.reject(err);
+                throw err;
             }
-        };
-        if (this.isWildcardPath) {
-            return handleError(new Error(`Cannot update the value of wildcard path "/${this.path}"`));
         }
-        let promise;
-        if (typeof updates !== "object" || updates instanceof Array || updates instanceof ArrayBuffer || updates instanceof Date) {
-            promise = this.set(updates);
-        }
-        else if (Object.keys(updates).length === 0) {
-            console.warn(`update called on path "/${this.path}", but there is nothing to update`);
-            promise = Promise.resolve();
-        }
-        else if (!this.db.isReady) {
-            return this.db.ready().then(() => this.update(updates, onComplete));
-        }
-        else {
-            updates = this.db.types.serialize(this.path, updates);
-            promise = this.db.api.update(this.path, updates, { context: this[_private].context });
-        }
-        return promise.then(() => {
-            if (typeof onComplete === 'function') {
-                try {
-                    onComplete(null, this);
-                }
-                catch (err) {
-                    console.error(`Error in onComplete callback:`, err);
-                }
-            }
-        })
-            .catch(err => {
-            return handleError(err);
-        })
-            .then(() => {
-            return this;
-        });
+        return this;
     }
     /**
      * Sets the value a node using a transaction: it runs your callback function with the current value, uses its return value as the new value to store.
@@ -3839,12 +4062,12 @@ class DataReference {
      * @param callback - callback function that performs the transaction on the node's current value. It must return the new value to store (or promise with new value), undefined to cancel the transaction, or null to remove the node.
      * @returns returns a promise that resolves with the DataReference once the transaction has been processed
      */
-    transaction(callback) {
+    async transaction(callback) {
         if (this.isWildcardPath) {
-            return Promise.reject(new Error(`Cannot start a transaction on wildcard path "/${this.path}"`));
+            throw new Error(`Cannot start a transaction on wildcard path "/${this.path}"`);
         }
         if (!this.db.isReady) {
-            return this.db.ready().then(() => this.transaction(callback));
+            await this.db.ready();
         }
         let throwError;
         let cb = (currentValue) => {
@@ -3873,14 +4096,12 @@ class DataReference {
                 return this.db.types.serialize(this.path, newValue);
             }
         };
-        return this.db.api.transaction(this.path, cb, { context: this[_private].context })
-            .then(result => {
-            if (throwError) {
-                // Rethrow error from callback code
-                throw throwError;
-            }
-            return this;
-        });
+        const result = await this.db.api.transaction(this.path, cb, { context: this[_private].context });
+        if (throwError) {
+            // Rethrow error from callback code
+            throw throwError;
+        }
+        return this;
     }
     /**
      * Subscribes to an event. Supported events are "value", "child_added", "child_changed", "child_removed",
@@ -4117,7 +4338,7 @@ class DataReference {
             }
             return Promise.reject(error);
         }
-        const id = id_1.ID.generate(); //uuid62.v1({ node: [0x61, 0x63, 0x65, 0x62, 0x61, 0x73] });
+        const id = id_1.ID.generate();
         const ref = this.child(id);
         ref[_private].pushed = true;
         if (typeof value !== 'undefined') {
@@ -4130,12 +4351,12 @@ class DataReference {
     /**
      * Removes this node and all children
      */
-    remove() {
+    async remove() {
         if (this.isWildcardPath) {
-            return Promise.reject(new Error(`Cannot remove wildcard path "/${this.path}". Use query().remove instead`));
+            throw new Error(`Cannot remove wildcard path "/${this.path}". Use query().remove instead`);
         }
         if (this.parent === null) {
-            throw Promise.reject(new Error(`Cannot remove the root node`));
+            throw new Error(`Cannot remove the root node`);
         }
         return this.set(null);
     }
@@ -4143,12 +4364,12 @@ class DataReference {
      * Quickly checks if this reference has a value in the database, without returning its data
      * @returns {Promise<boolean>} | returns a promise that resolves with a boolean value
      */
-    exists() {
+    async exists() {
         if (this.isWildcardPath) {
-            return Promise.reject(new Error(`Cannot check wildcard path "/${this.path}" existence`));
+            throw new Error(`Cannot check wildcard path "/${this.path}" existence`);
         }
-        else if (!this.db.isReady) {
-            return this.db.ready().then(() => this.exists());
+        if (!this.db.isReady) {
+            await this.db.ready();
         }
         return this.db.api.exists(this.path);
     }
@@ -4158,43 +4379,41 @@ class DataReference {
     query() {
         return new DataReferenceQuery(this);
     }
-    count() {
-        return this.reflect("info", { child_count: true })
-            .then(info => {
-            return info.children.count;
-        });
+    async count() {
+        const info = await this.reflect("info", { child_count: true });
+        return info.children.count;
     }
-    reflect(type, args) {
+    async reflect(type, args) {
         if (this.isWildcardPath) {
-            return Promise.reject(new Error(`Cannot reflect on wildcard path "/${this.path}"`));
+            throw new Error(`Cannot reflect on wildcard path "/${this.path}"`);
         }
-        else if (!this.db.isReady) {
-            return this.db.ready().then(() => this.reflect(type, args));
+        if (!this.db.isReady) {
+            await this.db.ready();
         }
         return this.db.api.reflect(this.path, type, args);
     }
-    export(stream, options = { format: 'json' }) {
+    async export(stream, options = { format: 'json' }) {
         if (this.isWildcardPath) {
-            return Promise.reject(new Error(`Cannot export wildcard path "/${this.path}"`));
+            throw new Error(`Cannot export wildcard path "/${this.path}"`);
         }
-        else if (!this.db.isReady) {
-            return this.db.ready().then(() => this.export(stream, options));
+        if (!this.db.isReady) {
+            await this.db.ready();
         }
         return this.db.api.export(this.path, stream, options);
     }
     proxy(defaultValue) {
         return data_proxy_1.LiveDataProxy.create(this, defaultValue);
     }
-    observe(options) {
+    async observe(options) {
         // options should not be used yet - we can't prevent/filter mutation events on excluded paths atm 
         if (options) {
             throw new Error('observe does not support data retrieval options yet');
         }
         if (this.isWildcardPath) {
-            return Promise.reject(new Error(`Cannot observe wildcard path "/${this.path}"`));
+            throw new Error(`Cannot observe wildcard path "/${this.path}"`);
         }
-        else if (!this.db.isReady) {
-            return this.db.ready().then(() => this.observe(options));
+        if (!this.db.isReady) {
+            await this.db.ready();
         }
         const Observable = optional_observable_1.getObservable();
         return new Observable(observer => {
@@ -4857,80 +5076,97 @@ exports.setObservable = setObservable;
 },{"rxjs":37}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PathInfo = exports.getChildPath = exports.getPathInfo = exports.getPathKeys = void 0;
+exports.PathInfo = void 0;
 function getPathKeys(path) {
-    path = path.replace(/^\//, ''); // Remove leading slash
+    path = path.replace(/\[/g, '/[').replace(/^\/+/, '').replace(/\/+$/, ''); // Replace [ with /[, remove leading slashes, remove trailing slashes
     if (path.length === 0) {
         return [];
     }
-    let keys = path.replace(/\[/g, '/[').split('/');
+    let keys = path.split('/');
     return keys.map(key => {
         return key.startsWith('[') ? parseInt(key.substr(1, key.length - 2)) : key;
     });
 }
-exports.getPathKeys = getPathKeys;
-function getPathInfo(path) {
-    path = path.replace(/^\//, ''); // Remove leading slash
-    if (path.length === 0) {
-        return { parent: null, key: '' };
-    }
-    const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('['));
-    let parentPath = i < 0 ? '' : path.substr(0, i);
-    let key = i < 0 ? path : path.substr(i);
-    if (key.startsWith('[')) {
-        key = parseInt(key.substr(1, key.length - 2));
-    }
-    else if (key.startsWith('/')) {
-        key = key.substr(1); // Chop off leading slash
-    }
-    if (parentPath === path) {
-        parentPath = null;
-    }
-    return { parent: parentPath, key };
-}
-exports.getPathInfo = getPathInfo;
-function getChildPath(path, key) {
-    path = path.replace(/^\//, ""); // Remove leading slash
-    key = typeof key === "string" ? key.replace(/^\//, "") : key; // Remove leading slash
-    if (path.length === 0) {
-        if (typeof key === "number") {
-            throw new TypeError("Cannot add array index to root path!");
-        }
-        return key;
-    }
-    if (typeof key === "string" && key.length === 0) {
-        return path;
-    }
-    if (typeof key === "number") {
-        return `${path}[${key}]`;
-    }
-    return `${path}/${key}`;
-}
-exports.getChildPath = getChildPath;
+// function getPathInfo(path: string): { parent: string, key: string|number } {
+//     path = path.replace(/^\//, ''); // Remove leading slash
+//     if (path.length === 0) {
+//         return { parent: null, key: '' };
+//     }
+//     const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('['));
+//     let parentPath = i < 0 ? '' : path.substr(0, i);
+//     let key:string|number = i < 0 ? path : path.substr(i);
+//     if (key.startsWith('[')) { 
+//         key = parseInt(key.substr(1, key.length - 2)); 
+//     }
+//     else if (key.startsWith('/')) {
+//         key = key.substr(1); // Chop off leading slash
+//     }
+//     if (parentPath === path) {
+//         parentPath = null;
+//     }
+//     return { parent: parentPath, key };
+// }
+// function getChildPath(path: string, key: string|number): string {
+//     path = path.replace(/^\//, ""); // Remove leading slash
+//     key = typeof key === "string" ? key.replace(/^\//, "") : key; // Remove leading slash
+//     if (path.length === 0) {
+//         if (typeof key === "number") { throw new TypeError("Cannot add array index to root path!"); }
+//         return key;
+//     }
+//     if (typeof key === "string" && key.length === 0) {
+//         return path;
+//     }
+//     if (typeof key === "number") {
+//         return `${path}[${key}]`;
+//     }
+//     return `${path}/${key}`;
+// }
 class PathInfo {
     constructor(path) {
-        this.path = path;
+        if (typeof path === 'string') {
+            // this.path = path.replace(/^\/+/, '').replace(/\/+$/, '');
+            this.keys = getPathKeys(path);
+        }
+        else if (path instanceof Array) {
+            this.keys = path;
+        }
+        this.path = this.keys.reduce((path, key, i) => i === 0 ? `${key}` : typeof key === 'string' ? `${path}/${key}` : `${path}[${key}]`, '');
     }
     static get(path) {
         return new PathInfo(path);
     }
     static getChildPath(path, childKey) {
-        return getChildPath(path, childKey);
+        // return getChildPath(path, childKey);
+        return PathInfo.get(path).child(childKey).path;
     }
     static getPathKeys(path) {
         return getPathKeys(path);
     }
     get key() {
-        return getPathInfo(this.path).key;
+        return this.keys.length === 0 ? null : this.keys.slice(-1)[0]; // getPathInfo(this.path).key;
+    }
+    get parent() {
+        if (this.keys.length == 0) {
+            return null;
+        }
+        const parentKeys = this.keys.slice(0, -1);
+        return new PathInfo(parentKeys);
     }
     get parentPath() {
-        return getPathInfo(this.path).parent;
+        return this.keys.length === 0 ? null : this.parent.path; //getPathInfo(this.path).parent;
+    }
+    child(childKey) {
+        if (typeof childKey === 'string') {
+            const keys = getPathKeys(childKey);
+            return new PathInfo(this.keys.concat(keys));
+        }
+        return new PathInfo(this.keys.concat(childKey));
     }
     childPath(childKey) {
-        return getChildPath(`${this.path}`, childKey);
+        return this.child(childKey).path;
     }
     get pathKeys() {
-        return getPathKeys(this.path);
+        return this.keys; //getPathKeys(this.path);
     }
     /**
      * If varPath contains variables or wildcards, it will return them with the values found in fullPath
@@ -5040,10 +5276,10 @@ class PathInfo {
         let n = 0;
         const targetPath = pathKeys.reduce((path, key) => {
             if (typeof key === 'string' && (key === '*' || key.startsWith('$'))) {
-                return getChildPath(path, vars[n++]);
+                return PathInfo.getChildPath(path, vars[n++]);
             }
             else {
-                return getChildPath(path, key);
+                return PathInfo.getChildPath(path, key);
             }
         }, '');
         return targetPath;
@@ -5052,16 +5288,15 @@ class PathInfo {
      * Checks if a given path matches this path, eg "posts/*\/title" matches "posts/12344/title" and "users/123/name" matches "users/$uid/name"
      */
     equals(otherPath) {
-        if (this.path === otherPath) {
+        const other = otherPath instanceof PathInfo ? otherPath : new PathInfo(otherPath);
+        if (this.path === other.path) {
             return true;
         } // they are identical
-        const keys = this.pathKeys;
-        const otherKeys = getPathKeys(otherPath);
-        if (keys.length !== otherKeys.length) {
+        if (this.keys.length !== other.keys.length) {
             return false;
         }
-        return keys.every((key, index) => {
-            const otherKey = otherKeys[index];
+        return this.keys.every((key, index) => {
+            const otherKey = other.keys[index];
             return otherKey === key
                 || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
                 || (typeof key === 'string' && (key === "*" || key[0] === '$'));
@@ -5071,19 +5306,18 @@ class PathInfo {
      * Checks if a given path is an ancestor, eg "posts" is an ancestor of "posts/12344/title"
      */
     isAncestorOf(descendantPath) {
-        if (descendantPath === '' || this.path === descendantPath) {
+        const descendant = descendantPath instanceof PathInfo ? descendantPath : new PathInfo(descendantPath);
+        if (descendant.path === '' || this.path === descendant.path) {
             return false;
         }
         if (this.path === '') {
             return true;
         }
-        const ancestorKeys = this.pathKeys;
-        const descendantKeys = getPathKeys(descendantPath);
-        if (ancestorKeys.length >= descendantKeys.length) {
+        if (this.keys.length >= descendant.keys.length) {
             return false;
         }
-        return ancestorKeys.every((key, index) => {
-            const otherKey = descendantKeys[index];
+        return this.keys.every((key, index) => {
+            const otherKey = descendant.keys[index];
             return otherKey === key
                 || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
                 || (typeof key === 'string' && (key === "*" || key[0] === '$'));
@@ -5093,19 +5327,18 @@ class PathInfo {
      * Checks if a given path is a descendant, eg "posts/1234/title" is a descendant of "posts"
      */
     isDescendantOf(ancestorPath) {
-        if (this.path === '' || this.path === ancestorPath) {
+        const ancestor = ancestorPath instanceof PathInfo ? ancestorPath : new PathInfo(ancestorPath);
+        if (this.path === '' || this.path === ancestor.path) {
             return false;
         }
         if (ancestorPath === '') {
             return true;
         }
-        const ancestorKeys = getPathKeys(ancestorPath);
-        const descendantKeys = this.pathKeys;
-        if (ancestorKeys.length >= descendantKeys.length) {
+        if (ancestor.keys.length >= this.keys.length) {
             return false;
         }
-        return ancestorKeys.every((key, index) => {
-            const otherKey = descendantKeys[index];
+        return ancestor.keys.every((key, index) => {
+            const otherKey = this.keys[index];
             return otherKey === key
                 || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
                 || (typeof key === 'string' && (key === "*" || key[0] === '$'));
@@ -5116,18 +5349,18 @@ class PathInfo {
      * common ancestor. Eg: "posts" is on the trail of "posts/1234/title" and vice versa.
      */
     isOnTrailOf(otherPath) {
-        if (this.path.length === 0 || otherPath.length === 0) {
+        const other = otherPath instanceof PathInfo ? otherPath : new PathInfo(otherPath);
+        if (this.path.length === 0 || other.path.length === 0) {
             return true;
         }
-        if (this.path === otherPath) {
+        if (this.path === other.path) {
             return true;
         }
-        const otherKeys = getPathKeys(otherPath);
         return this.pathKeys.every((key, index) => {
-            if (index >= otherKeys.length) {
+            if (index >= other.keys.length) {
                 return true;
             }
-            const otherKey = otherKeys[index];
+            const otherKey = other.keys[index];
             return otherKey === key
                 || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
                 || (typeof key === 'string' && (key === "*" || key[0] === '$'));
@@ -5137,21 +5370,21 @@ class PathInfo {
      * Checks if a given path is a direct child, eg "posts/1234/title" is a child of "posts/1234"
      */
     isChildOf(otherPath) {
+        const other = otherPath instanceof PathInfo ? otherPath : new PathInfo(otherPath);
         if (this.path === '') {
             return false;
         } // If our path is the root, it's nobody's child...
-        const parentInfo = PathInfo.get(this.parentPath);
-        return parentInfo.equals(otherPath);
+        return this.parent.equals(other);
     }
     /**
      * Checks if a given path is its parent, eg "posts/1234" is the parent of "posts/1234/title"
      */
     isParentOf(otherPath) {
-        if (otherPath === '') {
+        const other = otherPath instanceof PathInfo ? otherPath : new PathInfo(otherPath);
+        if (other.path === '') {
             return false;
-        } // If the other path is the root, this path cannot be its parent...
-        const parentInfo = PathInfo.get(PathInfo.get(otherPath).parentPath);
-        return parentInfo.equals(this.path);
+        } // If the other path is the root, this path cannot be its parent
+        return this.equals(other.parent);
     }
 }
 exports.PathInfo = PathInfo;

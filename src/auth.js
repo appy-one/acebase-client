@@ -163,20 +163,20 @@ class AceBaseClientAuth {
      * @param {boolean} [options.clearCache] whether to clear the cache database (if used)
      * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
      */
-    signOut(options) {
+    async signOut(options) {
         if (!this.client.isReady) {
             return this.client.ready().then(() => this.signOut(options));
         }
         else if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
-        return this.client.api.signOut(options)
-        .then(() => {
-            this.accessToken = null;
-            let user = this.user;
-            this.user = null;
-            this.eventCallback("signout", { source: 'signout', user });
-        });
+        if (this.client.isConnected) {
+            await this.client.api.signOut(options);
+        }
+        this.accessToken = null;
+        let user = this.user;
+        this.user = null;
+        this.eventCallback("signout", { source: 'signout', user });
     }
 
     /**

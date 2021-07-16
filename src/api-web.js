@@ -736,7 +736,6 @@ class WebApi extends Api {
                     // 1. update users/ewout: { name: address: { street: 'My street', nr: 1 }, age: null }
                     // 4. remove users/ewout/address/street (does not attempt to merge with nested properties of previous updates)
 
-                    debugger;
                     const ids = Object.keys(pendingChanges || {}).sort(); // sort a-z, process oldest mutation first
                     const compatibilityMode = ids.map(id => pendingChanges[id]).some(m => m.type === 'update');
                     const mutations = compatibilityMode

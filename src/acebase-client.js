@@ -163,6 +163,10 @@ class AceBaseClient extends AceBaseBase {
         this.api.disconnect();
     }
 
+    close() {
+        this.disconnect();
+    }
+
     callExtension(method, path, data) {
         return this.api.callExtension(method, path, data);
     }

@@ -64,8 +64,21 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
     constructor(host: string, port: number, dbname: string, https?: boolean);
     readonly auth: AceBaseClientAuth
     readonly connected: boolean
+
+    /**
+     * Connects to the server
+     */
     connect(): Promise<void>
+
+    /**
+     * Disconnects from the server
+     */
     disconnect(): void
+
+    /**
+     * Disconnects from the server
+     */
+    close(): Promise<void>
 
     /**
      * Calls an extension method that was added to the connected server with the .extend method and returns the result

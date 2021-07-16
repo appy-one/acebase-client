@@ -1,4 +1,4 @@
-const { Api, Transport, ID, PathInfo, ColorStyle } = require('acebase-core');
+const { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition } = require('acebase-core');
 const connectSocket = require('socket.io-client');
 const Base64 = require('./base64');
 const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
@@ -1473,6 +1473,9 @@ class WebApi extends Api {
     }
 
     setSchema(path, schema) {
+        if (schema !== null) {
+            schema = (new SchemaDefinition(schema)).text;
+        }
         const data = JSON.stringify({ action: "set", path, schema });
         return this._request({ method: "POST", url: `${this.url}/schema/${this.dbname}`, data })
         .catch(err => {

@@ -1,11 +1,14 @@
 const http = require('http');
 const https = require('https');
-const URL = require('url');
+const URL = require('url').URL;
 const { AceBaseRequestError } = require('./error');
 
+/**
+ * @returns {Promise<{ context: any, data: any }>} returns a promise that resolves with an object containing data and an optionally returned context
+ */
 function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) {
     return new Promise((resolve, reject) => {
-        let endpoint = URL.parse(url);
+        let endpoint = new URL(url); // URL.parse(url);
 
         let postData = options.data;
         if (typeof postData === 'undefined' || postData === null) {
@@ -19,7 +22,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
             protocol: endpoint.protocol,
             host: endpoint.hostname,
             port: endpoint.port,
-            path: endpoint.path, //.pathname,
+            path: endpoint.pathname + endpoint.search, //endpoint.path,
             headers: {
                 'AceBase-Context': JSON.stringify(options.context || null),
                 'Content-Type': 'application/json',
@@ -42,15 +45,10 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
             res.on('end', () => {
                 const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
                 if (res.statusCode === 200) {
-                    if (isJSON) {
-                        let val = JSON.parse(data);
-                        // console.log('Delaying data retrieval...')
-                        // setTimeout(() => resolve(val), 2500);
-                        resolve(val);
-                    }
-                    else {
-                        resolve(data);
-                    }
+                    let context = res.headers['acebase-context']; // lowercase header names only
+                    if (context && context[0] === '{') { context = JSON.parse(context); }
+                    if (isJSON) { data = JSON.parse(data); }
+                    resolve({ context, data });
                 }
                 else {
                     request.body = postData;

@@ -1,5 +1,8 @@
 const { AceBaseRequestError } = require('./error');
 
+/**
+ * @returns {Promise<{ context: any, data: any }>} returns a promise that resolves with an object containing data and an optionally returned context
+ */
 async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) {
     let postData = options.data;
     if (typeof postData === 'undefined' || postData === null) {
@@ -52,13 +55,10 @@ async function request(method, url, options = { accessToken: null, data: null, d
 
     const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
     if (res.status === 200) {
-        if (isJSON) {
-            let val = JSON.parse(data);
-            return val;
-        }
-        else {
-            return data;
-        }
+        let context = res.headers.get('AceBase-Context');
+        if (context && context[0] === '{') { context = JSON.parse(context); }
+        if (isJSON) { data = JSON.parse(data); }
+        return { context, data };
     }
     else {
         request.body = postData;

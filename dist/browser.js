@@ -31,7 +31,8 @@ class AceBaseClientConnectionSettings {
      * @param {object} [settings.cache] Settings for local cache
      * @param {AceBase} [settings.cache.db] AceBase database instance to use for local cache
      * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
-     * 
+     * @param {object} [settings.sync] Settings for synchronization
+     * @param {'connect'|'signin'|'auto'|'manual'} [settings.sync.timing] Determines when synchronization should execute
      */
     constructor(settings) {
         this.dbname = settings.dbname;
@@ -42,6 +43,10 @@ class AceBaseClientConnectionSettings {
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
+        this.sync = typeof settings.sync === 'object' ? settings.sync : { timing: 'auto' };
+        if (!['connect','signin','auto','manual'].includes(this.sync.timing)) {
+            this.sync.timing = 'auto';
+        }
     }
 }
 
@@ -103,56 +108,86 @@ class AceBaseClient extends AceBaseBase {
             if (cacheDb) { cacheDb.settings.ipcEvents = true; }
         });
 
+        this.sync = () => {
+            return syncPendingChanges(true);
+        }
+        
         let syncRunning = false, firstSync = true;
-        const syncPendingChanges = () => {
+        const syncPendingChanges = async (throwErrors = false) => {
             if (syncRunning) { 
                 // Already syncing
+                if (throwErrors) { throw new Error('sync already running'); }
                 return; 
             }
             if (!this._connected) {
-                return; // We'll retry once connected
+                // We'll retry once connected
+                // // Do set firstSync to false, this fixes the issue of the first sync firing after 
+                // // an initial succesful connection, but quick disconnect (sync does not run) 
+                // // and later reconnect --> Fresh data needs to be loaded
+                // firstSync = false; 
+                if (throwErrors) { throw new Error('not connected'); }
+                return; 
             }
             syncRunning = true;
-            return cacheReadyPromise.then(() => {
-                return this.api.sync({
+            try {
+                await cacheReadyPromise;
+                return await this.api.sync({
+                    firstSync,
                     fetchFreshData: !firstSync,
                     eventCallback: (eventName, args) => {
                         this.debug.log(eventName, args || '');
                         this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
                     }
                 });
-            })
-            .catch(err => {
+            }
+            catch(err) {
                 // Sync failed for some reason
-                console.error(`Failed to synchronize:`, err);
-            })
-            .then(() => {
+                if (throwErrors) { throw err; }
+                else {
+                    console.error(`Failed to synchronize:`, err);
+                }
+            }
+            finally {
                 syncRunning = false;
                 firstSync = false;
-            });
+            }
         }
         let syncTimeout = 0;
         this.on('connect', () => {
-            syncTimeout && clearTimeout(syncTimeout);
-            syncTimeout = setTimeout(syncPendingChanges, 2500); // Start sync with a short delay to allow client to sign in first
+            if (settings.sync.timing === 'connect') {
+                syncPendingChanges();
+            }
+            else if (settings.sync.timing === 'auto') {
+                syncTimeout && clearTimeout(syncTimeout);
+                syncTimeout = setTimeout(syncPendingChanges, 2500); // Start sync with a short delay to allow client to sign in first
+            }
         });
         this.on('signin', () => {
-            syncTimeout && clearTimeout(syncTimeout);
-            syncPendingChanges();
+            if (settings.sync.timing === 'auto') {
+                syncTimeout && clearTimeout(syncTimeout);
+            }
+            if (['auto','signin'].includes(settings.sync.timing)) {
+                syncPendingChanges();
+            }
         });
 
+        const emitClientReady = async () => {
+            if (cacheDb) { await cacheDb.ready(); }
+            this.emit('ready');
+        };
+
         this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
-            if (evt === 'connect') {
+        if (evt === 'connect') {
                 this._connected = true;
                 this.emit('connect');
                 if (!ready) {
-                    this.emit('ready');
+                    emitClientReady();
                 }
             }
             else if (evt === 'connect_error') {
                 this.emit('connect_error', data);
                 if (!ready && cacheDb) { // If cache db is used, we can work without connection
-                    this.emit('ready');
+                    emitClientReady();
                 }
             }            
             else if (evt === 'disconnect') {
@@ -177,8 +212,27 @@ class AceBaseClient extends AceBaseBase {
         this.api.disconnect();
     }
 
+    close() {
+        this.disconnect();
+    }
+
     callExtension(method, path, data) {
         return this.api.callExtension(method, path, data);
+    }
+
+    /**
+     * Gets the current sync cursor
+     */
+    getCursor() {
+        return this.api._syncCursor;
+    }
+
+    /**
+     * Sets the sync cursor to use
+     * @param {string} cursor 
+     */
+    setCursor(cursor) {
+        this.api._syncCursor = cursor;
     }
 }
 
@@ -228,6 +282,45 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     return promise;
 }
 
+/**
+ * @typedef {((err: Error, path:string, newValue:any, oldValue:any, context: any) => any)} EventSubscriptionCallback
+ * @typedef {{ newOnly: boolean, cancelCallback: (reason: Error) => any, syncFallback: 'reload'|(() => any|Promise<any>)}} EventSubscriptionSettings
+ */
+
+class EventSubscription {
+    /**
+     * 
+     * @param {string} path 
+     * @param {string} event 
+     * @param {EventSubscriptionCallback} callback 
+     * @param {EventSubscriptionSettings} settings 
+     */
+    constructor(path, event, callback, settings) {
+        /** @type {string} */this.path = path;
+        /** @type {string} */this.event = event;
+        /** @type {EventSubscriptionCallback}*/this.callback = callback;
+        /** @type {EventSubscriptionSettings} */this.settings = settings;
+        /** @type {'requested'|'active'|'canceled'} */this.state = 'requested';
+        /** @type {number} */this.added = Date.now();
+        /** @type {number} */this.activated = 0;
+        /** @type {number} */this.lastEvent = 0;
+        /** @type {number} */this.lastSynced = 0;
+        /** @type {string} */this.cursor = null;
+        /** @type {EventSubscriptionCallback}*/this.cacheCallback = null;
+        /** @type {EventSubscriptionCallback}*/this.tempCallback = null;
+    }
+    activate() {
+        this.state = 'active';
+        if (this.activated === 0) {
+            this.activated = Date.now();
+        }
+    }
+    cancel(reason) {
+        this.state = 'canceled';
+        this.settings.cancelCallback(reason);
+    }
+}
+
 const CONNECTION_STATE_DISCONNECTED = 'disconnected';
 const CONNECTION_STATE_CONNECTING = 'connecting';
 const CONNECTION_STATE_CONNECTED = 'connected';
@@ -238,6 +331,12 @@ const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
  */
 class WebApi extends Api {
 
+    /**
+     * 
+     * @param {string} dbname 
+     * @param {{ logLevel: 'verbose'|'log'|'warn'|'error', debug: object, url: string, autoConnect: boolean, autoConnectDelay: number, cache: object }} settings 
+     * @param {(event: string, ...args: any[]) => void} callback 
+     */
     constructor(dbname = "default", settings, callback) {
         // operations are done through http calls,
         // events are triggered through a websocket
@@ -249,27 +348,44 @@ class WebApi extends Api {
         this._autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.dbname = dbname;
         this._connectionState = CONNECTION_STATE_DISCONNECTED;
+        this._cursor = {
+            /** Last cursus received by the server */
+            current: null,
+            /** Last cursor received before client went offline, will be used for sync. */
+            sync: null
+        };
+        this._updateCursor = async cursor => {
+            if (!cursor || (this._cursor.current && cursor < this._cursor.current)) {
+                return; // Just in case this ever happens, ignore events with earlier cursors.
+            }
+            // console.log(`Updating sync cursor to ${cursor}`);
+            this._cursor.current = cursor;
+            // if (this._cache && this._cache.db) {
+            //     await this._cache.db.api.set(`${this.dbname}/cursor`, cursor)
+            //     .catch(err => {
+            //         console.error(`Can't store cursor?`, err);
+            //     });
+            // }
+        };
+        this._eventTimeline = { init: Date.now(), connect: 0, signIn: 0, sync: 0, disconnect: 0 };
         if (settings.cache && settings.cache.enabled !== false) {
             this._cache = {
                 db: settings.cache.db,
                 priority: settings.cache.priority || 'server'
             };
+            // this._cache.db.api.get(`${this.dbname}/cursor`).then(({ value: cursor }) => {
+            //     this._syncCursor = cursor;
+            // });
         }
         this._realtimeQueries = {};
         this.debug = settings.debug;
-        this._connectHooks = [];
-        const eventCallback = (name, ...args) => {
-            if (name === 'connect') {
-                const callbacks = this._connectHooks;
-                this._connectHooks = [];
-                callbacks.forEach(callback => {
-                    try { callback(); }
-                    catch(err) {}
-                });
+        const eventCallback = (event, ...args) => {
+            if (event === 'disconnect') {
+                this._cursor.sync = this._cursor.current;
             }
-            callback(name, ...args);
+            callback && callback(event, ...args);
         };
-
+        /** @type {{ [path: string]: EventSubscription[] }} */
         let subscriptions = this._subscriptions = {};
         let accessToken;
 
@@ -295,54 +411,86 @@ class WebApi extends Api {
                     randomizationFactor: 0.5
                 });
 
-                socket.on("connect_error", err => {
+                socket.on('connect_error', err => {
                     // New connection failed to establish. Attempts will be made to reconnect, but fail for now
                     this.debug.error(`Websocket connection error: ${err}`);
                     eventCallback('connect_error', err);
                     reject(err);
                 });
 
-                socket.on("connect", (data) => {
+                socket.on('connect', async data => {
                     this._connectionState = CONNECTION_STATE_CONNECTED;
-
-                    // Sign in
-                    let signInPromise = Promise.resolve();
+                    this._eventTimeline.connect = Date.now();
                     if (accessToken) {
                         // User must be signed in again (NOTE: this does not trigger "signin" event)
-                        signInPromise = this.signInWithToken(accessToken);
+                        await this.signInWithToken(accessToken);
                     }
-                    signInPromise.then(() => {
-                        // (re)subscribe to any active subscriptions
-                        const subscribePromises = [];
-                        Object.keys(subscriptions).forEach(path => {
-                            const events = [];
-                            subscriptions[path].forEach(subscr => {
-                                if (subscr.event === 'mutated') { return; } // Skip mutated events for now
-                                const serverAlreadyNotifying = events.includes(subscr.event);
-                                if (!serverAlreadyNotifying) {
-                                    events.push(subscr.event);
-                                    const promise = _websocketRequest(this.socket, 'subscribe', { path, event: subscr.event }, accessToken);
-                                    subscribePromises.push(promise.catch(err => { console.error(err); }));
-                                }
-                            });
+
+                    /**
+                     * @param {EventSubscription} subscr 
+                     * @param {Promise<any>} promise 
+                     * @returns {Promise<void>}
+                     */
+                    function wrapSubscriptionPromise(subscr, promise) {
+                        const onAll = (fn) => subscriptions[subscr.path]
+                                .filter(s => s.event === subscr.event)
+                                .forEach(s => fn(s));
+                        return promise.then(() => {
+                            onAll(s => s.activate());
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            onAll(s => s.cancel(err));
                         });
-                        // Now, subscribe to all top path mutated events
-                        Object.keys(subscriptions)
-                            .filter(path => subscriptions[path].some(sub => sub.event === 'mutated'))
-                            .filter((path, i, arr) => !arr.some(otherPath => PathInfo.get(otherPath).isAncestorOf(path)))
-                            .forEach(topEventPath => {
-                                const promise = _websocketRequest(this.socket, 'subscribe', { path: topEventPath, event: 'mutated' }, accessToken);
-                                subscribePromises.push(promise.catch(err => { console.error(err); }));
-                            });
-                        return Promise.all(subscribePromises);
-                    })
-                    .then(() => {
-                        eventCallback && eventCallback('connect'); // Safe to let client know we're connected
-                        resolve(); // Resolve the .connect() promise
+                    };
+
+                    // (re)subscribe to any active subscriptions
+                    const subscribePromises = [];
+                    Object.keys(subscriptions).forEach(path => {
+                        const events = [];
+                        subscriptions[path].forEach(subscr => {
+                            if (subscr.event === 'mutated') { return; } // Skip mutated events for now
+                            const serverAlreadyNotifying = events.includes(subscr.event);
+                            if (!serverAlreadyNotifying) {
+                                events.push(subscr.event);
+                                const promise = _websocketRequest(this.socket, 'subscribe', { path, event: subscr.event }, accessToken)
+                                subscribePromises.push(wrapSubscriptionPromise(subscr, promise));
+                            }
+                        });
                     });
+
+                    // Now, subscribe to all top path mutated events
+                    const subscribeToMutatedEvents = async() => {
+                        let retry = false;
+                        let promises = Object.keys(subscriptions)
+                            .filter(path => subscriptions[path].some(sub => sub.event === 'mutated' && sub.state !== 'canceled'))
+                            .filter((path, i, arr) => !arr.some(otherPath => PathInfo.get(otherPath).isAncestorOf(path)))
+                            .reduce((topPaths, path) => (topPaths.includes(path) || topPaths.push(path)) && topPaths, [])
+                            .map(topEventPath => {
+                                const subscr = subscriptions[topEventPath].find(s => s.event === 'mutated');
+                                let promise = _websocketRequest(this.socket, 'subscribe', { path: topEventPath, event: 'mutated' }, accessToken);
+                                promise = wrapSubscriptionPromise(subscr, promise)
+                                    .then(() => {
+                                        if (subscr.state === 'canceled') {
+                                            // Oops, could not subscribe to 'mutated' event on topEventPath, other event(s) at child path(s) should now take over
+                                            retry = true;
+                                        }
+                                    });
+                                promises.push(promise);
+                            });
+                        await Promise.all(promises);
+                        if (retry) {
+                            return subscribeToMutatedEvents();
+                        }
+                    }
+                    subscribePromises.push(subscribeToMutatedEvents());
+                    await Promise.all(subscribePromises);
+
+                    eventCallback('connect'); // Safe to let client know we're connected
+                    resolve(); // Resolve the .connect() promise
                 });
 
-                socket.on("disconnect", reason => {
+                socket.on('disconnect', reason => {
                     // Existing connection was broken, by us or network
                     if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
                         // disconnect was requested by us: reason === 'client namespace disconnect'
@@ -351,14 +499,16 @@ class WebApi extends Api {
                     else {
                         // Automatic reconnect should be done by socket.io
                         this._connectionState = CONNECTION_STATE_CONNECTING;
+                        this._eventTimeline.disconnect = Date.now();
                     }
-                    eventCallback && eventCallback('disconnect');
+                    eventCallback('disconnect');
                 });
 
-                socket.on("data-event", data => {
+                socket.on('data-event', data => {
                     const val = Transport.deserialize(data.val);
                     const context = data.context || {};
                     context.acebase_event_source = 'server';
+                    this._updateCursor(context.acebase_cursor); // If the server passes a cursor, it supports transaction logging. Save it for sync later on
 
                     /*
                         Using the new context, we can determine how we should handle this data event.
@@ -451,11 +601,8 @@ class WebApi extends Api {
                     if (!fireThisEvent) {
                         return;
                     }
-                    // CHANGED - Only fire events if they were not triggered by the cache db already (and they only fired if the cached data really changed!)
-                    // The last point in the comment above is why I changed this. If the local cache does not change, no events will be fired. This causes an
-                    // issue in browser contexts when there are multiple open tabs: they share the same cache database and if 1 tab makes changes to the cache, 
-                    // other clients won't know about it, and will not be notified of any changes.
-                    // TODO: Implement cross-tab notifications in acebase/src/acebase-browser.js
+                    // The cache db will not have fired any events (const fireCacheEvents = false), so we can fire them here now.
+                    /** @type {EventSubscription[]} */
                     const targetSubs = data.event === 'mutated'
                         ? Object.keys(subscriptions)
                             .filter(path => {
@@ -469,7 +616,9 @@ class WebApi extends Api {
                             }, [])
                         : pathSubs.filter(sub => sub.event === data.event);
                     
-                    targetSubs.forEach(subscr => { // !eventsFired && 
+                    targetSubs.forEach(subscr => {
+                        subscr.lastEvent = Date.now();
+                        subscr.cursor = context.acebase_cursor;
                         subscr.callback(null, data.path, val.current, val.previous, context);
                     });
                 });
@@ -493,24 +642,34 @@ class WebApi extends Api {
         };
 
         if (this._autoConnect) {
-            if (this._autoConnectDelay) { setTimeout(() => this.connect(), this._autoConnectDelay); }
-            else { this.connect(); }
+            if (this._autoConnectDelay) { setTimeout(() => this.connect().catch(() => {}), this._autoConnectDelay); }
+            else { this.connect().catch(() => {}); }
         }
 
         this.disconnect = () => {
             if (this.socket !== null && typeof this.socket === 'object') {
                 this._connectionState = CONNECTION_STATE_DISCONNECTING;
+                this._eventTimeline.disconnect = Date.now();
                 this.socket.disconnect();
                 this.socket = null;
             }
-        }
+        };
 
-        this.subscribe = (path, event, callback) => {
+        /**
+         * 
+         * @param {string} path 
+         * @param {string} event 
+         * @param {function} callback 
+         * @param {EventSubscriptionSettings} settings 
+         * @returns 
+         */
+        this.subscribe = async (path, event, callback, settings) => {
             let pathSubs = subscriptions[path];
             if (!pathSubs) { pathSubs = subscriptions[path] = []; }
             let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event)
-                || (event === 'mutated' && Object.keys(subscriptions).some(otherPath => PathInfo.get(otherPath).isAncestorOf(path) && subscriptions[otherPath].some(sub => sub.event === event)));
-            const subscr = { path, event, callback };
+                || (event === 'mutated' && Object.keys(subscriptions).some(otherPath => PathInfo.get(otherPath).isAncestorOf(path) && subscriptions[otherPath].some(sub => sub.event === event && sub.state === 'active')));
+            const subscr = new EventSubscription(path, event, callback, settings);
+            // { path, event, callback, settings, added: Date.now(), activate() { this.activated = Date.now() }, activated: null, lastEvent: null, cursor: null };
             pathSubs.push(subscr);
 
             if (this._cache) {
@@ -519,8 +678,9 @@ class WebApi extends Api {
                 this._cache.db.api.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
             }
 
-            if (serverAlreadyNotifying || !this.isConnected) {
-                return Promise.resolve();
+            if (serverAlreadyNotifying || !this.isConnected) { 
+                // If we're offline, the event will be subscribed once connected
+                return;
             }
             if (event === 'mutated') {
                 // Unsubscribe from 'mutated' events set on descendant paths of current path
@@ -529,10 +689,12 @@ class WebApi extends Api {
                     PathInfo.get(otherPath).isDescendantOf(path) 
                     && subscriptions[otherPath].some(sub => sub.event === 'mutated')
                 )
-                .map(path => _websocketRequest(this.socket, "unsubscribe", { path, event: 'mutated' }, accessToken))
+                .map(path => _websocketRequest(this.socket, 'unsubscribe', { path, event: 'mutated' }, accessToken))
                 .map(promise => promise.catch(err => console.error(err)))
             }
-            return _websocketRequest(this.socket, "subscribe", { path, event }, accessToken);
+            const result = await _websocketRequest(this.socket, 'subscribe', { path, event }, accessToken);
+            subscr.activate();
+            return result;
         };
 
         this.unsubscribe = (path, event = undefined, callback = undefined) => {
@@ -623,7 +785,7 @@ class WebApi extends Api {
                         finish(val);
                     }
                 }
-            }
+            };
             let txResolve, txReject, txPromise = new Promise((resolve, reject) => {
                 txResolve = resolve;
                 txReject = reject;
@@ -660,13 +822,13 @@ class WebApi extends Api {
             else { 
                 // Websocket might not be connected. Try http call instead
                 const data = JSON.stringify({ path });
-                this._request({ ignoreConnectionState: true, method: "POST", url: `${this.url}/transaction/${this.dbname}/start`, data, context: options.context })
+                this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/start`, data, context: options.context })
                 .then(tx => {
                     const id = tx.id;
                     const currentValue = Transport.deserialize(tx.value);
                     const value = callback(currentValue);
                     const data = JSON.stringify({ id, value: Transport.serialize(value) });
-                    return this._request({ ignoreConnectionState: true, method: "POST", url: `${this.url}/transaction/${this.dbname}/finish`, data, context: options.context })
+                    return this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data, context: options.context })
                 })
                 .catch(err => {
                     if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE'].includes(err.code)) {
@@ -687,13 +849,21 @@ class WebApi extends Api {
          * @param {any} [options.context] Context to add to PUT or POST requests
          * @param {(chunk: string) => void} [options.dataReceivedCallback] A method that overrides the default data receiving handler. Override for streaming.
          * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
+         * @param {boolean} [options.includeContext=false] NEW Whether the returned object should contain an optionally returned context object.
+         * @returns {Promise<any|{ context: any, data: any }>} returns a promise that resolves with the returned data, or (when options.includeContext === true) an object containing data and returned context
          */
-        this._request = (options) => {
-            if (this.isConnected || options.ignoreConnectionState === true) { 
-                return _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context })
-                .catch(err => {
-                    throw err;
-                });
+        this._request = async (options) => {
+            if (this.isConnected || options.ignoreConnectionState === true) {
+                const result = await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context });
+                if (result.context && result.context.acebase_cursor) {
+                    this._updateCursor(result.context.acebase_cursor);
+                }
+                if (options.includeContext === true) {
+                    return result;
+                }
+                else {
+                    return result.data;
+                }
             }
             else {
                 // We're not connected. We can wait for the connection to be established,
@@ -703,75 +873,70 @@ class WebApi extends Api {
 
                 if (!this.isConnecting) {
                     // We're currently not trying to connect. Fail now
-                    return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE));
+                    throw new Error(NOT_CONNECTED_ERROR_MESSAGE);
                 }
 
                 const connectPromise = new Promise(resolve => this.socket.once('connect', resolve));
-                return promiseTimeout(connectPromise, 1000, 'Waiting for connection')
-                .catch(err => {
+                await promiseTimeout(connectPromise, 1000, 'Waiting for connection').catch(err => {
                     throw new Error(NOT_CONNECTED_ERROR_MESSAGE);
-                })
-                .then(() => this._request(options));
+                });
+                return this._request(options); // Retry
             }
         };
 
+        const handleSignInResult = result => {
+            this._eventTimeline.signIn = Date.now();
+            const details = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
+            accessToken = details.accessToken;
+            this.socket.emit('signin', details.accessToken);  // Make sure the connected websocket server knows who we are as well.
+            eventCallback('signin', details);
+            return details;
+        }
+
         this.signIn = async (username, password) => {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } });
-            accessToken = result.access_token;
-            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well.
-            return { user: result.user, accessToken };
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } });
+            return handleSignInResult(result);
         };
 
         this.signInWithEmail = async (email, password) => {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } });
-            accessToken = result.access_token;
-            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
-            return { user: result.user, accessToken };
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } });
+            return handleSignInResult(result);
         };
 
         this.signInWithToken = async (token) => {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } });
-            accessToken = result.access_token;            
-            this.socket.emit("signin", accessToken);  // Make sure the connected websocket server knows who we are as well
-            return { user: result.user, accessToken };
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } });
+            return handleSignInResult(result);
         };
 
-        this.startAuthProviderSignIn = async (providerName, callbackUrl) => {
+        this.startAuthProviderSignIn = async (providerName, callbackUrl, options) => {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}` });
+            const optionParams = options && typeof options === 'object' && '&' + Object.keys(options).map(key => `option_${key}=${encodeURIComponent(options[key])}`).join('&');
+            const result = await this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}${optionParams}` });
             return { redirectUrl: result.redirectUrl };
-        }
+        };
 
-        this.finishAuthProviderSignIn = (callbackResult) => {
+        this.finishAuthProviderSignIn = async (callbackResult) => {
             /** @type {{ provider: { name: string, access_token: string, refresh_token: string, expires_in: number }, access_token: string, user: AceBaseUser }} */
             let result;
             try {
                 result = JSON.parse(Base64.decode(callbackResult));
                 // TODO: Implement server check
             }
-            catch(err) {
-                return Promise.reject(`Invalid result`);
+            catch (err) {
+                throw new Error(`Invalid result`);
             }
-            accessToken = result.access_token;
-            this.socket.emit("signin", accessToken); // Make sure the connected websocket server knows who we are as well. 
-            return Promise.resolve({ user: result.user, accessToken, provider: result.provider });
-        }
+            return handleSignInResult(result);
+        };
 
-        this.refreshAuthProviderToken = (providerName, refreshToken) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ url: `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}` })
-            .then(result => {
-                return result;
-            })
-            .catch(err => {
-                throw err;
-            });
-        }
+        this.refreshAuthProviderToken = async (providerName, refreshToken) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            return this._request({ url: `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}` });
+        };
 
-        this.signOut = (options = { everywhere: false, clearCache: false }) => {
+        this.signOut = async (options = { everywhere: false, clearCache: false }) => {
             if (typeof options === 'boolean') {
                 // Old signature signOut(everywhere:boolean = false)
                 options = { everywhere: options };
@@ -782,103 +947,71 @@ class WebApi extends Api {
             if (typeof options.everywhere !== 'boolean') { options.everywhere = false; }
             if (typeof options.clearCache !== 'boolean') { options.clearCache = false; }
 
-            if (!accessToken) { return Promise.resolve(); }
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere: options.everywhere } })
-            .then(() => {
-                this.socket.emit("signout", accessToken); // Make sure the connected websocket server knows we signed out as well. 
-                accessToken = null;
-            })
-            .catch(err => {
-                throw err;
-            })
-            .then(() => {
-                if (this._cache && options.clearCache) {
-                     // Clear cache, but don't wait for it to finish
-                    this.clearCache().catch(err => {
-                        console.error(`Could not clear cache:`, err);
-                    });
-                }
-            });
+            if (!accessToken) { return; }
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere: options.everywhere } });
+            this.socket.emit('signout', accessToken); // Make sure the connected websocket server knows we signed out as well. 
+            accessToken = null;
+            if (this._cache && options.clearCache) {
+                // Clear cache, but don't wait for it to finish
+                this.clearCache().catch(err => {
+                    console.error(`Could not clear cache:`, err);
+                });
+            }
+            eventCallback('signout');
         };
 
-        this.changePassword = (uid, currentPassword, newPassword) => {
-            if (!accessToken) { return Promise.reject(new Error(`not_signed_in`)); }
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } })
-            .then(result => {
-                accessToken = result.access_token;
-                return { accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.changePassword = async (uid, currentPassword, newPassword) => {
+            if (!accessToken) { throw new Error(`not_signed_in`); }
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } });
+            accessToken = result.access_token;
+            return { accessToken };
         };
     
-        this.forgotPassword = (email) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/forgot_password`, data: { email } })
-            .catch(err => {
-                throw err;
-            });
+        this.forgotPassword = async (email) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/forgot_password`, data: { email } });
+            return result;
         };
 
-        this.verifyEmailAddress = (verificationCode) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/verify_email`, data: { code: verificationCode } })
-            .catch(err => {
-                throw err;
-            });
+        this.verifyEmailAddress = async (verificationCode) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/verify_email`, data: { code: verificationCode } });
+            return result;
         };
 
-        this.resetPassword = (resetCode, newPassword) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/reset_password`, data: { code: resetCode, password: newPassword } })
-            .catch(err => {
-                throw err;
-            });
+        this.resetPassword = async (resetCode, newPassword) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/reset_password`, data: { code: resetCode, password: newPassword } })
+            return result;
         };
 
-        this.signUp = (details, signIn = true) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/signup`, data: details })
-            .then(result => {
-                if (signIn) {
-                    accessToken = result.access_token;
-                    this.socket.emit("signin", accessToken);
-                }
-                return { user: result.user, accessToken };
-            })
-            .catch(err => {
-                throw err;
-            });
+        this.signUp = async (details, signIn = true) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signup`, data: details });
+            if (signIn) {
+                return handleSignInResult(result);
+            }
+            return { user: result.user, accessToken };
         };
 
-        this.updateUserDetails = (details) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/update`, data: details })
-            .then(result => {
-                return { user: result.user };
-            })
-            .catch(err => {
-                throw err;
-            });
-        }
+        this.updateUserDetails = async (details) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/update`, data: details });
+            return { user: result.user };
+        };
 
-        this.deleteAccount = (uid, signOut = true) => {
-            if (!this.isConnected) { return Promise.reject(new Error(NOT_CONNECTED_ERROR_MESSAGE)); }
-            return this._request({ method: "POST", url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } })
-            .then(result => {
-                if (signOut) {
-                    this.socket.emit("signout", accessToken);
-                    accessToken = null;
-                }
-                return true;
-            })
-            .catch(err => {
-                throw err;
-            });
-        }
+        this.deleteAccount = async (uid, signOut = true) => {
+            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } });
+            if (signOut) {
+                this.socket.emit('signout', accessToken);
+                accessToken = null;
+                eventCallback('signout');
+            }
+            return true;
+        };
     }
 
     get isConnected() {
@@ -892,13 +1025,14 @@ class WebApi extends Api {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
-    async sync(options = { fetchFreshData: true, eventCallback: null }) {
+    async sync(options = { firstSync: false, fetchFreshData: true, eventCallback: null }) {
         // Sync cache
         if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
         if (this._cache && !this._cache.db.isReady) {
             throw new Error(`cache database is not ready yet`);
         }
 
+        this._eventTimeline.sync = Date.now();
         options.eventCallback && options.eventCallback('sync_start');
         const handleStatsUpdateError = err => {
             this.debug.error(`Failed to update cache db stats:`, err);
@@ -906,9 +1040,11 @@ class WebApi extends Api {
 
         try {
             let totalPendingChanges = 0;
+            const cursor = this._cursor.sync;
             const cacheApi = this._cache && this._cache.db.api;
             if (this._cache) {
-                const pendingChanges = await cacheApi.get(`${this.dbname}/pending`);
+                // Part 1: PUSH local changes
+                const { value: pendingChanges, context } = await cacheApi.get(`${this.dbname}/pending`);
                 cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
                 try {
                     // Merge mutations to multiple properties into single updates (again)
@@ -919,10 +1055,9 @@ class WebApi extends Api {
                     // 3. remove users/ewout/age
                     // 4. remove users/ewout/address/street
                     // --> should merge into:
-                    // 1. update users/ewout: { name: address: { street: 'My street', nr: 1 }, age: null }
+                    // 1. update users/ewout: { name: 'Ewout', address: { street: 'My street', nr: 1 }, age: null }
                     // 4. remove users/ewout/address/street (does not attempt to merge with nested properties of previous updates)
 
-                    debugger;
                     const ids = Object.keys(pendingChanges || {}).sort(); // sort a-z, process oldest mutation first
                     const compatibilityMode = ids.map(id => pendingChanges[id]).some(m => m.type === 'update');
                     const mutations = compatibilityMode
@@ -965,11 +1100,9 @@ class WebApi extends Api {
                             return mutations;
                         }, []);
 
-                    // for (let id of Object.keys(pendingChanges || {}).sort()) { // sort a-z, process oldest mutation first
-                    //     const change = pendingChanges[id];
                     for (let m of mutations) {
                         const id = m.id;
-                        this.debug.verbose(`SYNC processing mutation ${id}: `, m);
+                        this.debug.verbose(`SYNC pushing mutation ${id}: `, m);
                         totalPendingChanges++;
 
                         try {
@@ -987,8 +1120,8 @@ class WebApi extends Api {
                                 throw new Error(`unsupported mutation type "${m.type}"`);
                             }
                             this.debug.verbose(`SYNC mutation ${id} processed ok`);
-                            // delete pendingChanges[id];
-                            // cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+
+                            cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
                         }
                         catch(err) {
                             // Updating remote db failed
@@ -1001,19 +1134,37 @@ class WebApi extends Api {
                             if (typeof err === 'string') { 
                                 err = { code: 'unknown', message: err, stack: 'n/a' }; 
                             }
-                            cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
-                            // Delete the mutation and cached data
-                            // cacheApi.set(`${this.dbname}/pending/${id}`, null);
-                            // cacheApi.set(PathInfo.getChildPath(`${this.dbname}/cache`, m.data.path), null);
+
+                            // Store error report
+                            const errorReport = { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack };
+                            cacheApi.transaction(`${this.dbname}/pending/${id}`, m => {
+                                if (!m.error) {
+                                    m.error = {
+                                        first: errorReport, 
+                                        last: errorReport,
+                                        retries: 0
+                                    };
+                                }
+                                else {
+                                    m.error.last = errorReport;
+                                    m.error.retries++;
+                                }
+                                if (m.error.retries === 3) {
+                                    // After 3 failed retries, move to /dbname/failed/id
+                                    cacheApi.set(`${this.dbname}/failed/${id}`, m);
+                                    return null; // remove pending
+                                }
+                                return m;
+                            });
+                            cacheApi.set(`${this.dbname}/stats/last_sync_error`, errorReport).catch(handleStatsUpdateError);
+                            // TODO: Send error report to server?
+                            // this.reportError({ code: 'sync-mutation', report: errorReport });
+
                             options.eventCallback && options.eventCallback('sync_change_error', { error: err, change: m });
                         }
                     }
 
                     this.debug.verbose(`SYNC push done`);
-                    
-                    // Remove processed mutations
-                    const removePending = ids.reduce((updates, id) => { updates[id] = null; return updates; }, {});
-                    cacheApi.update(`${this.dbname}/pending`, removePending);
 
                     // Update stats
                     cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
@@ -1026,83 +1177,314 @@ class WebApi extends Api {
                     }
                     cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
                     throw err;
-                }            
+                }
             }
 
             // We've pushed our changes, now get fresh data for all paths with active subscriptions
-            let totalRemoteChanges = 0;
-            if (this._cache && options.fetchFreshData) {
-                // Find out what data to load
-                const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
-                    const isWildcardPath = path.includes('*') || path.includes('$');
-                    if (!paths.includes(path) && !isWildcardPath) {
-                        const hasValueSubscribers = this._subscriptions[path].some(s => !['mutated','mutations'].includes(s.event) && !s.event.startsWith('notify_'));
-                        if (hasValueSubscribers) {
-                            const pathInfo = PathInfo.get(path);
-                            const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
-                            if (!ancestorIncluded) { paths.push(path); }
-                        }
-                    }
-                    return paths;
-                }, []);
+
+            // Using a cursor we can get changes since disconnect
+            // - If we have a cursor, we were connected before. 
+            // - A cursor can only be used for events added while connected, not for events added while offline
+            // - A cursor can currently only be used if a cache db is used.
+            // - If there is no cursor because there were no events fired during a previous connection, use disconnected logic for all events
+            // 
+            //  -------------------------------------------------------------
+            // |                 |           event subscribe time           |
+            // |     event       |  pre-connect | connected | disconnected  |
+            // |------------------------------------------------------------|
+            // | value           |     get      |   cursor  |     get       |
+            // | child_added     |     get*     |   cursor  |     get*      |
+            // | child_removed   |     warn     |   cursor  |     warn      |
+            // | child_changed   |     warn     |   cursor  |     warn      |
+            // | mutated         |     warn     |   cursor  |     warn      |
+            // | mutations       |     warn     |   cursor  |     warn      |
+            // | notify_*        |     warn     |   warn    |     warn      |
+            // --------------------------------------------------------------
+            // * only if sub.newOnly === false, warn otherwise
+            // --------------------------------------------------------------
+
+            let totalRemoteChanges = 0, usedSyncMethod = 'reload';
+            const subscriptionPaths = Object.keys(this._subscriptions);
+            const subscriptions = subscriptionPaths.reduce((subs, path) => {
+                this._subscriptions[path].forEach(sub => subs.push(sub));
+                return subs;
+            }, []);
+            subscriptions.for = function(path) {
+                return this.filter(sub => sub.path === path);
+            };
+
+            if (this._cache) { //  && options.fetchFreshData
+                // Part 2: PULL remote changes / fresh data
+
                 // Attach temp events to cache db so they will fire for data changes (just for counting)
-                Object.keys(this._subscriptions).forEach(path => {
-                    this._subscriptions[path].forEach(subscr => {
-                        subscr.tempCallback = (err, path, newValue, oldValue, context) => {
-                            totalRemoteChanges++;
+                subscriptions.forEach(sub => {
+                    sub.tempCallback = (err, path, newValue, oldValue, context) => {
+                        totalRemoteChanges++;
+                    }
+                    cacheApi.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                });
+
+                let strategy = {
+                    /** @type {string[]} Data paths to reload */
+                    reload: [],
+                    /** @type {Array<{path: string, events: string[]}>} Event targets to fetch changes with cursor */
+                    cursor: [],
+                    /** @type {Array<EventSubscription>} Subscriptions that have custom sync fallback logic, used when there is no automated way to synchronize */
+                    fallback: [],
+                    /** @type {Array<{path: string, events: string[]}>} Event targets to warn about */
+                    warn: []
+                };
+                const wasAddedOffline = sub => {
+                    if (!cursor) { return true; }
+                    return sub.lastSynced === 0 && sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
+                };
+                strategy.reload = subscriptionPaths
+                    .filter(path => {
+                        if (path.includes('*') || path.includes('$')) { return false; } // Can't load wildcard paths
+                        return subscriptions.for(path).some(sub => {
+                            if (wasAddedOffline(sub)) {
+                                if (typeof sub.settings.syncFallback === 'function') { return false; }
+                                if (sub.settings.syncFallback === 'reload') { return true; }
+                                if (sub.event === 'value') { return true; }
+                                if (sub.event === 'child_added' && !sub.settings.newOnly) { return true; }
+                            }
+                            return false;
+                        });
+                    })
+                    .reduce((reloadPaths, path) => {
+                        !reloadPaths.some(p => p === path || PathInfo.get(p).isAncestorOf(path)) && reloadPaths.push(path);
+                        return reloadPaths;
+                    }, []);
+                strategy.fallback = subscriptionPaths
+                    .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
+                    .reduce((fallbackItems, path) => {
+                        subscriptions.for(path).forEach(sub => {
+                            if (wasAddedOffline(sub) && typeof sub.settings.syncFallback === 'function') {
+                                fallbackItems.push(sub);
+                            }
+                        });
+                        return fallbackItems;
+                    }, []);
+                strategy.cursor = subscriptionPaths
+                    .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
+                    .reduce((cursorItems, path) => {
+                        const subs = subscriptions.for(path);
+                        const events = subs.filter(sub => !wasAddedOffline(sub) && !strategy.fallback.includes(sub))
+                            .reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
+                        events.length > 0 && cursorItems.push({ path, events });
+                        return cursorItems;
+                    }, []);
+                strategy.warn = subscriptionPaths
+                    .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
+                    .reduce((warnItems, path) => {
+                        const subs = subscriptions.for(path).filter(sub => !strategy.fallback.includes(sub));
+                        subs.forEach(sub => {
+                            if (!strategy.cursor.some(item => item.path === sub.path && item.events.includes(sub.event))) {
+                                let item = warnItems.find(item => item.path === sub.path) || { path: sub.path, events: [] };
+                                item.events.includes(sub.event) || item.events.push(sub.event);
+                            }
+                        });
+                        return warnItems;
+                    }, []);
+
+                console.log(`SYNC strategy`, strategy);
+
+                const syncPromises = [];
+                if (strategy.cursor.length > 0) {
+                    this.debug.log(`SYNC using cursor "${cursor}" for event(s) ${strategy.cursor.map(item => `${item.events.join(', ')} on "/${item.path}"`).join(', ')}`);
+                    const cursorPromise = (async () => {
+                        let remoteMutations;
+                        try {
+                            remoteMutations = await this.getMutations({ for: strategy.cursor, cursor, compressed: true });
                         }
-                        cacheApi.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
-                    });
-                });
-                // Fetch new data
-                const syncPullPromises = loadPaths.map(path => {
-                    this.debug.verbose(`SYNC pull "${path}"`);
-                    return this.get(path, { allow_cache: false })
-                    .catch(err => {
-                        this.debug.error(`SYNC pull error`, err);
-                        options.eventCallback && options.eventCallback('sync_pull_error', err);
-                    });
-                });
-                await Promise.all(syncPullPromises);
+                        catch(err) {
+                            this.debug.error(`SYNC: Could not load remote mutations`, err);
+                            options.eventCallback && options.eventCallback('sync_cursor_error', err);
+                            if (err.code === 'no_transaction_logging') {
+                                // Apparently the server did support transaction logging before, but is now disabled.
+                                // Remove cursor so it won't be used again.
+                                this._updateCursor(null);
+                            }
+                            // Check which subscriptions we'll be able to reload, and which we'll have to issue warnings for
+                            strategy.cursor.forEach(item => {
+                                if (item.events.includes('value')) {
+                                    strategy.reload.push(item.path);
+                                }
+                                else {
+                                    strategy.warn.push(item);
+                                }
+                            });
+                        }
+                        if (remoteMutations) {
+                            usedSyncMethod = 'cursor';
+                            this.debug.log(`SYNC: Got ${remoteMutations.length} remote mutations`, remoteMutations);
+                            const promises = remoteMutations.map(m => {
+                                const cachePath = `${this.dbname}/cache/${m.path}`;
+                                if (m.type === 'update') {
+                                    return cacheApi.update(cachePath, m.value, { context: m.context });
+                                }
+                                else if (m.type === 'set') {
+                                    return cacheApi.set(cachePath, m.value, { context: m.context });
+                                }
+                            });
+                            await Promise.all(promises);                        
+                        }
+                    })();
+                    syncPromises.push(cursorPromise);
+                }
+                if (strategy.reload.length > 0) {
+                    this.debug.log(`SYNC reloading data for event paths ${strategy.reload.map(path => `"/${path}"`).join(', ')}`);
+                    const reloadPromise = (async () => {
+                        const promises = strategy.reload.map(path => {
+                            this.debug.verbose(`SYNC: load "/${path}"`);
+                            return this.get(path, { allow_cache: false })
+                            .catch(err => {
+                                this.debug.error(`SYNC: could not load "/${path}"`, err);
+                                options.eventCallback && options.eventCallback('sync_pull_error', err);
+                            });
+                        });
+                        await Promise.all(promises);                        
+                    })();
+                    syncPromises.push(reloadPromise);
+                }
+                if (strategy.fallback.length > 0) {
+                    this.debug.log(`SYNC using fallback functions for event(s) ${strategy.fallback.map(sub => `${sub.event} on "/${sub.path}"`).join(', ')}`);
+                    const fallbackPromise = (async () => {
+                        const promises = strategy.fallback.map(async sub => {
+                            this.debug.verbose(`SYNC: running fallback for event ${sub.event} on "/${sub.path}"`);
+                            try {
+                                await sub.settings.syncFallback();
+                            }
+                            catch (err) {
+                                this.debug.error(`SYNC: error running fallback function for ${sub.event} on "/${sub.path}"`, err);
+                                options.eventCallback && options.eventCallback('sync_fallback_error', err);
+                            }
+                        });
+                        await Promise.all(promises);                        
+                    })();
+                    syncPromises.push(fallbackPromise);
+                }
+                if (strategy.warn.length > 0) {
+                    this.debug.warn(`SYNC warning: unable to sync event(s) ${strategy.warn.map(item => `${item.events.join(', ')} on "/${item.path}"`).join(', ')}. To resolve this, provide syncFallback functions for these events`);
+                }
+
+                // Wait until they're all done
+                await Promise.all(syncPromises);
+
+                // let remoteMutations;
+                // if (cursor) {
+                //     // Fetch mutations since cursor. This will get (net) mutations since cursor. 
+                //     // This will include the changes on subscribed paths we pushed just now
+
+                //     const targets = 
+                //         Object.keys(this._subscriptions)
+                //         .map(path => ({ path, events: this._subscriptions[path].map(sub => sub.event) }));
+
+                //     try {
+                //         remoteMutations = await this.getMutations({ for: targets, cursor, compressed: true });
+                //     }
+                //     catch(err) {
+                //         this.debug.error(`SYNC: Could not load remote mutations`, err);
+                //         if (err.code === 'no_transaction_logging') {
+                //             // Apparently the server did support transaction logging before, but is now disabled
+                //             this._updateCursor(null);
+                //         }
+                //         else {
+                //             // Failed for some other reason. Keep the cursor but resume with "legacy" data fetching
+                //         }
+                //     }
+                // }
+
+                // if (remoteMutations) {
+                //     usedSyncMethod = 'cursor';
+                //     this.debug.log(`SYNC: Got ${remoteMutations.length} remote mutations`, remoteMutations);
+                //     const promises = remoteMutations.map(m => {
+                //         const cachePath = `${this.dbname}/cache/${m.path}`;
+                //         if (m.type === 'update') {
+                //             return cacheApi.update(cachePath, m.value, { context: m.context });
+                //         }
+                //         else if (m.type === 'set') {
+                //             return cacheApi.set(cachePath, m.value, { context: m.context });
+                //         }
+                //     });
+                //     await Promise.all(promises);
+                // }
+                // else {
+                //     // Find out what data to load
+                //     const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
+                //         const isWildcardPath = path.includes('*') || path.includes('$');
+                //         if (!paths.includes(path) && !isWildcardPath) {
+                //             const hasValueSubscribers = this._subscriptions[path].some(s => !['mutated','mutations'].includes(s.event) && !s.event.startsWith('notify_'));
+                //             if (hasValueSubscribers) {
+                //                 const pathInfo = PathInfo.get(path);
+                //                 const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
+                //                 if (!ancestorIncluded) { paths.push(path); }
+                //             }
+                //         }
+                //         return paths;
+                //     }, []);
+                    
+                //     const syncPullPromises = loadPaths.map(path => {
+                //         this.debug.verbose(`SYNC: load "/${path}"`);
+                //         return this.get(path, { allow_cache: false })
+                //         .catch(err => {
+                //             this.debug.error(`SYNC: could not load "/${path}"`, err);
+                //             options.eventCallback && options.eventCallback('sync_pull_error', err);
+                //         });
+                //     });
+                //     await Promise.all(syncPullPromises);                    
+                // }
+
+                // Wait shortly to allow any pending temp cache events to fire
+                await new Promise(resolve => setTimeout(resolve, 10));         
+
                 // Unsubscribe temp cache subscriptions
-                Object.keys(this._subscriptions).forEach(path => {
-                    this._subscriptions[path].forEach(subscr => {
-                        if (typeof subscr.tempCallback !== 'function') { 
-                            // If a subscription was added while synchronizing, it won't have a tempCallback.
-                            // This is no big deal, since our tempCallback is only to update sync statistics.
-                            // Before acebase-client v0.9.29, this caused all subscriptions with current path
-                            // and type to be removed.
-                            return; 
-                        }
-                        cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, subscr.path), subscr.event, subscr.tempCallback);
-                        delete subscr.tempCallback;
-                    });
+                subscriptions.forEach(sub => {
+                    console.assert(typeof sub.tempCallback === 'function');
+                    cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                    delete sub.tempCallback;
                 });
             }
             else if (!this._cache) {
-                // Not using cache, so there is no real way of knowing if anything changed or removed.
-                // We could trigger fake "value", "child_added" and "child_changed" events with fresh data, 
-                // but... what's the use? It would result in broken data? 
-                // --> Let's run "value" events only, and warn about all other events
+                // Not using cache
+                const syncPromises = [];
+                
+                // No cache database used
+                // Until acebase-server supports getting missed events with a cursor (in addition to getting mutations),
+                // there is no way for the client to determine exact data changes at this moment - we have no previous values.
+                // We can only fetch fresh data for 'value' events, run syncFallback functions and warn about all other events
 
-                const syncPullPromises = [];
-                Object.keys(this._subscriptions).forEach(path => {
-                    const subs = this._subscriptions[path];
-                    const valueSubscriptions = subs.filter(s => s.event === 'value');
-                    if (valueSubscriptions.length === 0) {
-                        const events = subs.reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
-                        return events.forEach(event => this.debug.warn(`Subscription "${event}" on path "${path}" might have missed events while offline. Data should be reloaded!`));
+                subscriptionPaths.forEach(path => {
+                    const subs = subscriptions.for(path);
+                    const warnEvents = [];
+                    subs.filter(sub => sub.event !== 'value').forEach(sub => {
+                        if (typeof sub.settings.syncFallback === 'function') {
+                            syncPromises.push(sub.settings.syncFallback());
+                        }
+                        else {
+                            !warnEvents.includes(sub.event) && warnEvents.push(sub.event);
+                        }
+                    })
+                    if (warnEvents.length > 0) {
+                        this.debug.warn(`Subscriptions ${warnEvents.join(', ')} on path "${path}" might have missed events while offline. Data should be reloaded!`);
                     }
-                    const p = this.get(path, { allow_cache: false }).then(value => {
-                        valueSubscriptions.forEach(subscr => subscr.callback(null, path, value));
-                    });
-                    syncPullPromises.push(p);
+                    const valueSubscriptions = subs.filter(sub => sub.event === 'value');
+                    if (valueSubscriptions.length > 0) {
+                        const p = this.get(path, { allow_cache: false }).then(value => {
+                            valueSubscriptions.forEach(subscr => subscr.callback(null, path, value)); // No previous value!
+                        });
+                        syncPromises.push(p);
+                    }
                 });
-                await Promise.all(syncPullPromises);
+
+                await Promise.all(syncPromises);
             }
 
+            // Update subscription sync stats
+            subscriptions.forEach(sub => sub.lastSynced = Date.now());
+
             this.debug.verbose(`SYNC done`);
-            const info = { local: totalPendingChanges, remote: totalRemoteChanges };
+            const info = { local: totalPendingChanges, remote: totalRemoteChanges, method: usedSyncMethod, cursor };
             options.eventCallback && options.eventCallback('sync_done', info);
             return info;
         }
@@ -1111,6 +1493,26 @@ class WebApi extends Api {
             options.eventCallback && options.eventCallback('sync_error', err);
             throw err;
         }
+    }
+
+    /**
+     * Gets all relevant mutations for specific events on a path and since specified cursor
+     * @param {object} filter
+     * @param {string} [filter.path] path to get all mutations for, only used if `for` property isn't used
+     * @param {Array<{ path: string, events: string[] }>} [filter.for] paths and events to get relevant mutations for
+     * @param {string} filter.cursor cursor to use
+     */
+    async getMutations(filter) {
+        if (typeof filter !== 'object') { throw new Error('No filter specified'); }
+        if (typeof filter.cursor !== 'string') { throw new Error('No cursor given'); }
+        const query = Object.keys(filter)
+            .map(key => {
+                let val = filter[key];
+                if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
+                return `${key}=${val}`;
+            })
+            .join('&');
+        return this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}` }); // /${filter.path}
     }
 
     async _addCacheSetMutation(path, value, context) {
@@ -1224,7 +1626,7 @@ class WebApi extends Api {
         };
         const updateServer = () => {
             const data = JSON.stringify(Transport.serialize(updates));
-            return this._request({ method: "POST", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context });
+            return this._request({ method: 'POST', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context });
         };
         if (!useCache) {
             return updateServer();
@@ -1236,8 +1638,8 @@ class WebApi extends Api {
         const updateCache = () => {
             const properties = Object.keys(updates);
             return cacheApi.get(cachePath, { include: properties })
-            .then(currentValues => {
-                rollbackUpdates = currentValues;
+            .then(result => {
+                rollbackUpdates = result.value;
                 return cacheApi.update(cachePath, updates, { context: options.context });
             });
         };
@@ -1354,9 +1756,15 @@ class WebApi extends Api {
         return this._cache.priority === 'cache' ? cachePromise : serverPromise;
     }
 
-    get(path, options = { allow_cache: true }) {
+    /**
+     * 
+     * @param {string} path 
+     * @param {object} [options] 
+     * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context (NEW)
+     */
+    async get(path, options = { allow_cache: true }) {
         const useCache = this._cache && options.allow_cache !== false;
-        const getServerValue = () => {
+        const getServerValue = async () => {
             // Get from server
             let url = `${this.url}/data/${this.dbname}/${path}`;
             let filtered = false;
@@ -1376,39 +1784,39 @@ class WebApi extends Api {
                     url += `?${query.join('&')}`;
                 }
             }
-            return this._request({ url })
-            .then(data => {
-                let val = Transport.deserialize(data);
-                if (this._cache) {
-                    // Update cache without waiting
-                    // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
-                    // TODO: do update if no nested filters are used.
-                    // if (filtered) {
-                    //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
-                    // }
-                    if (!filtered) {
-                        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-                        this._cache.db.api.set(cachePath, val, { context: { acebase_operation: 'update_cache' } })
-                        .catch(err => {
-                            this.debug.error(`Error caching data for "/${path}"`, err)
-                        });
-                    }
+            const result = await this._request({ url, includeContext: true });
+            const context = result.context;
+            const value = Transport.deserialize(result.data);
+            if (this._cache) {
+                // Update cache without waiting
+                // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
+                // if (filtered) {
+                //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
+                // }
+                if (!filtered) {
+                    const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+                    this._cache.db.api.set(cachePath, value, { context: { acebase_operation: 'update_cache', acebase_server_context: context } })
+                    .catch(err => {
+                        this.debug.error(`Error caching data for "/${path}"`, err)
+                    });
                 }
-                return val;
-            })
-            .catch(err => {
-                throw err;
-            });
+            }
+            return { value, context };
+
         };
         const getCacheValue = () => {
             return this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
         };
 
         if (!useCache) {
-            return getServerValue();
+            const { value, context } = await getServerValue();
+            context.acebase_origin = 'server';
+            return { value, context };
         }
         else if (!this.isConnected || this._cache.priority === 'cache') {
-            return getCacheValue();
+            const { value, context } = await getCacheValue();
+            context.acebase_origin = 'cache';
+            return { value, context };
         }
         else {
             // Get both, use cached value if available and server version takes too long
@@ -1417,10 +1825,12 @@ class WebApi extends Api {
                 const gotValue = (source, val) => {
                     // console.log(`Got ${source} value of "${path}":`, val);
                     if (done) { return; }
+                    const { value, context } = val;
                     if (source === 'server') {
                         done = true;
                         // console.log(`Using server value for "${path}"`);
-                        resolve(val);
+                        context.acebase_origin = 'server';
+                        resolve({ value, context });
                     }
                     else if (val === null) {
                         // Cached results are not available
@@ -1434,7 +1844,8 @@ class WebApi extends Api {
                         // Cached results, don't wait for server value
                         done = true; 
                         // console.log(`Using cache value for "${path}"`);
-                        resolve(val); 
+                        context.acebase_origin = 'cache';
+                        resolve({ value, context });
                     }
                     else {
                         // Cached results, wait 1s before resolving with this value, server value might follow soon
@@ -1442,7 +1853,8 @@ class WebApi extends Api {
                             if (done) { return; }
                             console.log(`Using (delayed) cache value for "${path}"`);
                             done = true;
-                            resolve(val);
+                            context.acebase_origin = 'cache';
+                            resolve({ value, context });
                         }, 1000);
                     }
                 };
@@ -1599,7 +2011,7 @@ class WebApi extends Api {
             this._realtimeQueries[request.query_id] = { query, options };
         }
         const data = JSON.stringify(Transport.serialize(request));
-        return this._request({ method: "POST", url: `${this.url}/query/${this.dbname}/${path}`, data })
+        return this._request({ method: 'POST', url: `${this.url}/query/${this.dbname}/${path}`, data })
         .then(data => {
             let results = Transport.deserialize(data);
             return results.list;
@@ -1611,7 +2023,7 @@ class WebApi extends Api {
 
     createIndex(path, key, options) {
         const data = JSON.stringify({ action: "create", path, key, options });
-        return this._request({ method: "POST", url: `${this.url}/index/${this.dbname}`, data })
+        return this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}`, data })
         .catch(err => {
             throw err;
         });
@@ -1663,7 +2075,7 @@ class WebApi extends Api {
             schema = (new SchemaDefinition(schema)).text;
         }
         const data = JSON.stringify({ action: "set", path, schema });
-        return this._request({ method: "POST", url: `${this.url}/schema/${this.dbname}`, data })
+        return this._request({ method: 'POST', url: `${this.url}/schema/${this.dbname}`, data })
         .catch(err => {
             throw err;
         });
@@ -1713,17 +2125,15 @@ class AceBaseClientAuth {
      * @param {string} password Your password
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signIn(username, password) {
+    async signIn(username, password) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signIn(username, password));
+            await this.client.ready();
         }
-        return this.client.api.signIn(username, password)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken }; // success: true, 
-        });
+        const details = await this.client.api.signIn(username, password);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken }; // success: true, 
     }
 
     /**
@@ -1732,17 +2142,15 @@ class AceBaseClientAuth {
      * @param {string} password Your password
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signInWithEmail(email, password) {
+    async signInWithEmail(email, password) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signInWithEmail(email, password));
+            await this.client.ready();
         }
-        return this.client.api.signInWithEmail(email, password)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken }; //success: true, 
-        });
+        const details = await this.client.api.signInWithEmail(email, password);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken }; //success: true, 
     }
 
     /**
@@ -1750,17 +2158,15 @@ class AceBaseClientAuth {
      * @param {string} accessToken a previously assigned access token
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signInWithToken(accessToken) {
+    async signInWithToken(accessToken) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signInWithToken(accessToken));
+            await this.client.ready();
         }
-        return this.client.api.signInWithToken(accessToken)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken }; // success: true, 
-        });
+        const details = await this.client.api.signInWithToken(accessToken);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken }; // success: true, 
     }
 
     /**
@@ -1771,16 +2177,15 @@ class AceBaseClientAuth {
      * to finish signing in.
      * @param {string} providerName one of the configured providers (eg 'facebook', 'google', 'apple', 'spotify')
      * @param {string} callbackUrl url on your website/app that will receive the sign in result
+     * @param {any} [options] optional provider specific authentication settings
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
-    startAuthProviderSignIn(providerName, callbackUrl) {
+    async startAuthProviderSignIn(providerName, callbackUrl, options) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.startAuthProviderSignIn(providerName, callbackUrl));
+            await this.client.ready();
         }
-        return this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user)
-        .then(details => {
-            return details.redirectUrl;
-        });
+        const details = await this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user, options);
+        return details.redirectUrl;
     }
 
     /**
@@ -1788,17 +2193,15 @@ class AceBaseClientAuth {
      * @param {string} callbackResult result received in your.callback/url?result
      * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }>}
      */
-    finishAuthProviderSignIn(callbackResult) {
+    async finishAuthProviderSignIn(callbackResult) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.finishAuthProviderSignIn(callbackResult));
+            await this.client.ready();
         }
-        return this.client.api.finishAuthProviderSignIn(callbackResult)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
-        });
+        const details = await this.client.api.finishAuthProviderSignIn(callbackResult);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
     }
 
     /**
@@ -1807,14 +2210,12 @@ class AceBaseClientAuth {
      * @param {string} refreshToken 
      * @returns {Promise<{ provider: IAceBaseAuthProviderTokens }}
      */
-    refreshAuthProviderToken(providerName, refreshToken) {
+    async refreshAuthProviderToken(providerName, refreshToken) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.refreshAuthProviderToken(providerName, refreshToken));
+            await this.client.ready();
         }
-        return this.client.api.refreshAuthProviderToken(providerName, refreshToken)
-        .then(details => {
-            return { provider: details.provider };
-        })
+        const details = await this.client.api.refreshAuthProviderToken(providerName, refreshToken);
+        return { provider: details.provider };
     }
 
     /**
@@ -1823,29 +2224,27 @@ class AceBaseClientAuth {
      * getRedirectResult() when your page is loaded again to check if the user was authenticated.
      * @param {string} providerName 
      */
-    signInWithRedirect(providerName) {
+    async signInWithRedirect(providerName) {
         if (typeof window === 'undefined') {
             throw new Error(`signInWithRedirect can only be used within a browser context`);
         }
-        return this.startAuthProviderSignIn(providerName, window.location.href)
-        .then(redirectUrl => {
-            window.location.href = redirectUrl;
-        });
+        const redirectUrl = await this.startAuthProviderSignIn(providerName, window.location.href);
+        window.location.href = redirectUrl;
     }
 
     /** 
      * Checks if the user authentication with an auth provider. 
      */
-    getRedirectResult() {
+    async getRedirectResult() {
         if (typeof window === 'undefined') {
             throw new Error(`getRedirectResult can only be used within a browser context`);
         }
         const match = window.location.search.match(/[?&]result=(.*?)(?:&|$)/);
         const callbackResult = match && decodeURIComponent(match[1]);
         if (!callbackResult) {
-            return Promise.resolve(null);
+            return null;
         }
-        return this.finishAuthProviderSignIn(callbackResult);
+        return await this.finishAuthProviderSignIn(callbackResult);
     }
 
     /**
@@ -1857,7 +2256,7 @@ class AceBaseClientAuth {
      */
     async signOut(options) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signOut(options));
+            await this.client.ready();
         }
         else if (!this.user) {
             throw { code: 'not_signed_in', message: 'Not signed in!' };
@@ -1877,19 +2276,17 @@ class AceBaseClientAuth {
      * @param {string} newPassword 
      * @returns {Promise<{ accessToken: string }>} returns a promise that resolves with a new access token
      */
-    changePassword(oldPassword, newPassword) {
+    async changePassword(oldPassword, newPassword) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.changePassword(oldPassword, newPassword));
+            await this.client.ready();
         }
         else if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
-        return this.client.api.changePassword(this.user.uid, oldPassword, newPassword)
-        .then(result => {
-            this.accessToken = result.accessToken;
-            this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
-            return { accessToken: result.accessToken }; //success: true, 
-        });
+        const result = await this.client.api.changePassword(this.user.uid, oldPassword, newPassword);
+        this.accessToken = result.accessToken;
+        this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
+        return { accessToken: result.accessToken }; //success: true, 
     }
 
     /**
@@ -1897,11 +2294,11 @@ class AceBaseClientAuth {
      * @param {string} email
      * @returns {Promise<void>} returns a promise that resolves once the request has been processed
      */
-    forgotPassword(email) {
+    async forgotPassword(email) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.forgotPassword(email));
+            await this.client.ready();
         }
-        return this.client.api.forgotPassword(email);
+        return await this.client.api.forgotPassword(email);
     }
 
     /**
@@ -1910,11 +2307,11 @@ class AceBaseClientAuth {
      * @param {string} newPassword
      * @returns {Promise<void>} returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
      */
-    resetPassword(resetCode, newPassword) {
+    async resetPassword(resetCode, newPassword) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.resetPassword(resetCode, newPassword));
+            await this.client.ready();
         }
-        return this.client.api.resetPassword(resetCode, newPassword);
+        return await this.client.api.resetPassword(resetCode, newPassword);
     }
 
     /**
@@ -1922,30 +2319,28 @@ class AceBaseClientAuth {
      * @param {string} verificationCode
      * @returns {Promise<void>} returns a promise that resolves when verification was successful
      */
-    verifyEmailAddress(verificationCode) {
+    async verifyEmailAddress(verificationCode) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.verifyEmailAddress(verificationCode));
+            await this.client.ready();
         }
-        return this.client.api.verifyEmailAddress(verificationCode);
+        return await this.client.api.verifyEmailAddress(verificationCode);
     }
 
-    _updateUserDetails(details) {
+    async _updateUserDetails(details) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this._updateUserDetails(details));
+            await this.client.ready();
         }
         if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
         if (typeof details !== 'object') {
-            return Promise.reject({ code: 'invalid_details', message: 'details must be an object' });
+            throw { code: 'invalid_details', message: 'details must be an object' };
         }
-        return this.client.api.updateUserDetails(details)
-        .then(result => {
-            Object.keys(result.user).forEach(key => {
-                this.user[key] = result.user[key];
-            });
-            return { user: this.user }; // success: true
+        const result = await this.client.api.updateUserDetails(details);
+        Object.keys(result.user).forEach(key => {
+            this.user[key] = result.user[key];
         });
+        return { user: this.user }; // success: true
     }
 
     /**
@@ -1953,8 +2348,8 @@ class AceBaseClientAuth {
      * @param {string} newUsername 
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
-    changeUsername(newUsername) {
-        return this._updateUserDetails({ username: newUsername });
+    async changeUsername(newUsername) {
+        return await this._updateUserDetails({ username: newUsername });
     }
 
     /**
@@ -1962,8 +2357,20 @@ class AceBaseClientAuth {
      * @param {string} newEmail 
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
-    changeEmail(newEmail) {
-        return this._updateUserDetails({ email: newEmail });
+    async changeEmail(newEmail) {
+        return await this._updateUserDetails({ email: newEmail });
+    }
+
+    /**
+     * Changes the user's profile picture
+     * @param {object} newPicture
+     * @param {string} newPicture.url
+     * @param {number} newPicture.width
+     * @param {number} newPicture.height
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+     async changePicture(newPicture) {
+        return await this._updateUserDetails({ picture: newPicture });
     }
 
     /**
@@ -1971,8 +2378,8 @@ class AceBaseClientAuth {
      * @param {{ [key:string]: string|number|boolean }} settings - the settings to update
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
-    updateUserSettings(settings) {
-        return this._updateUserDetails({ settings });
+    async updateUserSettings(settings) {
+        return await this._updateUserDetails({ settings });
     }
 
     /**
@@ -1986,15 +2393,15 @@ class AceBaseClientAuth {
      * @param {{ [key:string]: string|number|boolean }} [details.settings] optional settings 
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signUp(details) {
+    async signUp(details) {
         if (!details.username && !details.email) {
-            return Promise.reject({ code: 'invalid_details', message: 'No username or email set' });
+            throw { code: 'invalid_details', message: 'No username or email set' };
         }
         if (!details.password) {
-            return Promise.reject({ code: 'invalid_details', message: 'No password given' });
+            throw { code: 'invalid_details', message: 'No password given' };
         }
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signUp(details));
+            await this.client.ready();
         }
         const isAdmin = this.user && this.user.uid === 'admin';
         if (this.user && !isAdmin) {
@@ -2003,19 +2410,17 @@ class AceBaseClientAuth {
             this.user = null;
             this.eventCallback("signout", { source: 'signup', user } );
         }
-        return this.client.api.signUp(details, !isAdmin)
-        .then(details => {
-            if (isAdmin) {
-                return { user: details.user };
-            }
-            else {
-                // Sign into new account
-                this.accessToken = details.accessToken;
-                this.user = new AceBaseUser(details.user);
-                this.eventCallback("signin", { source: "signup", user: this.user, accessToken: this.accessToken });
-                return { user: this.user, accessToken: this.accessToken }; //success: true, 
-            }
-        });
+        const result = await this.client.api.signUp(details, !isAdmin);
+        if (isAdmin) {
+            return { user: result.user };
+        }
+        else {
+            // Sign into new account
+            this.accessToken = result.accessToken;
+            this.user = new AceBaseUser(result.user);
+            this.eventCallback("signin", { source: "signup", user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken }; //success: true, 
+        }
     }
 
     /**
@@ -2025,31 +2430,29 @@ class AceBaseClientAuth {
      * @param {string} [uid] for admin user only: remove account with uid
      * @returns {Promise<void>}
      */
-    deleteAccount(uid) {
+    async deleteAccount(uid) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.deleteAccount(uid));
+            await this.client.ready();
         }
         if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
         if (uid && this.user.uid !== 'admin') {
-            return Promise.reject({ code: 'not_admin', message: 'Cannot remove other accounts than signed into account, unless you are admin' });
+            throw { code: 'not_admin', message: 'Cannot remove other accounts than signed into account, unless you are admin' };
         }
         const deleteUid = uid || this.user.uid;
         if (deleteUid === 'admin') {
-            return Promise.reject({ code: 'not_allowed', message: 'Cannot remove admin user' });
+            throw { code: 'not_allowed', message: 'Cannot remove admin user' };
         }
         const signOut = this.user.uid !== 'admin';
-        return this.client.api.deleteAccount(deleteUid, signOut)
-        .then(result => {
-            if (signOut) {
-                // Sign out of the account
-                this.accessToken = null;
-                let user = this.user;
-                this.user = null;
-                this.eventCallback("signout", { source: 'delete_account', user });
-            }
-        });
+        const result = await this.client.api.deleteAccount(deleteUid, signOut);
+        if (signOut) {
+            // Sign out of the account
+            this.accessToken = null;
+            let user = this.user;
+            this.user = null;
+            this.eventCallback("signout", { source: 'delete_account', user });
+        }
     }
 }
 
@@ -2119,6 +2522,9 @@ module.exports = { PromiseTimeoutError, promiseTimeout };
 },{}],10:[function(require,module,exports){
 const { AceBaseRequestError } = require('./error');
 
+/**
+ * @returns {Promise<{ context: any, data: any }>} returns a promise that resolves with an object containing data and an optionally returned context
+ */
 async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) {
     let postData = options.data;
     if (typeof postData === 'undefined' || postData === null) {
@@ -2171,13 +2577,10 @@ async function request(method, url, options = { accessToken: null, data: null, d
 
     const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
     if (res.status === 200) {
-        if (isJSON) {
-            let val = JSON.parse(data);
-            return val;
-        }
-        else {
-            return data;
-        }
+        let context = res.headers.get('AceBase-Context');
+        if (context && context[0] === '{') { context = JSON.parse(context); }
+        if (isJSON) { data = JSON.parse(data); }
+        return { context, data };
     }
     else {
         request.body = postData;
@@ -2245,9 +2648,13 @@ function checkLocalTime() {
     }
     time.lastTime = now;
     time.lastPerf = perf;
-    setTimeout(checkLocalTime, interval);
+    scheduleLocalTimeCheck();
 }
-setTimeout(checkLocalTime, interval);
+function scheduleLocalTimeCheck() {
+    const timeout = setTimeout(checkLocalTime, interval);
+    timeout.unref && timeout.unref(); // Don't delay exiting the main process when the event loop is empty
+}
+scheduleLocalTimeCheck();
 
 function setServerBias(bias) {
     if (typeof bias === 'number') {
@@ -2517,7 +2924,7 @@ class Api {
      * @param event event to subscribe to ("value", "child_added" etc)
      * @param callback callback function
      */
-    subscribe(path, event, callback) { throw new NotImplementedError('subscribe'); }
+    subscribe(path, event, callback, settings) { throw new NotImplementedError('subscribe'); }
     unsubscribe(path, event, callback) { throw new NotImplementedError('unsubscribe'); }
     update(path, updates, options) { throw new NotImplementedError('update'); }
     set(path, value, options) { throw new NotImplementedError('set'); }
@@ -2720,7 +3127,7 @@ const isProxy = Symbol('isProxy');
 class LiveDataProxy {
     /**
      * Creates a live data proxy for the given reference. The data of the reference's path will be loaded, and kept in-sync
-     * with live data by listening for 'mutated' events. Any changes made to the value by the client will be synced back
+     * with live data by listening for 'mutations' events. Any changes made to the value by the client will be synced back
      * to the database.
      * @param ref DataReference to create proxy for.
      * @param defaultValue Default value to use for the proxy if the database path does not exist yet. This value will also
@@ -2764,7 +3171,10 @@ class LiveDataProxy {
             return true;
         };
         // Subscribe to mutations events on the target path
-        const subscription = ref.on('mutations').subscribe(async (snap) => {
+        const syncFallback = async () => {
+            await reload();
+        };
+        const subscription = ref.on('mutations', { syncFallback }).subscribe(async (snap) => {
             var _a;
             if (!loaded) {
                 return;
@@ -2781,7 +3191,7 @@ class LiveDataProxy {
                 }
                 if (onMutationCallback) {
                     const changeRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
-                    const changeSnap = new data_snapshot_1.DataSnapshot(changeRef, mutation.val, false, mutation.prev);
+                    const changeSnap = new data_snapshot_1.DataSnapshot(changeRef, mutation.val, false, mutation.prev, snap.context());
                     onMutationCallback(changeSnap, isRemote);
                 }
                 return true;
@@ -3094,6 +3504,10 @@ class LiveDataProxy {
             // }
         };
         const snap = await ref.get({ allow_cache: true });
+        const gotOfflineStartValue = snap.context().acebase_origin === 'cache';
+        if (gotOfflineStartValue) {
+            console.warn(`Started data proxy with cached value of "${ref.path}", check if its value is reloaded on next connection!`);
+        }
         loaded = true;
         cache = snap.val();
         if (cache === null && typeof defaultValue !== 'undefined') {
@@ -3115,34 +3529,44 @@ class LiveDataProxy {
             // there should be no need to call this method.
             assertProxyAvailable();
             mutationQueue.splice(0); // Remove pending mutations. Will be empty in production, but might not be while debugging, leading to weird behaviour.
-            const newSnap = await ref.get();
-            cache = newSnap.val();
-            newSnap.ref.context({ acebase_proxy: { id: proxyId, source: 'reload' } });
-            onMutationCallback && onMutationCallback(newSnap, true);
+            const snap = await ref.get({ allow_cache: false });
+            cache = snap.val();
+            if (onMutationCallback) {
+                const context = snap.context();
+                context.acebase_proxy = { id: proxyId, source: 'reload' };
+                const newSnap = new data_snapshot_1.DataSnapshot(ref, snap.val(), false, snap.previous(), context);
+                onMutationCallback(newSnap, true);
+            }
             // TODO: run all other subscriptions
         };
-        let waitingForReconnectSync = false; // Prevent quick connect/disconnect pulses to stack sync_done event handlers
-        ref.db.on('disconnect', () => {
-            // Handle disconnect, can only happen when connected to a remote server with an AceBaseClient
-            // Wait for server to connect again
-            ref.db.once('connect', () => {
-                // We're connected again
-                // Now wait for sync_end event, so any proxy changes will have been pushed to the server
-                if (waitingForReconnectSync || proxy === null) {
-                    return;
-                }
-                waitingForReconnectSync = true;
-                ref.db.once('sync_done', () => {
-                    // Reload proxy value now
-                    waitingForReconnectSync = false;
-                    if (proxy === null) {
-                        return;
-                    }
-                    console.log(`Reloading proxy value after connect & sync`);
-                    reload();
-                });
-            });
-        });
+        // let waitingForReconnectSync = false; // Prevent quick connect/disconnect pulses to stack sync_done event handlers
+        // const waitForConnection = async () => {
+        //     // Wait for server to connect again
+        //     await ref.db.once('connect');
+        //     // We're connected again
+        //     if (waitingForReconnectSync || proxy === null) { return; }
+        //     // Now wait for sync_end event, so any local proxy changes will have been pushed to the server
+        //     waitingForReconnectSync = true;
+        //     const info:{ local: number, remote: number, method: string, cursor?: string } = await ref.db.once('sync_done');
+        //     waitingForReconnectSync = false;
+        //     if (proxy === null) { return; }
+        //     if (info.method === 'cursor') {
+        //         // Synchronized with a cursor: we've received all missed remote mutations so we don't have to reload the value.
+        //         console.log(`Proxy value for "/${ref.path}" was synced with cursor ${info.cursor}`);
+        //     }
+        //     else {
+        //         // Reload proxy value now
+        //         console.log(`Reloading proxy value for "/${ref.path}" after reconnect`);
+        //         reload();
+        //     }
+        // }
+        // ref.db.on('disconnect', () => {
+        //     // Handle disconnect, can only happen when connected to a remote server with an AceBaseClient
+        //     waitForConnection();
+        // });
+        // if (gotOfflineStartValue) {
+        //     waitForConnection();
+        // }
         return {
             async destroy() {
                 await processPromise;
@@ -3174,6 +3598,9 @@ class LiveDataProxy {
                 }
                 flagOverwritten([]);
                 cache = val;
+            },
+            get ref() {
+                return ref;
             },
             reload,
             onMutation(callback) {
@@ -4114,7 +4541,7 @@ class DataReference {
      * data. This enables you to manually retreive data upon changes (eg if you want to exclude certain child
      * data from loading)
      * @param event Name of the event to subscribe to
-     * @param callback Callback function or whether or not to run callbacks on current values when using "value" or "child_added" events
+     * @param callback Callback function, event settings, or whether or not to run callbacks on current values when using "value" or "child_added" events
      * @param cancelCallback Function to call when the subscription is not allowed, or denied access later on
      * @returns returns an EventStream
      */
@@ -4132,6 +4559,7 @@ class DataReference {
             userCallback: typeof callback === 'function' && callback,
             ourCallback: (err, path, newValue, oldValue, eventContext) => {
                 if (err) {
+                    // TODO: Investigate if this ever happens?
                     this.db.debug.error(`Error getting data for event ${event} on path "${path}"`, err);
                     return;
                 }
@@ -4172,7 +4600,25 @@ class DataReference {
                     }
                 });
             }
-            let authorized = this.db.api.subscribe(this.path, event, cb.ourCallback);
+            const advancedOptions = typeof callback === 'object'
+                ? callback
+                : { newOnly: !callback }; // newOnly: if callback is not 'truthy', could change this to (typeof callback !== 'function' && callback !== true) but that would break client code that uses a truthy argument.
+            if (typeof advancedOptions.newOnly !== 'boolean') {
+                advancedOptions.newOnly = false;
+            }
+            if (this.isWildcardPath) {
+                advancedOptions.newOnly = true;
+            }
+            const cancelSubscription = (err) => {
+                // Access denied?
+                // Cancel subscription
+                let callbacks = this[_private].callbacks;
+                callbacks.splice(callbacks.indexOf(cb), 1);
+                this.db.api.unsubscribe(this.path, event, cb.ourCallback);
+                // Call cancelCallbacks
+                eventPublisher.cancel(err.message);
+            };
+            let authorized = this.db.api.subscribe(this.path, event, cb.ourCallback, { newOnly: advancedOptions.newOnly, cancelCallback: cancelSubscription, syncFallback: advancedOptions.syncFallback });
             const allSubscriptionsStoppedCallback = () => {
                 let callbacks = this[_private].callbacks;
                 callbacks.splice(callbacks.indexOf(cb), 1);
@@ -4185,23 +4631,13 @@ class DataReference {
                     // Access granted
                     eventPublisher.start(allSubscriptionsStoppedCallback);
                 })
-                    .catch(err => {
-                    // Access denied?
-                    // Cancel subscription
-                    let callbacks = this[_private].callbacks;
-                    callbacks.splice(callbacks.indexOf(cb), 1);
-                    this.db.api.unsubscribe(this.path, event, cb.ourCallback);
-                    // Call cancelCallbacks
-                    eventPublisher.cancel(err.message);
-                    // No need to call cancelCallback, original callbacks are now added to event stream
-                    // cancelCallback && cancelCallback(err.message);
-                });
+                    .catch(cancelSubscription);
             }
             else {
                 // Local API, always authorized
                 eventPublisher.start(allSubscriptionsStoppedCallback);
             }
-            if (callback && !this.isWildcardPath) {
+            if (!advancedOptions.newOnly) {
                 // If callback param is supplied (either a callback function or true or something else truthy),
                 // it will fire events for current values right now.
                 // Otherwise, it expects the .subscribe methode to be used, which will then
@@ -4296,9 +4732,15 @@ class DataReference {
         if (typeof options.allow_cache === 'undefined') {
             options.allow_cache = true;
         }
-        const promise = this.db.api.get(this.path, options).then(value => {
-            value = this.db.types.deserialize(this.path, value);
-            const snapshot = new data_snapshot_1.DataSnapshot(this, value);
+        const promise = this.db.api.get(this.path, options).then(result => {
+            const isNewApiResult = ('context' in result && 'value' in result);
+            if (!isNewApiResult) {
+                // Should not happen
+                throw new Error(`AceBase api.get method returned old response value. Update your acebase or acebase-client package`);
+            }
+            const context = result.context || {};
+            const value = this.db.types.deserialize(this.path, result.value);
+            const snapshot = new data_snapshot_1.DataSnapshot(this, value, undefined, undefined, context);
             return snapshot;
         });
         if (callback) {
@@ -5081,15 +5523,13 @@ function setObservable(Observable) {
     _observable = Observable;
 }
 exports.setObservable = setObservable;
-;
-;
 /**
  * rxjs is an optional dependency that only needs installing when any of AceBase's observe methods are used.
- * In this test suite Observables are therefore not available, so we have to provide a shim
+ * If for some reason rxjs is not available (eg in test suite), we can provide a shim. This class is used when
+ * `db.setObservable("shim")` is called
  */
 class ObservableShim {
     constructor(create) {
-        // private _emit() {}
         this._active = false;
         this._subscribers = [];
         this._create = create;
@@ -5141,40 +5581,6 @@ function getPathKeys(path) {
         return key.startsWith('[') ? parseInt(key.substr(1, key.length - 2)) : key;
     });
 }
-// function getPathInfo(path: string): { parent: string, key: string|number } {
-//     path = path.replace(/^\//, ''); // Remove leading slash
-//     if (path.length === 0) {
-//         return { parent: null, key: '' };
-//     }
-//     const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('['));
-//     let parentPath = i < 0 ? '' : path.substr(0, i);
-//     let key:string|number = i < 0 ? path : path.substr(i);
-//     if (key.startsWith('[')) { 
-//         key = parseInt(key.substr(1, key.length - 2)); 
-//     }
-//     else if (key.startsWith('/')) {
-//         key = key.substr(1); // Chop off leading slash
-//     }
-//     if (parentPath === path) {
-//         parentPath = null;
-//     }
-//     return { parent: parentPath, key };
-// }
-// function getChildPath(path: string, key: string|number): string {
-//     path = path.replace(/^\//, ""); // Remove leading slash
-//     key = typeof key === "string" ? key.replace(/^\//, "") : key; // Remove leading slash
-//     if (path.length === 0) {
-//         if (typeof key === "number") { throw new TypeError("Cannot add array index to root path!"); }
-//         return key;
-//     }
-//     if (typeof key === "string" && key.length === 0) {
-//         return path;
-//     }
-//     if (typeof key === "number") {
-//         return `${path}[${key}]`;
-//     }
-//     return `${path}/${key}`;
-// }
 class PathInfo {
     constructor(path) {
         if (typeof path === 'string') {
@@ -5211,8 +5617,7 @@ class PathInfo {
     }
     child(childKey) {
         if (typeof childKey === 'string') {
-            const keys = getPathKeys(childKey);
-            return new PathInfo(this.keys.concat(keys));
+            childKey = getPathKeys(childKey);
         }
         return new PathInfo(this.keys.concat(childKey));
     }
@@ -6395,7 +6800,6 @@ function get(mappings, path) {
     const mapping = mappings[mappedPath];
     return mapping;
 }
-;
 /**
  * (for internal use) - gets the mapping set for a specific path's parent
  */
@@ -6407,7 +6811,6 @@ function map(mappings, path) {
     }
     return get(mappings, targetPath);
 }
-;
 /**
  * (for internal use) - gets all mappings set for a specific path and all subnodes
  * @returns returns array of all matched mappings in path
@@ -6457,7 +6860,6 @@ function mapDeep(mappings, entryPath) {
     }, []);
     return matches;
 }
-;
 /**
  * (for internal use) - serializes or deserializes an object using type mappings
  * @returns returns the (de)serialized value
@@ -6551,7 +6953,6 @@ function process(db, mappings, path, obj, action) {
     }
     return obj;
 }
-;
 const _mappings = Symbol("mappings");
 class TypeMappings {
     /**

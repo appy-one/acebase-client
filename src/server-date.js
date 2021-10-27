@@ -31,9 +31,13 @@ function checkLocalTime() {
     }
     time.lastTime = now;
     time.lastPerf = perf;
-    setTimeout(checkLocalTime, interval);
+    scheduleLocalTimeCheck();
 }
-setTimeout(checkLocalTime, interval);
+function scheduleLocalTimeCheck() {
+    const timeout = setTimeout(checkLocalTime, interval);
+    timeout.unref && timeout.unref(); // Don't delay exiting the main process when the event loop is empty
+}
+scheduleLocalTimeCheck();
 
 function setServerBias(bias) {
     if (typeof bias === 'number') {

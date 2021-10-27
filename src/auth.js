@@ -21,17 +21,15 @@ class AceBaseClientAuth {
      * @param {string} password Your password
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signIn(username, password) {
+    async signIn(username, password) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signIn(username, password));
+            await this.client.ready();
         }
-        return this.client.api.signIn(username, password)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken }; // success: true, 
-        });
+        const details = await this.client.api.signIn(username, password);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken }; // success: true, 
     }
 
     /**
@@ -40,17 +38,15 @@ class AceBaseClientAuth {
      * @param {string} password Your password
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signInWithEmail(email, password) {
+    async signInWithEmail(email, password) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signInWithEmail(email, password));
+            await this.client.ready();
         }
-        return this.client.api.signInWithEmail(email, password)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken }; //success: true, 
-        });
+        const details = await this.client.api.signInWithEmail(email, password);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken }; //success: true, 
     }
 
     /**
@@ -58,17 +54,15 @@ class AceBaseClientAuth {
      * @param {string} accessToken a previously assigned access token
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signInWithToken(accessToken) {
+    async signInWithToken(accessToken) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signInWithToken(accessToken));
+            await this.client.ready();
         }
-        return this.client.api.signInWithToken(accessToken)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken }; // success: true, 
-        });
+        const details = await this.client.api.signInWithToken(accessToken);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken }; // success: true, 
     }
 
     /**
@@ -79,16 +73,15 @@ class AceBaseClientAuth {
      * to finish signing in.
      * @param {string} providerName one of the configured providers (eg 'facebook', 'google', 'apple', 'spotify')
      * @param {string} callbackUrl url on your website/app that will receive the sign in result
+     * @param {any} [options] optional provider specific authentication settings
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
-    startAuthProviderSignIn(providerName, callbackUrl) {
+    async startAuthProviderSignIn(providerName, callbackUrl, options) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.startAuthProviderSignIn(providerName, callbackUrl));
+            await this.client.ready();
         }
-        return this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user)
-        .then(details => {
-            return details.redirectUrl;
-        });
+        const details = await this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user, options);
+        return details.redirectUrl;
     }
 
     /**
@@ -96,17 +89,15 @@ class AceBaseClientAuth {
      * @param {string} callbackResult result received in your.callback/url?result
      * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }>}
      */
-    finishAuthProviderSignIn(callbackResult) {
+    async finishAuthProviderSignIn(callbackResult) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.finishAuthProviderSignIn(callbackResult));
+            await this.client.ready();
         }
-        return this.client.api.finishAuthProviderSignIn(callbackResult)
-        .then(details => {
-            this.accessToken = details.accessToken;
-            this.user = new AceBaseUser(details.user);
-            this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
-        });
+        const details = await this.client.api.finishAuthProviderSignIn(callbackResult);
+        this.accessToken = details.accessToken;
+        this.user = new AceBaseUser(details.user);
+        this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
+        return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
     }
 
     /**
@@ -115,14 +106,12 @@ class AceBaseClientAuth {
      * @param {string} refreshToken 
      * @returns {Promise<{ provider: IAceBaseAuthProviderTokens }}
      */
-    refreshAuthProviderToken(providerName, refreshToken) {
+    async refreshAuthProviderToken(providerName, refreshToken) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.refreshAuthProviderToken(providerName, refreshToken));
+            await this.client.ready();
         }
-        return this.client.api.refreshAuthProviderToken(providerName, refreshToken)
-        .then(details => {
-            return { provider: details.provider };
-        })
+        const details = await this.client.api.refreshAuthProviderToken(providerName, refreshToken);
+        return { provider: details.provider };
     }
 
     /**
@@ -131,29 +120,27 @@ class AceBaseClientAuth {
      * getRedirectResult() when your page is loaded again to check if the user was authenticated.
      * @param {string} providerName 
      */
-    signInWithRedirect(providerName) {
+    async signInWithRedirect(providerName) {
         if (typeof window === 'undefined') {
             throw new Error(`signInWithRedirect can only be used within a browser context`);
         }
-        return this.startAuthProviderSignIn(providerName, window.location.href)
-        .then(redirectUrl => {
-            window.location.href = redirectUrl;
-        });
+        const redirectUrl = await this.startAuthProviderSignIn(providerName, window.location.href);
+        window.location.href = redirectUrl;
     }
 
     /** 
      * Checks if the user authentication with an auth provider. 
      */
-    getRedirectResult() {
+    async getRedirectResult() {
         if (typeof window === 'undefined') {
             throw new Error(`getRedirectResult can only be used within a browser context`);
         }
         const match = window.location.search.match(/[?&]result=(.*?)(?:&|$)/);
         const callbackResult = match && decodeURIComponent(match[1]);
         if (!callbackResult) {
-            return Promise.resolve(null);
+            return null;
         }
-        return this.finishAuthProviderSignIn(callbackResult);
+        return await this.finishAuthProviderSignIn(callbackResult);
     }
 
     /**
@@ -165,7 +152,7 @@ class AceBaseClientAuth {
      */
     async signOut(options) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signOut(options));
+            await this.client.ready();
         }
         else if (!this.user) {
             throw { code: 'not_signed_in', message: 'Not signed in!' };
@@ -185,19 +172,17 @@ class AceBaseClientAuth {
      * @param {string} newPassword 
      * @returns {Promise<{ accessToken: string }>} returns a promise that resolves with a new access token
      */
-    changePassword(oldPassword, newPassword) {
+    async changePassword(oldPassword, newPassword) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.changePassword(oldPassword, newPassword));
+            await this.client.ready();
         }
         else if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
-        return this.client.api.changePassword(this.user.uid, oldPassword, newPassword)
-        .then(result => {
-            this.accessToken = result.accessToken;
-            this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
-            return { accessToken: result.accessToken }; //success: true, 
-        });
+        const result = await this.client.api.changePassword(this.user.uid, oldPassword, newPassword);
+        this.accessToken = result.accessToken;
+        this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
+        return { accessToken: result.accessToken }; //success: true, 
     }
 
     /**
@@ -205,11 +190,11 @@ class AceBaseClientAuth {
      * @param {string} email
      * @returns {Promise<void>} returns a promise that resolves once the request has been processed
      */
-    forgotPassword(email) {
+    async forgotPassword(email) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.forgotPassword(email));
+            await this.client.ready();
         }
-        return this.client.api.forgotPassword(email);
+        return await this.client.api.forgotPassword(email);
     }
 
     /**
@@ -218,11 +203,11 @@ class AceBaseClientAuth {
      * @param {string} newPassword
      * @returns {Promise<void>} returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
      */
-    resetPassword(resetCode, newPassword) {
+    async resetPassword(resetCode, newPassword) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.resetPassword(resetCode, newPassword));
+            await this.client.ready();
         }
-        return this.client.api.resetPassword(resetCode, newPassword);
+        return await this.client.api.resetPassword(resetCode, newPassword);
     }
 
     /**
@@ -230,30 +215,28 @@ class AceBaseClientAuth {
      * @param {string} verificationCode
      * @returns {Promise<void>} returns a promise that resolves when verification was successful
      */
-    verifyEmailAddress(verificationCode) {
+    async verifyEmailAddress(verificationCode) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.verifyEmailAddress(verificationCode));
+            await this.client.ready();
         }
-        return this.client.api.verifyEmailAddress(verificationCode);
+        return await this.client.api.verifyEmailAddress(verificationCode);
     }
 
-    _updateUserDetails(details) {
+    async _updateUserDetails(details) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this._updateUserDetails(details));
+            await this.client.ready();
         }
         if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
         if (typeof details !== 'object') {
-            return Promise.reject({ code: 'invalid_details', message: 'details must be an object' });
+            throw { code: 'invalid_details', message: 'details must be an object' };
         }
-        return this.client.api.updateUserDetails(details)
-        .then(result => {
-            Object.keys(result.user).forEach(key => {
-                this.user[key] = result.user[key];
-            });
-            return { user: this.user }; // success: true
+        const result = await this.client.api.updateUserDetails(details);
+        Object.keys(result.user).forEach(key => {
+            this.user[key] = result.user[key];
         });
+        return { user: this.user }; // success: true
     }
 
     /**
@@ -261,8 +244,8 @@ class AceBaseClientAuth {
      * @param {string} newUsername 
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
-    changeUsername(newUsername) {
-        return this._updateUserDetails({ username: newUsername });
+    async changeUsername(newUsername) {
+        return await this._updateUserDetails({ username: newUsername });
     }
 
     /**
@@ -270,8 +253,20 @@ class AceBaseClientAuth {
      * @param {string} newEmail 
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
-    changeEmail(newEmail) {
-        return this._updateUserDetails({ email: newEmail });
+    async changeEmail(newEmail) {
+        return await this._updateUserDetails({ email: newEmail });
+    }
+
+    /**
+     * Changes the user's profile picture
+     * @param {object} newPicture
+     * @param {string} newPicture.url
+     * @param {number} newPicture.width
+     * @param {number} newPicture.height
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+     async changePicture(newPicture) {
+        return await this._updateUserDetails({ picture: newPicture });
     }
 
     /**
@@ -279,8 +274,8 @@ class AceBaseClientAuth {
      * @param {{ [key:string]: string|number|boolean }} settings - the settings to update
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
-    updateUserSettings(settings) {
-        return this._updateUserDetails({ settings });
+    async updateUserSettings(settings) {
+        return await this._updateUserDetails({ settings });
     }
 
     /**
@@ -294,15 +289,15 @@ class AceBaseClientAuth {
      * @param {{ [key:string]: string|number|boolean }} [details.settings] optional settings 
      * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
      */
-    signUp(details) {
+    async signUp(details) {
         if (!details.username && !details.email) {
-            return Promise.reject({ code: 'invalid_details', message: 'No username or email set' });
+            throw { code: 'invalid_details', message: 'No username or email set' };
         }
         if (!details.password) {
-            return Promise.reject({ code: 'invalid_details', message: 'No password given' });
+            throw { code: 'invalid_details', message: 'No password given' };
         }
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.signUp(details));
+            await this.client.ready();
         }
         const isAdmin = this.user && this.user.uid === 'admin';
         if (this.user && !isAdmin) {
@@ -311,19 +306,17 @@ class AceBaseClientAuth {
             this.user = null;
             this.eventCallback("signout", { source: 'signup', user } );
         }
-        return this.client.api.signUp(details, !isAdmin)
-        .then(details => {
-            if (isAdmin) {
-                return { user: details.user };
-            }
-            else {
-                // Sign into new account
-                this.accessToken = details.accessToken;
-                this.user = new AceBaseUser(details.user);
-                this.eventCallback("signin", { source: "signup", user: this.user, accessToken: this.accessToken });
-                return { user: this.user, accessToken: this.accessToken }; //success: true, 
-            }
-        });
+        const result = await this.client.api.signUp(details, !isAdmin);
+        if (isAdmin) {
+            return { user: result.user };
+        }
+        else {
+            // Sign into new account
+            this.accessToken = result.accessToken;
+            this.user = new AceBaseUser(result.user);
+            this.eventCallback("signin", { source: "signup", user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken }; //success: true, 
+        }
     }
 
     /**
@@ -333,31 +326,29 @@ class AceBaseClientAuth {
      * @param {string} [uid] for admin user only: remove account with uid
      * @returns {Promise<void>}
      */
-    deleteAccount(uid) {
+    async deleteAccount(uid) {
         if (!this.client.isReady) {
-            return this.client.ready().then(() => this.deleteAccount(uid));
+            await this.client.ready();
         }
         if (!this.user) {
-            return Promise.reject({ code: 'not_signed_in', message: 'Not signed in!' });
+            throw { code: 'not_signed_in', message: 'Not signed in!' };
         }
         if (uid && this.user.uid !== 'admin') {
-            return Promise.reject({ code: 'not_admin', message: 'Cannot remove other accounts than signed into account, unless you are admin' });
+            throw { code: 'not_admin', message: 'Cannot remove other accounts than signed into account, unless you are admin' };
         }
         const deleteUid = uid || this.user.uid;
         if (deleteUid === 'admin') {
-            return Promise.reject({ code: 'not_allowed', message: 'Cannot remove admin user' });
+            throw { code: 'not_allowed', message: 'Cannot remove admin user' };
         }
         const signOut = this.user.uid !== 'admin';
-        return this.client.api.deleteAccount(deleteUid, signOut)
-        .then(result => {
-            if (signOut) {
-                // Sign out of the account
-                this.accessToken = null;
-                let user = this.user;
-                this.user = null;
-                this.eventCallback("signout", { source: 'delete_account', user });
-            }
-        });
+        const result = await this.client.api.deleteAccount(deleteUid, signOut);
+        if (signOut) {
+            // Sign out of the account
+            this.accessToken = null;
+            let user = this.user;
+            this.user = null;
+            this.eventCallback("signout", { source: 'delete_account', user });
+        }
     }
 }
 

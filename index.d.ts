@@ -28,6 +28,24 @@ export interface AceBaseClientCacheSettings {
      */
     enabled?: boolean
 }
+export interface AceBaseClientSyncSettings {
+    /**
+     * Determines when synchronization should execute: 
+     * 
+     * - after `"connect"` event
+     * - after `"signin"` event
+     * - `"manual"` with `client.sync()`, or 
+     * - `"auto"`, which is 2.5s after `"connect"` event, or immediately after `"signin"` event. (legacy behaviour)
+     * 
+     * If your app needs to sync data that is only accessible to the signed in user, set this 
+     * to `"signin"`. If not, set this to `"connect"`. The `"legacy"` setting is default and provided 
+     * for backward compatability, but should not be used anymore. If you want to manually
+     * trigger synchronization with `client.sync()`, set this to `"manual"`
+     * 
+     @default 'auto'
+     */
+    timing: 'connect'|'signin'|'auto'|'manual'
+}
 export interface AceBaseClientConnectionSettings {
     dbname: string
     host: string
@@ -50,6 +68,10 @@ export interface AceBaseClientConnectionSettings {
      * @default 'log'
      */
     logLevel?: 'verbose'|'log'|'warn'|'error'
+    /**
+     * Settings for synchronization
+     */
+    sync?: AceBaseClientSyncSettings
 }
 
 /**
@@ -87,6 +109,11 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
      * @param data data to post (put/post methods) or to add to querystring
      */
     callExtension(method:'get'|'put'|'post'|'delete', path: string, data?: any): Promise<any>
+
+    /**
+     * Initiates manual server synchronization. Use this if you have set the `sync.timing` connection setting to 'manual'
+     */
+    sync(): Promise<void>
 }
 
 export interface IAceBaseAuthProviderSignInResult { 
@@ -135,9 +162,10 @@ export class AceBaseClientAuth {
      * to finish signing in.
      * @param {string} providerName one of the configured providers (eg 'facebook', 'google', 'apple', 'spotify')
      * @param {string} callbackUrl url on your website/app that will receive the sign in result
+     * @param {any} [options] optional provider specific authentication settings
      * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
      */
-    startAuthProviderSignIn(providerName: string, callbackUrl: string): Promise<string>
+    startAuthProviderSignIn(providerName: string, callbackUrl: string, options?: any): Promise<string>
 
     /**
      * Use this method to finish OAuth flow from your callbackUrl.
@@ -246,6 +274,12 @@ export class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     changeEmail(newEmail: string): Promise<{ user: AceBaseUser }>
+
+    /**
+     * Changes the user's profile picture
+     * @returns returns a promise that resolves with the updated user details
+     */    
+    changePicture(newPicture: { url: string, width: number, height: number }): Promise<{ user: AceBaseUser }>
 
     /**
      * Updates settings of the currrently signed in user. Passed settings will be merged with the user's current settings

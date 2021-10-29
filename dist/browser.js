@@ -5130,7 +5130,7 @@ class DataReferenceQuery {
      * Executes the query and returns if there are any results
      */
     exists() {
-        return this.count().then(count => count > 1);
+        return this.count().then(count => count > 0);
     }
     /**
      * Executes the query, removes all matches from the database

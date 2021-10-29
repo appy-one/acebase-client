@@ -619,6 +619,7 @@ class WebApi extends Api {
                     this._updateCursor(result.context.acebase_cursor);
                 }
                 if (options.includeContext === true) {
+                    if (typeof result.context !== 'object') { result.context = {}; }
                     return result;
                 }
                 else {

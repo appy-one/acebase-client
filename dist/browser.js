@@ -11,7 +11,7 @@ var u,f,l,d=String.fromCharCode;t.exports={version:"2.1.2",encode:a,decode:h}},f
 
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":40}],2:[function(require,module,exports){
+},{"buffer":41}],2:[function(require,module,exports){
 const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
@@ -859,6 +859,7 @@ class WebApi extends Api {
                     this._updateCursor(result.context.acebase_cursor);
                 }
                 if (options.includeContext === true) {
+                    if (typeof result.context !== 'object') { result.context = {}; }
                     return result;
                 }
                 else {
@@ -2905,7 +2906,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
 }
 exports.AceBaseBase = AceBaseBase;
 
-},{"./data-reference":21,"./debug":23,"./optional-observable":26,"./simple-colors":32,"./simple-event-emitter":33,"./type-mappings":36}],15:[function(require,module,exports){
+},{"./data-reference":21,"./debug":23,"./optional-observable":27,"./simple-colors":33,"./simple-event-emitter":34,"./type-mappings":37}],15:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Api = void 0;
@@ -4253,7 +4254,7 @@ class OrderedCollectionProxy {
 }
 exports.OrderedCollectionProxy = OrderedCollectionProxy;
 
-},{"./data-reference":21,"./data-snapshot":22,"./id":24,"./optional-observable":26,"./path-reference":28,"./process":29,"./utils":37}],21:[function(require,module,exports){
+},{"./data-reference":21,"./data-snapshot":22,"./id":24,"./optional-observable":27,"./path-reference":29,"./process":30,"./utils":38}],21:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataReferenceQuery = exports.DataReference = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = void 0;
@@ -4735,12 +4736,12 @@ class DataReference {
         const promise = this.db.api.get(this.path, options).then(result => {
             const isNewApiResult = ('context' in result && 'value' in result);
             if (!isNewApiResult) {
-                // Should not happen
-                throw new Error(`AceBase api.get method returned old response value. Update your acebase or acebase-client package`);
+                // acebase-core version package was updated but acebase or acebase-client package was not? Warn, but don't throw an error.
+                console.warn(`AceBase api.get method returned an old response value. Update your acebase or acebase-client package`);
+                result = { value: result, context: {} };
             }
-            const context = result.context || {};
             const value = this.db.types.deserialize(this.path, result.value);
-            const snapshot = new data_snapshot_1.DataSnapshot(this, value, undefined, undefined, context);
+            const snapshot = new data_snapshot_1.DataSnapshot(this, value, undefined, undefined, result.context);
             return snapshot;
         });
         if (callback) {
@@ -5105,12 +5106,31 @@ class DataReferenceQuery {
         });
     }
     /**
-     * Executes the query and returns references. Short for .get({ snapshots: false })
+     * Executes the query and returns references. Short for `.get({ snapshots: false })`
      * @param callback callback to use instead of returning a promise
      * @returns returns an Promise that resolves with an array of DataReferences, or void when using a callback
+     * @deprecated Use `find` instead
      */
     getRefs(callback) {
         return this.get({ snapshots: false }, callback);
+    }
+    /**
+     * Executes the query and returns an array of references. Short for `.get({ snapshots: false })`
+     */
+    find() {
+        return this.get({ snapshots: false });
+    }
+    /**
+     * Executes the query and returns the number of results
+     */
+    count() {
+        return this.get({ snapshots: false }).then(refs => refs.length);
+    }
+    /**
+     * Executes the query and returns if there are any results
+     */
+    exists() {
+        return this.count().then(count => count > 1);
     }
     /**
      * Executes the query, removes all matches from the database
@@ -5238,7 +5258,7 @@ class DataReferencesArray extends Array {
 }
 exports.DataReferencesArray = DataReferencesArray;
 
-},{"./data-proxy":20,"./data-snapshot":22,"./id":24,"./optional-observable":26,"./path-info":27,"./subscription":34}],22:[function(require,module,exports){
+},{"./data-proxy":20,"./data-snapshot":22,"./id":24,"./optional-observable":27,"./path-info":28,"./subscription":35}],22:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MutationsDataSnapshot = exports.DataSnapshot = void 0;
@@ -5389,7 +5409,7 @@ class MutationsDataSnapshot extends DataSnapshot {
 }
 exports.MutationsDataSnapshot = MutationsDataSnapshot;
 
-},{"./path-info":27}],23:[function(require,module,exports){
+},{"./path-info":28}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DebugLogger = void 0;
@@ -5419,7 +5439,7 @@ class DebugLogger {
 }
 exports.DebugLogger = DebugLogger;
 
-},{"./process":29}],24:[function(require,module,exports){
+},{"./process":30}],24:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ID = void 0;
@@ -5444,7 +5464,7 @@ exports.ID = ID;
 },{"./cuid":18}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
+exports.ObjectCollection = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
 var acebase_base_1 = require("./acebase-base");
 Object.defineProperty(exports, "AceBaseBase", { enumerable: true, get: function () { return acebase_base_1.AceBaseBase; } });
 Object.defineProperty(exports, "AceBaseBaseSettings", { enumerable: true, get: function () { return acebase_base_1.AceBaseBaseSettings; } });
@@ -5455,6 +5475,8 @@ Object.defineProperty(exports, "DataReference", { enumerable: true, get: functio
 Object.defineProperty(exports, "DataReferenceQuery", { enumerable: true, get: function () { return data_reference_1.DataReferenceQuery; } });
 Object.defineProperty(exports, "DataRetrievalOptions", { enumerable: true, get: function () { return data_reference_1.DataRetrievalOptions; } });
 Object.defineProperty(exports, "QueryDataRetrievalOptions", { enumerable: true, get: function () { return data_reference_1.QueryDataRetrievalOptions; } });
+Object.defineProperty(exports, "DataSnapshotsArray", { enumerable: true, get: function () { return data_reference_1.DataSnapshotsArray; } });
+Object.defineProperty(exports, "DataReferencesArray", { enumerable: true, get: function () { return data_reference_1.DataReferencesArray; } });
 var data_snapshot_1 = require("./data-snapshot");
 Object.defineProperty(exports, "DataSnapshot", { enumerable: true, get: function () { return data_snapshot_1.DataSnapshot; } });
 Object.defineProperty(exports, "MutationsDataSnapshot", { enumerable: true, get: function () { return data_snapshot_1.MutationsDataSnapshot; } });
@@ -5488,8 +5510,26 @@ Object.defineProperty(exports, "ColorStyle", { enumerable: true, get: function (
 Object.defineProperty(exports, "Colorize", { enumerable: true, get: function () { return simple_colors_1.Colorize; } });
 var schema_1 = require("./schema");
 Object.defineProperty(exports, "SchemaDefinition", { enumerable: true, get: function () { return schema_1.SchemaDefinition; } });
+var object_collection_1 = require("./object-collection");
+Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: function () { return object_collection_1.ObjectCollection; } });
 
-},{"./acebase-base":14,"./api":15,"./ascii85":16,"./data-proxy":20,"./data-reference":21,"./data-snapshot":22,"./debug":23,"./id":24,"./path-info":27,"./path-reference":28,"./schema":30,"./simple-cache":31,"./simple-colors":32,"./simple-event-emitter":33,"./subscription":34,"./transport":35,"./type-mappings":36,"./utils":37}],26:[function(require,module,exports){
+},{"./acebase-base":14,"./api":15,"./ascii85":16,"./data-proxy":20,"./data-reference":21,"./data-snapshot":22,"./debug":23,"./id":24,"./object-collection":26,"./path-info":28,"./path-reference":29,"./schema":31,"./simple-cache":32,"./simple-colors":33,"./simple-event-emitter":34,"./subscription":35,"./transport":36,"./type-mappings":37,"./utils":38}],26:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ObjectCollection = void 0;
+const id_1 = require("./id");
+class ObjectCollection {
+    static from(array) {
+        const collection = {};
+        array.forEach(child => {
+            collection[id_1.ID.generate()] = child;
+        });
+        return collection;
+    }
+}
+exports.ObjectCollection = ObjectCollection;
+
+},{"./id":24}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObservableShim = exports.setObservable = exports.getObservable = void 0;
@@ -5567,7 +5607,7 @@ class ObservableShim {
 }
 exports.ObservableShim = ObservableShim;
 
-},{"rxjs":38}],27:[function(require,module,exports){
+},{"rxjs":39}],28:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathInfo = void 0;
@@ -5848,7 +5888,7 @@ class PathInfo {
 }
 exports.PathInfo = PathInfo;
 
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathReference = void 0;
@@ -5863,7 +5903,7 @@ class PathReference {
 }
 exports.PathReference = PathReference;
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = {
@@ -5872,7 +5912,7 @@ exports.default = {
     }
 };
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SchemaDefinition = void 0;
@@ -6214,7 +6254,7 @@ class SchemaDefinition {
 }
 exports.SchemaDefinition = SchemaDefinition;
 
-},{}],31:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleCache = void 0;
@@ -6248,7 +6288,7 @@ class SimpleCache {
 }
 exports.SimpleCache = SimpleCache;
 
-},{}],32:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Colorize = exports.SetColorsEnabled = exports.ColorsSupported = exports.ColorStyle = void 0;
@@ -6400,7 +6440,7 @@ String.prototype.colorize = function (style) {
     return Colorize(this, style);
 };
 
-},{"./process":29}],33:[function(require,module,exports){
+},{"./process":30}],34:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleEventEmitter = void 0;
@@ -6485,7 +6525,7 @@ class SimpleEventEmitter {
 }
 exports.SimpleEventEmitter = SimpleEventEmitter;
 
-},{}],34:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EventStream = exports.EventPublisher = exports.EventSubscription = void 0;
@@ -6673,7 +6713,7 @@ class EventStream {
 }
 exports.EventStream = EventStream;
 
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Transport = void 0;
@@ -6770,7 +6810,7 @@ exports.Transport = {
     }
 };
 
-},{"./ascii85":16,"./path-info":27,"./path-reference":28,"./utils":37}],36:[function(require,module,exports){
+},{"./ascii85":16,"./path-info":28,"./path-reference":29,"./utils":38}],37:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TypeMappings = void 0;
@@ -7070,7 +7110,7 @@ class TypeMappings {
 }
 exports.TypeMappings = TypeMappings;
 
-},{"./data-reference":21,"./data-snapshot":22,"./path-info":27,"./utils":37}],37:[function(require,module,exports){
+},{"./data-reference":21,"./data-snapshot":22,"./path-info":28,"./utils":38}],38:[function(require,module,exports){
 (function (Buffer){(function (){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -7412,9 +7452,9 @@ function defer(fn) {
 exports.defer = defer;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./data-snapshot":22,"./path-reference":28,"./process":29,"buffer":40}],38:[function(require,module,exports){
+},{"./data-snapshot":22,"./path-reference":29,"./process":30,"buffer":41}],39:[function(require,module,exports){
 
-},{}],39:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -7566,7 +7606,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],40:[function(require,module,exports){
+},{}],41:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -9347,7 +9387,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":39,"buffer":40,"ieee754":41}],41:[function(require,module,exports){
+},{"base64-js":40,"buffer":41,"ieee754":42}],42:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m

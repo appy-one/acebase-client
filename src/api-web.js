@@ -619,7 +619,7 @@ class WebApi extends Api {
                     this._updateCursor(result.context.acebase_cursor);
                 }
                 if (options.includeContext === true) {
-                    if (typeof result.context !== 'object') { result.context = {}; }
+                    if (!result.context) { result.context = {}; }
                     return result;
                 }
                 else {
@@ -993,17 +993,35 @@ class WebApi extends Api {
                     /** @type {Array<EventSubscription>} Subscriptions that have custom sync fallback logic, used when there is no automated way to synchronize */
                     fallback: [],
                     /** @type {Array<{path: string, events: string[]}>} Event targets to warn about */
-                    warn: []
+                    warn: [],
+                    /** @type {Array<EventSubscription>} Subscriptions that require no action because they were added after last connect event */
+                    noop: []
                 };
-                const wasAddedOffline = sub => {
-                    if (!cursor) { return true; }
-                    return sub.lastSynced === 0 && sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
-                };
+                // const wasAddedOffline = sub => {
+                //     return sub.lastSynced === 0 && sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
+                // };
+                const hasStaleValue = sub => {
+                    // --------------------------------
+                    // | cursor |   added   | stale   |
+                    // -------------------------------|
+                    // |   no   |  online   |  no     |
+                    // |   no   |  offline  |  yes    |
+                    // |   no   |  b/disct  |  yes    |
+                    // |   yes  |  online   |  no     |
+                    // |   yes  |  offline  |  yes    |
+                    // |   yes  |  b/disct  |  no     |
+                    // --------------------------------
+                    const addedWhileOffline = sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
+                    const addedBeforeDisconnection = sub.added < this._eventTimeline.disconnect;
+                    if (addedWhileOffline) { return true; }
+                    if (addedBeforeDisconnection) { return cursor ? false : true; }
+                    return false;
+                }
                 strategy.reload = subscriptionPaths
                     .filter(path => {
                         if (path.includes('*') || path.includes('$')) { return false; } // Can't load wildcard paths
                         return subscriptions.for(path).some(sub => {
-                            if (wasAddedOffline(sub)) {
+                            if (hasStaleValue(sub)) {
                                 if (typeof sub.settings.syncFallback === 'function') { return false; }
                                 if (sub.settings.syncFallback === 'reload') { return true; }
                                 if (sub.event === 'value') { return true; }
@@ -1020,17 +1038,17 @@ class WebApi extends Api {
                     .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
                     .reduce((fallbackItems, path) => {
                         subscriptions.for(path).forEach(sub => {
-                            if (wasAddedOffline(sub) && typeof sub.settings.syncFallback === 'function') {
+                            if (hasStaleValue(sub) && typeof sub.settings.syncFallback === 'function') {
                                 fallbackItems.push(sub);
                             }
                         });
                         return fallbackItems;
                     }, []);
-                strategy.cursor = subscriptionPaths
+                strategy.cursor = !cursor ? [] : subscriptionPaths
                     .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
                     .reduce((cursorItems, path) => {
                         const subs = subscriptions.for(path);
-                        const events = subs.filter(sub => !wasAddedOffline(sub) && !strategy.fallback.includes(sub))
+                        const events = subs.filter(sub => !hasStaleValue(sub) && !strategy.fallback.includes(sub))
                             .reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
                         events.length > 0 && cursorItems.push({ path, events });
                         return cursorItems;
@@ -1040,9 +1058,17 @@ class WebApi extends Api {
                     .reduce((warnItems, path) => {
                         const subs = subscriptions.for(path).filter(sub => !strategy.fallback.includes(sub));
                         subs.forEach(sub => {
-                            if (!strategy.cursor.some(item => item.path === sub.path && item.events.includes(sub.event))) {
-                                let item = warnItems.find(item => item.path === sub.path) || { path: sub.path, events: [] };
-                                item.events.includes(sub.event) || item.events.push(sub.event);
+                            if (typeof sub.settings.syncFallback === 'function' || sub.added > this._eventTimeline.connect) {
+                                strategy.noop.push(sub);
+                            }
+                            else if (!strategy.cursor.some(item => item.path === sub.path && item.events.includes(sub.event))) {
+                                let item = warnItems.find(item => item.path === sub.path);
+                                if (!item) {
+                                    warnItems.push({ path: sub.path, events: [sub.event] })
+                                }
+                                else if (!item.events.includes(sub.event)) {
+                                    item.events.push(sub.event);
+                                }
                             }
                         });
                         return warnItems;

@@ -57,6 +57,7 @@ async function request(method, url, options = { accessToken: null, data: null, d
     if (res.status === 200) {
         let context = res.headers.get('AceBase-Context');
         if (context && context[0] === '{') { context = JSON.parse(context); }
+        else { context = {}; }
         if (isJSON) { data = JSON.parse(data); }
         return { context, data };
     }

@@ -47,6 +47,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
                 if (res.statusCode === 200) {
                     let context = res.headers['acebase-context']; // lowercase header names only
                     if (context && context[0] === '{') { context = JSON.parse(context); }
+                    else { context = {}; }
                     if (isJSON) { data = JSON.parse(data); }
                     resolve({ context, data });
                 }

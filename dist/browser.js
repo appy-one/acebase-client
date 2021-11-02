@@ -859,7 +859,7 @@ class WebApi extends Api {
                     this._updateCursor(result.context.acebase_cursor);
                 }
                 if (options.includeContext === true) {
-                    if (typeof result.context !== 'object') { result.context = {}; }
+                    if (!result.context) { result.context = {}; }
                     return result;
                 }
                 else {
@@ -1233,17 +1233,35 @@ class WebApi extends Api {
                     /** @type {Array<EventSubscription>} Subscriptions that have custom sync fallback logic, used when there is no automated way to synchronize */
                     fallback: [],
                     /** @type {Array<{path: string, events: string[]}>} Event targets to warn about */
-                    warn: []
+                    warn: [],
+                    /** @type {Array<EventSubscription>} Subscriptions that require no action because they were added after last connect event */
+                    noop: []
                 };
-                const wasAddedOffline = sub => {
-                    if (!cursor) { return true; }
-                    return sub.lastSynced === 0 && sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
-                };
+                // const wasAddedOffline = sub => {
+                //     return sub.lastSynced === 0 && sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
+                // };
+                const hasStaleValue = sub => {
+                    // --------------------------------
+                    // | cursor |   added   | stale   |
+                    // -------------------------------|
+                    // |   no   |  online   |  no     |
+                    // |   no   |  offline  |  yes    |
+                    // |   no   |  b/disct  |  yes    |
+                    // |   yes  |  online   |  no     |
+                    // |   yes  |  offline  |  yes    |
+                    // |   yes  |  b/disct  |  no     |
+                    // --------------------------------
+                    const addedWhileOffline = sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
+                    const addedBeforeDisconnection = sub.added < this._eventTimeline.disconnect;
+                    if (addedWhileOffline) { return true; }
+                    if (addedBeforeDisconnection) { return cursor ? false : true; }
+                    return false;
+                }
                 strategy.reload = subscriptionPaths
                     .filter(path => {
                         if (path.includes('*') || path.includes('$')) { return false; } // Can't load wildcard paths
                         return subscriptions.for(path).some(sub => {
-                            if (wasAddedOffline(sub)) {
+                            if (hasStaleValue(sub)) {
                                 if (typeof sub.settings.syncFallback === 'function') { return false; }
                                 if (sub.settings.syncFallback === 'reload') { return true; }
                                 if (sub.event === 'value') { return true; }
@@ -1260,17 +1278,17 @@ class WebApi extends Api {
                     .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
                     .reduce((fallbackItems, path) => {
                         subscriptions.for(path).forEach(sub => {
-                            if (wasAddedOffline(sub) && typeof sub.settings.syncFallback === 'function') {
+                            if (hasStaleValue(sub) && typeof sub.settings.syncFallback === 'function') {
                                 fallbackItems.push(sub);
                             }
                         });
                         return fallbackItems;
                     }, []);
-                strategy.cursor = subscriptionPaths
+                strategy.cursor = !cursor ? [] : subscriptionPaths
                     .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
                     .reduce((cursorItems, path) => {
                         const subs = subscriptions.for(path);
-                        const events = subs.filter(sub => !wasAddedOffline(sub) && !strategy.fallback.includes(sub))
+                        const events = subs.filter(sub => !hasStaleValue(sub) && !strategy.fallback.includes(sub))
                             .reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
                         events.length > 0 && cursorItems.push({ path, events });
                         return cursorItems;
@@ -1280,9 +1298,17 @@ class WebApi extends Api {
                     .reduce((warnItems, path) => {
                         const subs = subscriptions.for(path).filter(sub => !strategy.fallback.includes(sub));
                         subs.forEach(sub => {
-                            if (!strategy.cursor.some(item => item.path === sub.path && item.events.includes(sub.event))) {
-                                let item = warnItems.find(item => item.path === sub.path) || { path: sub.path, events: [] };
-                                item.events.includes(sub.event) || item.events.push(sub.event);
+                            if (typeof sub.settings.syncFallback === 'function' || sub.added > this._eventTimeline.connect) {
+                                strategy.noop.push(sub);
+                            }
+                            else if (!strategy.cursor.some(item => item.path === sub.path && item.events.includes(sub.event))) {
+                                let item = warnItems.find(item => item.path === sub.path);
+                                if (!item) {
+                                    warnItems.push({ path: sub.path, events: [sub.event] })
+                                }
+                                else if (!item.events.includes(sub.event)) {
+                                    item.events.push(sub.event);
+                                }
                             }
                         });
                         return warnItems;
@@ -2580,6 +2606,7 @@ async function request(method, url, options = { accessToken: null, data: null, d
     if (res.status === 200) {
         let context = res.headers.get('AceBase-Context');
         if (context && context[0] === '{') { context = JSON.parse(context); }
+        else { context = {}; }
         if (isJSON) { data = JSON.parse(data); }
         return { context, data };
     }
@@ -3131,6 +3158,7 @@ class LiveDataProxy {
      * with live data by listening for 'mutations' events. Any changes made to the value by the client will be synced back
      * to the database.
      * @param ref DataReference to create proxy for.
+     * @param options TODO: implement LiveDataProxyOptions to allow cursor to be specified (and ref.get({ cursor }) will have to be able to get cached value augmented with changes since cursor)
      * @param defaultValue Default value to use for the proxy if the database path does not exist yet. This value will also
      * be written to the database.
      */
@@ -3150,17 +3178,26 @@ class LiveDataProxy {
                 cache = newValue;
                 return true;
             }
+            const allowCreation = false; //cache === null; // If the proxy'd target did not exist upon load, we must allow it to be created now.
+            if (allowCreation) {
+                cache = typeof keys[0] === 'number' ? [] : {};
+            }
             let target = cache;
-            keys = keys.slice();
-            while (keys.length > 1) {
-                const key = keys.shift();
+            const trailKeys = keys.slice();
+            while (trailKeys.length > 1) {
+                const key = trailKeys.shift();
                 if (!(key in target)) {
-                    // Have we missed an event, or are local pending mutations creating this conflict?
-                    return false; // Do not proceed
+                    if (allowCreation) {
+                        target[key] = typeof key === 'number' ? [] : {};
+                    }
+                    else {
+                        // Have we missed an event, or are local pending mutations creating this conflict?
+                        return false; // Do not proceed
+                    }
                 }
                 target = target[key];
             }
-            const prop = keys.shift();
+            const prop = trailKeys.shift();
             if (newValue === null) {
                 // Remove it
                 target instanceof Array ? target.splice(prop, 1) : delete target[prop];
@@ -3173,6 +3210,9 @@ class LiveDataProxy {
         };
         // Subscribe to mutations events on the target path
         const syncFallback = async () => {
+            if (!loaded) {
+                return;
+            }
             await reload();
         };
         const subscription = ref.on('mutations', { syncFallback }).subscribe(async (snap) => {
@@ -6258,21 +6298,36 @@ exports.SchemaDefinition = SchemaDefinition;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleCache = void 0;
+const utils_1 = require("./utils");
+/**
+ * Simple cache implementation that retains immutable values in memory for a limited time.
+ * Immutability is enforced by cloning the stored and retrieved values. To change a cached value, it will have to be `set` again with the new value.
+ */
 class SimpleCache {
     constructor(expirySeconds) {
+        this.enabled = true;
         this.expirySeconds = expirySeconds;
         this.cache = new Map();
         setInterval(() => { this.cleanUp(); }, 60 * 1000); // Cleanup every minute
     }
-    set(key, value) {
-        this.cache.set(key, { value, expires: Date.now() + (this.expirySeconds * 1000) });
+    has(key) {
+        if (!this.enabled) {
+            return false;
+        }
+        return this.cache.has(key);
     }
     get(key) {
-        const entry = this.cache.get(key);
-        if (!entry || entry.expires <= Date.now()) {
+        if (!this.enabled) {
             return null;
         }
-        return entry.value;
+        const entry = this.cache.get(key);
+        if (!entry) {
+            return null;
+        } // if (!entry || entry.expires <= Date.now()) { return null; }
+        return utils_1.cloneObject(entry.value);
+    }
+    set(key, value) {
+        this.cache.set(key, { value: utils_1.cloneObject(value), expires: Date.now() + (this.expirySeconds * 1000) });
     }
     remove(key) {
         this.cache.delete(key);
@@ -6288,7 +6343,7 @@ class SimpleCache {
 }
 exports.SimpleCache = SimpleCache;
 
-},{}],33:[function(require,module,exports){
+},{"./utils":38}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Colorize = exports.SetColorsEnabled = exports.ColorsSupported = exports.ColorStyle = void 0;
@@ -7423,7 +7478,21 @@ function compareValues(oldVal, newVal) {
             return {
                 added: addedKeys,
                 removed: removedKeys,
-                changed: changedKeys
+                changed: changedKeys,
+                forChild: (key) => {
+                    const oldHas = oldKeys.includes(key), newHas = newKeys.includes(key);
+                    if (!oldHas && !newHas) {
+                        return "identical";
+                    }
+                    if (newHas && !oldHas) {
+                        return "added";
+                    }
+                    if (oldHas && !newHas) {
+                        return "removed";
+                    }
+                    const changed = changedKeys.find(ch => ch.key === key);
+                    return changed ? changed.change : "identical";
+                }
             };
         }
     }

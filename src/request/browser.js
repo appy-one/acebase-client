@@ -27,8 +27,8 @@ async function request(method, url, options = { accessToken: null, data: null, d
     }
     const request = { url, method, headers };
     const res = await fetch(request.url, init).catch(err => {
-        console.error(err);
-        throw err;
+        // console.error(err);
+        throw new AceBaseRequestError(request, null, 'fetch_failed', err.message);
     });
     let data = '';
     if (typeof options.dataReceivedCallback === 'function') {

@@ -11,24 +11,14 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     request.req_id = requestId;
     request.access_token = accessToken;
 
-    socket.emit(event, request);
-
-    let resolve, reject;
-    let promise = new Promise((res, rej) => { resolve = res; reject = rej; });
-
-    const timeout = setTimeout(() => { 
-        socket.off("result", handle);
-        const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond "${event}" request in a timely fashion`);
-        reject(err);
-    }, 10000);
-    const handle = response => {
-        if (response.req_id === requestId) {
-            clearTimeout(timeout);
-            socket.off("result", handle);
-            if (response.success) {
-                resolve(response);
-            }
-            else {
+    return new Promise((resolve, reject) => { 
+        const handle = response => {
+            if (response.req_id === requestId) {
+                clearTimeout(timeout);
+                socket.off("result", handle);
+                if (response.success) {
+                    return resolve(response);
+                }
                 // Access denied?
                 const code = typeof response.reason === 'object' ? response.reason.code : response.reason;
                 const message = typeof response.reason === 'object' ? response.reason.message : `request failed: ${code}`;
@@ -36,10 +26,14 @@ const _websocketRequest = (socket, event, data, accessToken) => {
                 reject(err);
             }
         }
-    };
-    socket.on("result", handle);
-
-    return promise;
+        socket.on("result", handle);
+        socket.emit(event, request);
+        const timeout = setTimeout(() => { 
+            socket.off("result", handle);
+            const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond to "${event}" request`);
+            reject(err);
+        }, 1000);
+    });
 }
 
 /**
@@ -109,7 +103,7 @@ class WebApi extends Api {
         this.dbname = dbname;
         this._connectionState = CONNECTION_STATE_DISCONNECTED;
         this._cursor = {
-            /** Last cursus received by the server */
+            /** Last cursor received by the server */
             current: null,
             /** Last cursor received before client went offline, will be used for sync. */
             sync: null
@@ -156,7 +150,7 @@ class WebApi extends Api {
             this._connectionState = CONNECTION_STATE_CONNECTING;
             this.debug.log(`Connecting to AceBase server "${this.url}"`);
             if (!this.url.startsWith('https')) {
-                this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(ColorStyle.red))
+                this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(ColorStyle.red));
             }
     
             return new Promise((resolve, reject) => {
@@ -181,9 +175,16 @@ class WebApi extends Api {
                 socket.on('connect', async data => {
                     this._connectionState = CONNECTION_STATE_CONNECTED;
                     this._eventTimeline.connect = Date.now();
+
                     if (accessToken) {
-                        // User must be signed in again (NOTE: this does not trigger "signin" event)
-                        await this.signInWithToken(accessToken);
+                        // User must be signed in again (NOTE: this does not emit the "signin" event if the user was signed in before)
+                        const isFirstSignIn = this._eventTimeline.signIn === 0;
+                        try {
+                            await this.signInWithToken(accessToken, isFirstSignIn);
+                        }
+                        catch(err) {
+                            this.debug.error(`Could not automatically sign in user with access token upon reconnect: ${err.code || err.message}`);
+                        }
                     }
 
                     /**
@@ -191,17 +192,21 @@ class WebApi extends Api {
                      * @param {Promise<any>} promise 
                      * @returns {Promise<void>}
                      */
-                    function wrapSubscriptionPromise(subscr, promise) {
-                        const onAll = (fn) => subscriptions[subscr.path]
-                                .filter(s => s.event === subscr.event)
-                                .forEach(s => fn(s));
-                        return promise.then(() => {
-                            onAll(s => s.activate());
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            onAll(s => s.cancel(err));
-                        });
+                    const handleResult = async (subscr, promise) => {
+                        const subs = subscriptions[subscr.path].filter(s => s.event === subscr.event);
+                        try {
+                            await promise;
+                            subs.forEach(s => s.activate());
+                        }
+                        catch(err) {
+                            if (err.code === 'access_denied' && !accessToken) {
+                                this.debug.error(`Could not subscribe to event "${subscr.event}" on path "${subscr.path}" because you are not signed in. If you added this event while offline and have a user access token, you can prevent this by using client.auth.setAccessToken(token) to automatically try signing in after connecting`);
+                            }
+                            else {
+                                this.debug.error(err);
+                            }
+                            subs.forEach(s => s.cancel(err));
+                        }
                     };
 
                     // (re)subscribe to any active subscriptions
@@ -213,8 +218,8 @@ class WebApi extends Api {
                             const serverAlreadyNotifying = events.includes(subscr.event);
                             if (!serverAlreadyNotifying) {
                                 events.push(subscr.event);
-                                const promise = _websocketRequest(this.socket, 'subscribe', { path, event: subscr.event }, accessToken)
-                                subscribePromises.push(wrapSubscriptionPromise(subscr, promise));
+                                const promise = _websocketRequest(this.socket, 'subscribe', { path, event: subscr.event }, accessToken);
+                                subscribePromises.push(handleResult(subscr, promise));
                             }
                         });
                     });
@@ -229,7 +234,7 @@ class WebApi extends Api {
                             .map(topEventPath => {
                                 const subscr = subscriptions[topEventPath].find(s => s.event === 'mutated');
                                 let promise = _websocketRequest(this.socket, 'subscribe', { path: topEventPath, event: 'mutated' }, accessToken);
-                                promise = wrapSubscriptionPromise(subscr, promise)
+                                promise = handleResult(subscr, promise)
                                     .then(() => {
                                         if (subscr.state === 'canceled') {
                                             // Oops, could not subscribe to 'mutated' event on topEventPath, other event(s) at child path(s) should now take over
@@ -591,7 +596,7 @@ class WebApi extends Api {
                     return this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data, context: options.context })
                 })
                 .catch(err => {
-                    if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE'].includes(err.code)) {
+                    if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE', 'fetch_failed'].includes(err.code)) {
                         err.message = NOT_CONNECTED_ERROR_MESSAGE;
                         // handleFailure(new Error(NOT_CONNECTED_ERROR_MESSAGE));
                     }
@@ -645,12 +650,12 @@ class WebApi extends Api {
             }
         };
 
-        const handleSignInResult = result => {
+        const handleSignInResult = (result, emitEvent = true) => {
             this._eventTimeline.signIn = Date.now();
             const details = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
             accessToken = details.accessToken;
             this.socket.emit('signin', details.accessToken);  // Make sure the connected websocket server knows who we are as well.
-            eventCallback('signin', details);
+            emitEvent && eventCallback('signin', details);
             return details;
         }
 
@@ -666,10 +671,16 @@ class WebApi extends Api {
             return handleSignInResult(result);
         };
 
-        this.signInWithToken = async (token) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
+        this.signInWithToken = async (token, emitEvent = true) => {
+            if (!this.isConnected) { 
+                throw new Error('Cannot sign in because client is not connected to the server. If you want to automatically sign in the user with this access token once a connection is established, use client.auth.setAccessToken(token)'); 
+            }
             const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } });
-            return handleSignInResult(result);
+            return handleSignInResult(result, emitEvent);
+        };
+
+        this.setAccessToken = (token) => {
+            accessToken = token;
         };
 
         this.startAuthProviderSignIn = async (providerName, callbackUrl, options) => {
@@ -1152,7 +1163,7 @@ class WebApi extends Api {
                     syncPromises.push(fallbackPromise);
                 }
                 if (strategy.warn.length > 0) {
-                    this.debug.warn(`SYNC warning: unable to sync event(s) ${strategy.warn.map(item => `${item.events.join(', ')} on "/${item.path}"`).join(', ')}. To resolve this, provide syncFallback functions for these events`);
+                    this.debug.warn(`SYNC warning: unable to sync event(s) ${strategy.warn.map(item => `${item.events.map(event => `"${event}"`).join(', ')} on "/${item.path}"`).join(', ')}. To resolve this, provide syncFallback functions for these events`);
                 }
 
                 // Wait until they're all done

@@ -155,6 +155,14 @@ export class AceBaseClientAuth {
     signInWithToken(accessToken: string): Promise<{ user: AceBaseUser, accessToken: string }>;
 
     /**
+     * If the client is offline, you can specify an access token to automatically try signing in the user once a connection is made. 
+     * Doing this is recommended if you are subscribing to event paths that require user authentication/authorization. Subscribing to
+     * those server events will then be done after signing in, instead of failing after connecting anonymously.
+     * @param accessToken A previously acquired access token
+     */
+    setAccessToken(accessToken: string): void
+
+    /**
      * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
      * This method returs a Promise that resolves with the url you have to redirect your user to authenticate 
      * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.

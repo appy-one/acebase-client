@@ -52,7 +52,7 @@ class AceBaseClientAuth {
     /**
      * Sign into an account using a previously assigned access token
      * @param {string} accessToken a previously assigned access token
-     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
+     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token. If the token is not right, the thrown `error.code` will be `'not_found'` or `'invalid_token'`
      */
     async signInWithToken(accessToken) {
         if (!this.client.isReady) {
@@ -63,6 +63,16 @@ class AceBaseClientAuth {
         this.user = new AceBaseUser(details.user);
         this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
         return { user: this.user, accessToken: this.accessToken }; // success: true, 
+    }
+
+    /**
+     * If the client is offline, you can specify an access token to automatically try signing in the user once a connection is made. 
+     * Doing this is recommended if you are subscribing to event paths that require user authentication/authorization. Subscribing to
+     * those server events will then be done after signing in, instead of failing after connecting anonymously.
+     * @param {string} accessToken A previously acquired access token
+     */
+    setAccessToken(accessToken) {
+        this.client.api.setAccessToken(accessToken);
     }
 
     /**

@@ -107,6 +107,23 @@ db.auth.signInWithToken(accessToken)
 })
 ```
 
+If you have an access token from a previous session and your app is started while offline, you can let the client perform the sign in for you automatically once it connects to the server again. To do this, pass the access token to `setAccessToken` (NEW since v1.8.0):
+```javascript
+function handleSignIn(result) {
+    console.log(`Signed in as ${result.user.email}, got access token ${result.accessToken}`);
+}
+if (db.connected) {
+    // We're connected, we can sign in manually
+    const result = await db.auth.signInWithToken(accessToken);
+    handleSignIn(result);
+}
+else {
+    // Not connected, set the access token and wait for the signin event
+    db.auth.setAccessToken(accessToken);
+    db.once('signin', handleSignIn);
+}
+```
+
 ### Signing out:
 ```javascript
 db.auth.signOut()
@@ -162,7 +179,7 @@ db.auth.changeEmail(newEmailAddress)
     if (err.code === 'conflict') {
         console.log('Email address belongs to a different account');
     }
-})
+});
 ```
 
 ### Change username
@@ -176,7 +193,17 @@ db.auth.changeUsername(newUsername)
     if (err.code === 'conflict') {
         console.log('Username belongs to a different account');
     }
-})
+});
+```
+
+### Change profile picture
+(client v1.6.0+, server v1.5.0+)
+
+```javascript
+db.auth.changePicture({ url: 'https://profile.me/img.jpg', width: 100, height: 100 })
+.then(result => {
+    console.log(`Changed profile picture`);
+});
 ```
 
 ### Add miscellaneous data to user account

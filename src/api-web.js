@@ -188,19 +188,20 @@ class WebApi extends Api {
                     }
 
                     /**
-                     * @param {EventSubscription} subscr 
-                     * @param {Promise<any>} promise 
+                     * @param {EventSubscription} sub
                      * @returns {Promise<void>}
                      */
-                    const handleResult = async (subscr, promise) => {
-                        const subs = subscriptions[subscr.path].filter(s => s.event === subscr.event);
+                    const subscribeTo = async (sub) => {
+                        // Function is called for each unique path/event combination
+                        // We must activate or cancel all subscriptions with this combination
+                        const subs = subscriptions[sub.path].filter(s => s.event === sub.event);
                         try {
-                            await promise;
+                            const result = await _websocketRequest(this.socket, 'subscribe', { path: sub.path, event: sub.event }, accessToken);
                             subs.forEach(s => s.activate());
                         }
                         catch(err) {
                             if (err.code === 'access_denied' && !accessToken) {
-                                this.debug.error(`Could not subscribe to event "${subscr.event}" on path "${subscr.path}" because you are not signed in. If you added this event while offline and have a user access token, you can prevent this by using client.auth.setAccessToken(token) to automatically try signing in after connecting`);
+                                this.debug.error(`Could not subscribe to event "${sub.event}" on path "${sub.path}" because you are not signed in. If you added this event while offline and have a user access token, you can prevent this by using client.auth.setAccessToken(token) to automatically try signing in after connecting`);
                             }
                             else {
                                 this.debug.error(err);
@@ -213,34 +214,32 @@ class WebApi extends Api {
                     const subscribePromises = [];
                     Object.keys(subscriptions).forEach(path => {
                         const events = [];
-                        subscriptions[path].forEach(subscr => {
-                            if (subscr.event === 'mutated') { return; } // Skip mutated events for now
-                            const serverAlreadyNotifying = events.includes(subscr.event);
+                        subscriptions[path].forEach(sub => {
+                            if (sub.event === 'mutated') { return; } // Skip mutated events for now
+                            const serverAlreadyNotifying = events.includes(sub.event);
                             if (!serverAlreadyNotifying) {
-                                events.push(subscr.event);
-                                const promise = _websocketRequest(this.socket, 'subscribe', { path, event: subscr.event }, accessToken);
-                                subscribePromises.push(handleResult(subscr, promise));
+                                events.push(sub.event);
+                                const promise = subscribeTo(sub);
+                                subscribePromises.push(promise);
                             }
                         });
                     });
 
                     // Now, subscribe to all top path mutated events
-                    const subscribeToMutatedEvents = async() => {
+                    const subscribeToMutatedEvents = async () => {
                         let retry = false;
                         let promises = Object.keys(subscriptions)
                             .filter(path => subscriptions[path].some(sub => sub.event === 'mutated' && sub.state !== 'canceled'))
                             .filter((path, i, arr) => !arr.some(otherPath => PathInfo.get(otherPath).isAncestorOf(path)))
                             .reduce((topPaths, path) => (topPaths.includes(path) || topPaths.push(path)) && topPaths, [])
                             .map(topEventPath => {
-                                const subscr = subscriptions[topEventPath].find(s => s.event === 'mutated');
-                                let promise = _websocketRequest(this.socket, 'subscribe', { path: topEventPath, event: 'mutated' }, accessToken);
-                                promise = handleResult(subscr, promise)
-                                    .then(() => {
-                                        if (subscr.state === 'canceled') {
-                                            // Oops, could not subscribe to 'mutated' event on topEventPath, other event(s) at child path(s) should now take over
-                                            retry = true;
-                                        }
-                                    });
+                                const sub = subscriptions[topEventPath].find(s => s.event === 'mutated');
+                                promise = subscribeTo(sub).then(() => {
+                                    if (sub.state === 'canceled') {
+                                        // Oops, could not subscribe to 'mutated' event on topEventPath, other event(s) at child path(s) should now take over
+                                        retry = true;
+                                    }
+                                });
                                 promises.push(promise);
                             });
                         await Promise.all(promises);

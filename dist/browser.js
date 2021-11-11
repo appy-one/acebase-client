@@ -252,6 +252,16 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     request.access_token = accessToken;
 
     return new Promise((resolve, reject) => { 
+        let timeout;
+        const send = (retry = 0) => { 
+            socket.emit(event, request);
+            timeout = setTimeout(() => {
+                if (retry < 2) { return send(retry+1); }
+                socket.off("result", handle);
+                const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond to "${event}" request after ${retry+1} tries`);
+                reject(err);
+            }, 1000);
+        };
         const handle = response => {
             if (response.req_id === requestId) {
                 clearTimeout(timeout);
@@ -266,13 +276,8 @@ const _websocketRequest = (socket, event, data, accessToken) => {
                 reject(err);
             }
         }
-        socket.on("result", handle);
-        socket.emit(event, request);
-        const timeout = setTimeout(() => { 
-            socket.off("result", handle);
-            const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond to "${event}" request`);
-            reject(err);
-        }, 1000);
+        socket.on("result", handle);        
+        send();
     });
 }
 
@@ -1869,7 +1874,7 @@ class WebApi extends Api {
                         context.acebase_origin = 'server';
                         resolve({ value, context });
                     }
-                    else if (val === null) {
+                    else if (value === null) {
                         // Cached results are not available
                         if (!wait) {
                             const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
@@ -3379,7 +3384,7 @@ class LiveDataProxy {
             const isObject = val => val !== null && typeof val === 'object';
             const mutationsHandler = async (details) => {
                 var _a;
-                const snap = details.snap;
+                const { snap, origin } = details;
                 const context = snap.context();
                 const causedByOurProxy = ((_a = context.acebase_proxy) === null || _a === void 0 ? void 0 : _a.id) === proxyId;
                 if (details.origin === 'remote' && causedByOurProxy) {

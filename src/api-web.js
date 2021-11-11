@@ -12,6 +12,16 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     request.access_token = accessToken;
 
     return new Promise((resolve, reject) => { 
+        let timeout;
+        const send = (retry = 0) => { 
+            socket.emit(event, request);
+            timeout = setTimeout(() => {
+                if (retry < 2) { return send(retry+1); }
+                socket.off("result", handle);
+                const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond to "${event}" request after ${retry+1} tries`);
+                reject(err);
+            }, 1000);
+        };
         const handle = response => {
             if (response.req_id === requestId) {
                 clearTimeout(timeout);
@@ -27,12 +37,7 @@ const _websocketRequest = (socket, event, data, accessToken) => {
             }
         }
         socket.on("result", handle);
-        socket.emit(event, request);
-        const timeout = setTimeout(() => { 
-            socket.off("result", handle);
-            const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond to "${event}" request`);
-            reject(err);
-        }, 1000);
+        send();
     });
 }
 
@@ -1629,7 +1634,7 @@ class WebApi extends Api {
                         context.acebase_origin = 'server';
                         resolve({ value, context });
                     }
-                    else if (val === null) {
+                    else if (value === null) {
                         // Cached results are not available
                         if (!wait) {
                             const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);

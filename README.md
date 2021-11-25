@@ -282,11 +282,94 @@ client.ref('some/data').set('Works even when offline');
 
 ### Synchronization
 
-AceBase uses a simple synchronization, conflict avoiding approach: all changes made offline will be replicated to the server once it reconnects. It does not check if the data being updated was changed by other clients in the mean time. That means that the last one to update the server data, wins a conflict. 
+AceBase synchronization uses a simple conflict avoiding approach: all changes made offline will be replicated to the server once it reconnects. It does not check if the data being updated was changed by other clients in the meantime. That means that the last one to update the server data, wins a 'conflict'. 
 
-In many situations this approach is acceptible, because AceBase updates are performed on the property level: if 2 clients both changed my e-mail address in ```users/ewout/email```, there is no easy way to determine which edit should 'win' the conflict. Some would argue time-based logic should be used to resolve conflicts, to avoid an offline client for 2 months overwriting a value just updated yesterday. I would argue that even a long-time offline client _might_ have a good reason to 'win' the conflict.
+In many situations this approach is acceptible, because AceBase updates are performed on the property level: if 2 clients both changed my e-mail address in `"users/ewout/email"`, there is no easy way to determine which edit should 'win' the conflict. Some would argue time-based logic should be used to resolve conflicts, to avoid an offline client for 2 months overwriting a value just updated yesterday. I would argue that even a long-time offline client _might_ have a good reason to win the conflict.
 
-In situations where you think this sync strategy might be a problem, you can easily implement history tracking on your server, allowing users to revert changes made to any point in time. Doing this will make your users happy: the app didn't decide what update was the "right" one while tossing away others - you kept track and the user can fix anything sync'ed "wrong":
+In situations where you think this sync strategy might be a problem, AceBase now provides a way to keep track of editing history with built-in transaction logging. When enabled on the server, all data changes are automatically saved to a transaction log and are kept in there for a configurable amount of days (or forever if desired). Those mutations can be queried with the new `getMutations` and `getChanges` functions using a timestamp or previously acquired server cursor on a `DataReference`. You can use this to provide a way to let users recover or merge previously saved data. Doing that will make your users happy: the app didn't decide what update was the "right" one while tossing away others - you kept track and the user can fix anything sync'ed "wrong":
+
+```javascript
+// Request all mutations to my email address in the past week;
+const sinceLastWeek = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000));
+let result = await db.ref('users/ewout/email').getMutations(sinceLastWeek);
+result.mutations.forEach(m => {
+    console.log(`On ${new Date(m.timestamp)}: my email address changed to "${m.value}"`);
+});
+
+// result also has a cursor we can use for future queries:
+const cursor = result.new_cursor;
+result = await db.ref('users/ewout/email').getMutations(cursor);
+result.mutations.forEach(m => {
+    console.log(`On ${new Date(m.timestamp)}: my email address changed to "${m.value}"`);
+});
+```
+
+If you are not interested in intermediate values and only want to know what values changed since you last checked, you can use `getChanges` instead. This will give you a list of all effective changes on the referenced path and its children since a given date/time or cursor.
+
+```javascript
+const sinceLastWeek = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000));
+let result = await db.ref('users/ewout/email').getChanges(sinceLastWeek);
+result.changes.forEach(m => {
+    // In this case, there will be only 1 change even if it was mutated multiple times
+    console.log(`Last week, my email address changed from "${m.previous}" to "${m.value}"`);
+});
+
+// And we have a cursor we can use for future queries:
+const cursor = result.new_cursor;
+result = await db.ref('users/ewout/email').getChanges(cursor);
+// ...
+```
+
+This new functionality can now also be used by an `AceBaseClient` to sychronize remote changes to a local cache database. In fact, you can even have it updated with remote changes upon request. This allows you to use a local copy of your server data offline, and have it updated with changes upon request, without ever having to reload the value from the server:
+
+```javascript
+// Open local state database
+const stateDb = new AceBase('localstate');
+
+// Connect to remote server using a client with cache database
+const client = new AceBaseClient({ 
+    cache: { db: new AceBase('offlinecache') },
+    host: 'my.acebase.server', port: 443, https: true, dbname: 'mydb'
+});
+
+// Wait for both te be ready to use
+await client.ready();
+await stateDb.ready();
+
+// Get last cursor we stored in our localstate database (if available)
+let snap = await stateDb.ref('last_cursor').get();
+const cursor = snap.val();
+
+// Update the cache database with changes to the "products" collection since cursor.
+// If cursor is null, the entire value will be loaded from the server and stored in cache.
+const updateResult = await client.cache.update('products', cursor);
+
+// Store the new cursor for next time
+cursor = updateResult.new_cursor;
+await stateDb.ref('last_cursor').set(cursor);
+
+// Monitor the "products" collection to keep cache up to date while running:
+client.ref('products').on('mutations', snapshot => {
+    // The snapshot contains an array with all effective mutations.
+    // We don't have to do anything with these mutations here: the cache database will
+    // automatically be updated with the changes, simply by monitoring this event
+
+    // We CAN however use the new cursor we've been given now for the next startup sync!
+    const context = snapshot.context();
+    cursor = context.acebase_cursor;
+    stateDb.ref('last_cursor').set(cursor);
+
+    // Upon disconnect/reconnect cycles, the AceBaseClient will automatically
+    // use the last cursor from this event to synchronize cache with the server.
+    // If the data changes during reconnect sync, this event callback will run again 
+    // and get the new cursor automatically
+});
+```
+
+More documentation for this will follow soon, but above code is basically all you need to keep an offline local cache database synchronized with the server with minimal amounts of data being transferred. Also note that if you'd make any local changes to the data while the client is offline, those changes will also automatically be synchronized with the server upon reconnect. All pending mutations are saved in the cache database, so even if your app hasn't been running in the meantime, those mutations will be sent to the server the next time it connects.
+
+#### _(The old-school way to log transactions)_
+Before transaction logging was implemented in AceBase natively, you had to _roll your own_ mechanism to do the same as `getMutations`. And you still can, of course! I kept this documentation in here because it might come in handy for someone's specific needs, or might give you an idea of how things can also be done. If you want to implement your own custom history tracking on your server, you can also use a simple cloud function to keep track of changes on specific data:
 
 ```javascript
 // Run this on the server:

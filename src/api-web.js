@@ -1097,10 +1097,12 @@ class WebApi extends Api {
                     const cursorPromise = (async () => {
                         let remoteMutations;
                         try {
-                            remoteMutations = await this.getMutations({ for: strategy.cursor, cursor, compressed: true });
+                            const result = await this.getChanges({ for: strategy.cursor, cursor });
+                            remoteMutations = result.changes;
+                            this._updateCursor(result.new_cursor);
                         }
                         catch(err) {
-                            this.debug.error(`SYNC: Could not load remote mutations`, err);
+                            this.debug.error(`SYNC: Could not load remote changes`, err);
                             options.eventCallback && options.eventCallback('sync_cursor_error', err);
                             if (err.code === 'no_transaction_logging') {
                                 // Apparently the server did support transaction logging before, but is now disabled.
@@ -1129,7 +1131,7 @@ class WebApi extends Api {
                                     return cacheApi.set(cachePath, m.value, { context: m.context });
                                 }
                             });
-                            await Promise.all(promises);                        
+                            await Promise.all(promises);
                         }
                     })();
                     syncPromises.push(cursorPromise);
@@ -1172,70 +1174,6 @@ class WebApi extends Api {
 
                 // Wait until they're all done
                 await Promise.all(syncPromises);
-
-                // let remoteMutations;
-                // if (cursor) {
-                //     // Fetch mutations since cursor. This will get (net) mutations since cursor. 
-                //     // This will include the changes on subscribed paths we pushed just now
-
-                //     const targets = 
-                //         Object.keys(this._subscriptions)
-                //         .map(path => ({ path, events: this._subscriptions[path].map(sub => sub.event) }));
-
-                //     try {
-                //         remoteMutations = await this.getMutations({ for: targets, cursor, compressed: true });
-                //     }
-                //     catch(err) {
-                //         this.debug.error(`SYNC: Could not load remote mutations`, err);
-                //         if (err.code === 'no_transaction_logging') {
-                //             // Apparently the server did support transaction logging before, but is now disabled
-                //             this._updateCursor(null);
-                //         }
-                //         else {
-                //             // Failed for some other reason. Keep the cursor but resume with "legacy" data fetching
-                //         }
-                //     }
-                // }
-
-                // if (remoteMutations) {
-                //     usedSyncMethod = 'cursor';
-                //     this.debug.log(`SYNC: Got ${remoteMutations.length} remote mutations`, remoteMutations);
-                //     const promises = remoteMutations.map(m => {
-                //         const cachePath = `${this.dbname}/cache/${m.path}`;
-                //         if (m.type === 'update') {
-                //             return cacheApi.update(cachePath, m.value, { context: m.context });
-                //         }
-                //         else if (m.type === 'set') {
-                //             return cacheApi.set(cachePath, m.value, { context: m.context });
-                //         }
-                //     });
-                //     await Promise.all(promises);
-                // }
-                // else {
-                //     // Find out what data to load
-                //     const loadPaths = Object.keys(this._subscriptions).reduce((paths, path) => {
-                //         const isWildcardPath = path.includes('*') || path.includes('$');
-                //         if (!paths.includes(path) && !isWildcardPath) {
-                //             const hasValueSubscribers = this._subscriptions[path].some(s => !['mutated','mutations'].includes(s.event) && !s.event.startsWith('notify_'));
-                //             if (hasValueSubscribers) {
-                //                 const pathInfo = PathInfo.get(path);
-                //                 const ancestorIncluded = paths.some(otherPath => pathInfo.isDescendantOf(otherPath));
-                //                 if (!ancestorIncluded) { paths.push(path); }
-                //             }
-                //         }
-                //         return paths;
-                //     }, []);
-                    
-                //     const syncPullPromises = loadPaths.map(path => {
-                //         this.debug.verbose(`SYNC: load "/${path}"`);
-                //         return this.get(path, { allow_cache: false })
-                //         .catch(err => {
-                //             this.debug.error(`SYNC: could not load "/${path}"`, err);
-                //             options.eventCallback && options.eventCallback('sync_pull_error', err);
-                //         });
-                //     });
-                //     await Promise.all(syncPullPromises);                    
-                // }
 
                 // Wait shortly to allow any pending temp cache events to fire
                 await new Promise(resolve => setTimeout(resolve, 10));         
@@ -1303,10 +1241,12 @@ class WebApi extends Api {
      * @param {string} [filter.path] path to get all mutations for, only used if `for` property isn't used
      * @param {Array<{ path: string, events: string[] }>} [filter.for] paths and events to get relevant mutations for
      * @param {string} filter.cursor cursor to use
+     * @param {number} filter.timestamp timestamp to use
+     * @returns {Promise<{ used_cursor: string, new_cursor: string, mutations: object[] }>}
      */
     async getMutations(filter) {
         if (typeof filter !== 'object') { throw new Error('No filter specified'); }
-        if (typeof filter.cursor !== 'string') { throw new Error('No cursor given'); }
+        if (typeof filter.cursor !== 'string' && typeof filter.timestamp !== 'number') { throw new Error('No cursor or timestamp given'); }
         const query = Object.keys(filter)
             .map(key => {
                 let val = filter[key];
@@ -1314,7 +1254,31 @@ class WebApi extends Api {
                 return `${key}=${val}`;
             })
             .join('&');
-        return this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}` }); // /${filter.path}
+        const { data: mutations, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
+        return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, mutations };
+    }
+
+    /**
+     * Gets all relevant effective changes for specific events on a path and since specified cursor
+     * @param {object} filter
+     * @param {string} [filter.path] path to get all mutations for, only used if `for` property isn't used
+     * @param {Array<{ path: string, events: string[] }>} [filter.for] paths and events to get relevant mutations for
+     * @param {string} filter.cursor cursor to use
+     * @param {number} filter.timestamp timestamp to use
+     * @returns {Promise<{ used_cursor: string, new_cursor: string, changes: object[] }>}
+     */
+    async getChanges(filter) {
+        if (typeof filter !== 'object') { throw new Error('No filter specified'); }
+        if (typeof filter.cursor !== 'string' && typeof filter.timestamp !== 'number') { throw new Error('No cursor or timestamp given'); }
+        const query = Object.keys(filter)
+            .map(key => {
+                let val = filter[key];
+                if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
+                return `${key}=${val}`;
+            })
+            .join('&');
+        const { data: changes, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
+        return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, changes };
     }
 
     async _addCacheSetMutation(path, value, context) {
@@ -1562,10 +1526,14 @@ class WebApi extends Api {
      * 
      * @param {string} path 
      * @param {object} [options] 
-     * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context (NEW)
+     * @param {'allow'|'bypass'|'force'} [options.cache_mode='allow'] If a cached value is allowed or forced to be served.
+     * @param {string} [options.cache_cursor] Use a cursor to update the local cache with mutations from the server, then load and serve the entire value from cache. Only works in combination with `allow_cache: true`
+     * @param {string[]}
+     * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context
      */
-    async get(path, options = { allow_cache: true }) {
-        const useCache = this._cache && options.allow_cache !== false;
+    async get(path, options = { cache_mode: 'allow' }) {
+        if (typeof options.cache_mode !== 'string') { options.cache_mode = 'allow'; }
+        const useCache = this._cache && options.cache_mode !== 'bypass';
         const getServerValue = async () => {
             // Get from server
             let url = `${this.url}/data/${this.dbname}/${path}`;
@@ -1604,80 +1572,99 @@ class WebApi extends Api {
                 }
             }
             return { value, context };
-
         };
-        const getCacheValue = () => {
-            return this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
-        };
-
-        if (!useCache) {
-            const { value, context } = await getServerValue();
-            context.acebase_origin = 'server';
+        const getCacheValue = async () => {
+            const result = await this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
+            let { value, context } = result;
+            if (!('value' in result && 'context' in result)) {
+                console.warn(`Missing context from cache results. Update your acebase package`);
+                value = result, context = {};
+            }
+            delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
             return { value, context };
-        }
-        else if (!this.isConnected || this._cache.priority === 'cache') {
+        };
+        if (options.cache_mode === 'force') {
+            // Only load cached value
             const { value, context } = await getCacheValue();
             context.acebase_origin = 'cache';
             return { value, context };
         }
-        else {
-            // Get both, use cached value if available and server version takes too long
-            return new Promise((resolve, reject) => {
-                let wait = true, done = false;
-                const gotValue = (source, val) => {
-                    // console.log(`Got ${source} value of "${path}":`, val);
-                    if (done) { return; }
-                    const { value, context } = val;
-                    if (source === 'server') {
+        if (useCache && typeof options.cache_cursor === 'string') {
+            // Update cache with mutations from cursor, then load cached value
+            const syncResult = await this.updateCache(path, options.cache_cursor);
+            const { value, context } = await getCacheValue();
+            context.acebase_cursor = syncResult.new_cursor;
+            context.acebase_origin = 'hybrid';
+            return { value, context };
+        }
+        if (!useCache) {
+            // Cache not available or allowed to be used, get server value
+            const { value, context } = await getServerValue();
+            context.acebase_origin = 'server';
+            return { value, context };
+        }
+        if (!this.isConnected || this._cache.priority === 'cache') {
+            // Server not connected, or priority is set to 'cache'. Get cached value
+            const { value, context } = await getCacheValue();
+            context.acebase_origin = 'cache';
+            return { value, context };
+        }
+        // Get both, use cached value if available and server version takes too long
+        return new Promise((resolve, reject) => {
+            let wait = true, done = false;
+            const gotValue = (source, val) => {
+                // console.log(`Got ${source} value of "${path}":`, val);
+                if (done) { return; }
+                const { value, context } = val;
+                if (source === 'server') {
+                    done = true;
+                    // console.log(`Using server value for "${path}"`);
+                    context.acebase_origin = 'server';
+                    resolve({ value, context });
+                }
+                else if (value === null) {
+                    // Cached results are not available
+                    if (!wait) {
+                        const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
+                        error.serverError = errors.find(e => e.source === 'server').error;
+                        return reject(error); 
+                    }
+                }
+                else if (!wait) { 
+                    // Cached results, don't wait for server value
+                    done = true; 
+                    // console.log(`Using cache value for "${path}"`);
+                    context.acebase_origin = 'cache';
+                    resolve({ value, context });
+                }
+                else {
+                    // Cached results, wait 1s before resolving with this value, server value might follow soon
+                    setTimeout(() => {
+                        if (done) { return; }
+                        console.log(`Using (delayed) cache value for "${path}"`);
                         done = true;
-                        // console.log(`Using server value for "${path}"`);
-                        context.acebase_origin = 'server';
-                        resolve({ value, context });
-                    }
-                    else if (value === null) {
-                        // Cached results are not available
-                        if (!wait) {
-                            const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
-                            error.serverError = errors.find(e => e.source === 'server').error;
-                            return reject(error); 
-                        }
-                    }
-                    else if (!wait) { 
-                        // Cached results, don't wait for server value
-                        done = true; 
-                        // console.log(`Using cache value for "${path}"`);
                         context.acebase_origin = 'cache';
                         resolve({ value, context });
-                    }
-                    else {
-                        // Cached results, wait 1s before resolving with this value, server value might follow soon
-                        setTimeout(() => {
-                            if (done) { return; }
-                            console.log(`Using (delayed) cache value for "${path}"`);
-                            done = true;
-                            context.acebase_origin = 'cache';
-                            resolve({ value, context });
-                        }, 1000);
-                    }
-                };
-                let errors = [];
-                const gotError = (source, error) => {
-                    errors.push({ source, error });
-                    if (errors.length === 2) { 
-                        // Both failed, reject with server error
-                        reject(errors.find(e => e.source === 'server').error);
-                    }
-                };
+                    }, 1000);
+                }
+            };
+            let errors = [];
+            const gotError = (source, error) => {
+                errors.push({ source, error });
+                if (errors.length === 2) { 
+                    // Both failed, reject with server error
+                    reject(errors.find(e => e.source === 'server').error);
+                }
+            };
 
-                getServerValue()
-                    .then(val => gotValue('server', val))
-                    .catch(err => (wait = false, gotError('server', err)));
+            getServerValue()
+                .then(val => gotValue('server', val))
+                .catch(err => (wait = false, gotError('server', err)));
 
-                getCacheValue()
-                    .then(val => gotValue('cache', val))
-                    .catch(err => gotError('cache', err));
-            });
-        }
+            getCacheValue()
+                .then(val => gotValue('cache', val))
+                .catch(err => gotError('cache', err));
+        });
     }
     
     exists(path, options = { allow_cache: true }) {
@@ -1763,16 +1750,50 @@ class WebApi extends Api {
         return this._request({ method, url, data: postData, ignoreConnectionState: true });
     }
 
-    clearCache(path = '') {
+    /**
+     * Clears the entire cache, or a specific path without raising any events
+     * @param {string} [path] 
+     * @returns 
+     */
+    async clearCache(path = '') {
         if (this._cache) {
-            // Clear cache without raising events
             const value = path === '' ? {} : null;
-            if (path !== '') { path = `cache/${path}`; }
-            return this._cache.db.api.set(path, value, { suppress_events: true });
+            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+            return this._cache.db.api.set(cachePath, value, { suppress_events: true });
         }
-        else {
-            return Promise.resolve();
+    }
+
+    /**
+     * Updates the local cache with remote changes by retrieving all mutations to `path` since given `cursor` and applying them to the local cache database.
+     * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
+     * @param {string} [path=''] Path to update. The root path will be used if not given, synchronizing the entire database.
+     * @param {string} [cursor] A previously acquired cursor to update the cache with. If not specified, `path`'s entire value will be loaded from the server.
+     * @returns {Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>}
+     */
+     async updateCache(path = '', cursor) {
+        if (!this._cache) { throw new Error(`No cache database used`); }
+        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cacheApi = this._cache.db.api;
+        let loadValue = typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
+        if (loadValue) {
+            // Load from server, store in cache (.get takes care of that)
+            const { value, context } = await this.get(path, { allow_cache: false });
+            return { path, used_cursor: cursor, new_cursor: context.acebase_cursor, loaded_value: true, changes: [] };
         }
+        // Get effective changes from server
+        const { changes, new_cursor } = await this.getChanges({ path, cursor });
+        for (let ch of changes) {
+            // Apply to local cache
+            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, ch.path);
+            const options = { context: ch.context, suppress_events: false };
+            if (ch.type === 'update') {
+                await cacheApi.update(cachePath, ch.value, options);
+            }
+            else if (ch.type === 'set') {
+                await cacheApi.set(cachePath, ch.value, options);
+            }
+        }
+        return { path, used_cursor: cursor, new_cursor, loaded_value: false, changes };
     }
 
     /**
@@ -1788,19 +1809,30 @@ class WebApi extends Api {
      * @param {string[]} [options.include] when using snapshots, keys or relative paths to include in result data
      * @param {string[]} [options.exclude] when using snapshots, keys or relative paths to exclude from result data
      * @param {boolean} [options.child_objects] when using snapshots, whether to include child objects in result data
+     * @param {'allow'|'bypass'|'force'} [options.cache_mode] Whether to allow, force or bypass cache
      * @param {(event: { name: string, [key]: any }) => void} [options.eventHandler]
      * @param {object} [options.monitor] NEW (BETA) monitor changes
      * @param {boolean} [options.monitor.add=false] monitor new matches (either because they were added, or changed and now match the query)
      * @param {boolean} [options.monitor.change=false] monitor changed children that still match this query
      * @param {boolean} [options.monitor.remove=false] monitor children that don't match this query anymore
      * @ param {(event:string, path: string, value?: any) => boolean} [options.monitor.callback] NEW (BETA) callback with subscription to enable monitoring of new matches
-     * @returns {Promise<object[]|string[]>} returns a promise that resolves with matching data or paths
+     * @returns {Promise<{ results: object[]|string[]>, context: any }} returns a promise that resolves with matching data or paths in `results`
      */
-    query(path, query, options = { snapshots: false, allow_cache: true, eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
-        const allowCache = options && options.allow_cache === true;
-        if (allowCache && !this.isConnected && this._cache) {
-            // Not connected, query cache db
-            return this._cache.db.api.query(PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
+     async query(path, query, options = { snapshots: false, cache_mode: 'allow', eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
+        const useCache = this._cache && (options.cache_mode === 'force' || (options.cache_mode === 'allow' && !this.isConnected));
+        if (useCache) {
+            // Not connected, or "force" cache_mode: query cache db
+            const data = await this._cache.db.api.query(PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
+            let { results, context } = data;
+            if (!('results' in data && 'context' in data)) {
+                // OLD api did not return context
+                console.warn(`Missing context from local query results. Update your acebase package`);
+                results = data;
+                context = {};
+            }
+            context.acebase_origin = 'cache';
+            delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
+            return { results, context };
         }
         const request = {
             query,
@@ -1812,15 +1844,16 @@ class WebApi extends Api {
             request.client_id = this.socket.id;
             this._realtimeQueries[request.query_id] = { query, options };
         }
-        const data = JSON.stringify(Transport.serialize(request));
-        return this._request({ method: 'POST', url: `${this.url}/query/${this.dbname}/${path}`, data })
-        .then(data => {
+        const reqData = JSON.stringify(Transport.serialize(request));
+        try {
+            const { data, context } = await this._request({ method: 'POST', url: `${this.url}/query/${this.dbname}/${path}`, data: reqData, includeContext: true });
             let results = Transport.deserialize(data);
-            return results.list;
-        })
-        .catch(err => {
+            context.acebase_origin = 'server';
+            return { results: results.list, context };
+        }
+        catch (err) {
             throw err;
-        });
+        }
     }
 
     createIndex(path, key, options) {

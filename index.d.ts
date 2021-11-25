@@ -15,7 +15,8 @@ export interface AceBaseClientCacheSettings {
      *  
      * Using 'cache' will be faster, but has some disadvantages: 
      * - When getting values, cache is not updated with server data so any remote changes 
-     *    will not be updated in cache unless you have change events setup.
+     *    will not be updated in cache unless you have change events setup, or fetch fresh 
+     *    data manually.
      * - When storing values, you won't know if the server update failed.
      * 
      * Summary: use 'server' unless you know what you're doing.
@@ -38,8 +39,8 @@ export interface AceBaseClientSyncSettings {
      * - `"auto"`, which is 2.5s after `"connect"` event, or immediately after `"signin"` event. (legacy behaviour)
      * 
      * If your app needs to sync data that is only accessible to the signed in user, set this 
-     * to `"signin"`. If not, set this to `"connect"`. The `"legacy"` setting is default and provided 
-     * for backward compatability, but should not be used anymore. If you want to manually
+     * to `"signin"`. If not, set this to `"connect"`. The `"auto"` setting is default and provided 
+     * for backward compatibility, but should not be used anymore. If you want to manually
      * trigger synchronization with `client.sync()`, set this to `"manual"`
      * 
      @default 'auto'
@@ -111,9 +112,27 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
     callExtension(method:'get'|'put'|'post'|'delete', path: string, data?: any): Promise<any>
 
     /**
-     * Initiates manual server synchronization. Use this if you have set the `sync.timing` connection setting to 'manual'
+     * Initiates manual synchronization with the server of any paths with active event subscriptions. Use this if you have set the `sync.timing` connection setting to 'manual'
      */
     sync(): Promise<void>
+    
+    readonly cache: {
+        /**
+         * Clears the entire cache, or a specific path without raising any events
+         * @param path 
+         */
+        clear(path?: string): Promise<void>
+
+        /**
+         * Updates the local cache with remote changes by retrieving all mutations to `path` since given `cursor` and applying them to the local cache database.
+         * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
+         * All relevant event listeners will be raised upon data changes.
+         * @param path Path to update. The root path will be used if not given, synchronizing the entire database.
+         * @param cursor A previously acquired cursor to update the cache with. If not specified, `path`'s entire value will be loaded from the server.
+         */
+        update(path?: string, cursor?: string): Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>
+    }
+
 }
 
 export interface IAceBaseAuthProviderSignInResult { 
@@ -367,6 +386,8 @@ export class ServerDate extends Date {}
 
 export import DataSnapshot = acebasecore.DataSnapshot;
 export import DataReference = acebasecore.DataReference;
+export import DataSnapshotsArray = acebasecore.DataSnapshotsArray;
+export import DataReferencesArray = acebasecore.DataReferencesArray;
 export import EventStream = acebasecore.EventStream;
 export import EventSubscription = acebasecore.EventSubscription;
 export import PathReference = acebasecore.PathReference;
@@ -378,5 +399,6 @@ export import IStreamLike = acebasecore.IStreamLike;
 export import ILiveDataProxy = acebasecore.ILiveDataProxy;
 export import ILiveDataProxyValue = acebasecore.ILiveDataProxyValue;
 export import IObjectCollection = acebasecore.IObjectCollection;
+export import ObjectCollection = acebasecore.ObjectCollection;
 export import ID = acebasecore.ID;
 export import proxyAccess = acebasecore.proxyAccess;

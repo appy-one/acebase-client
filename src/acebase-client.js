@@ -234,7 +234,7 @@ class AceBaseClient extends AceBaseBase {
          * Updates the local cache with remote changes by retrieving all changes to `path` since given `cursor` and applying them to the local cache database.
          * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
          * @param {string} [path=''] Path to update. The root path will be used if not given, synchronizing the entire database.
-         * @param {string} [cursor] A previously achieved cursor to update with. Path's entire value will be loaded from the server if not given.
+         * @param {string|null} [cursor] A previously achieved cursor to update with. Path's entire value will be loaded from the server if not given.
          * @returns {Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>}
          */
         const update = (path, cursor) => {

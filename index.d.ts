@@ -128,9 +128,9 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
          * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
          * All relevant event listeners will be raised upon data changes.
          * @param path Path to update. The root path will be used if not given, synchronizing the entire database.
-         * @param cursor A previously acquired cursor to update the cache with. If not specified, `path`'s entire value will be loaded from the server.
+         * @param cursor A previously acquired cursor to update the cache with. If not specified or null, `path`'s entire value will be loaded from the server.
          */
-        update(path?: string, cursor?: string): Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>
+        update(path?: string, cursor?: string|null): Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>
     }
 
 }

@@ -1774,7 +1774,7 @@ class WebApi extends Api {
         if (!this._cache) { throw new Error(`No cache database used`); }
         const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
         const cacheApi = this._cache.db.api;
-        let loadValue = typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
+        let loadValue = cursor === null || typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
         if (loadValue) {
             // Load from server, store in cache (.get takes care of that)
             const { value, context } = await this.get(path, { allow_cache: false });

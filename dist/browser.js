@@ -248,7 +248,7 @@ class AceBaseClient extends AceBaseBase {
          * Updates the local cache with remote changes by retrieving all changes to `path` since given `cursor` and applying them to the local cache database.
          * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
          * @param {string} [path=''] Path to update. The root path will be used if not given, synchronizing the entire database.
-         * @param {string} [cursor] A previously achieved cursor to update with. Path's entire value will be loaded from the server if not given.
+         * @param {string|null} [cursor] A previously achieved cursor to update with. Path's entire value will be loaded from the server if not given.
          * @returns {Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>}
          */
         const update = (path, cursor) => {
@@ -2036,7 +2036,7 @@ class WebApi extends Api {
         if (!this._cache) { throw new Error(`No cache database used`); }
         const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
         const cacheApi = this._cache.db.api;
-        let loadValue = typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
+        let loadValue = cursor === null || typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
         if (loadValue) {
             // Load from server, store in cache (.get takes care of that)
             const { value, context } = await this.get(path, { allow_cache: false });
@@ -5036,12 +5036,12 @@ class DataReference {
     }
     async getMutations(cursorOrDate) {
         const cursor = typeof cursorOrDate === 'string' ? cursorOrDate : undefined;
-        const timestamp = typeof cursorOrDate === 'undefined' ? 0 : cursorOrDate instanceof Date ? cursorOrDate.getTime() : undefined;
+        const timestamp = cursorOrDate === null || typeof cursorOrDate === 'undefined' ? 0 : cursorOrDate instanceof Date ? cursorOrDate.getTime() : undefined;
         return this.db.api.getMutations({ path: this.path, cursor, timestamp });
     }
     async getChanges(cursorOrDate) {
         const cursor = typeof cursorOrDate === 'string' ? cursorOrDate : undefined;
-        const timestamp = typeof cursorOrDate === 'undefined' ? 0 : cursorOrDate instanceof Date ? cursorOrDate.getTime() : undefined;
+        const timestamp = cursorOrDate === null || typeof cursorOrDate === 'undefined' ? 0 : cursorOrDate instanceof Date ? cursorOrDate.getTime() : undefined;
         return this.db.api.getChanges({ path: this.path, cursor, timestamp });
     }
 }

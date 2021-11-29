@@ -239,7 +239,7 @@ class WebApi extends Api {
                             .reduce((topPaths, path) => (topPaths.includes(path) || topPaths.push(path)) && topPaths, [])
                             .map(topEventPath => {
                                 const sub = subscriptions[topEventPath].find(s => s.event === 'mutated');
-                                promise = subscribeTo(sub).then(() => {
+                                const promise = subscribeTo(sub).then(() => {
                                     if (sub.state === 'canceled') {
                                         // Oops, could not subscribe to 'mutated' event on topEventPath, other event(s) at child path(s) should now take over
                                         retry = true;
@@ -1294,6 +1294,7 @@ class WebApi extends Api {
     }
 
     set(path, value, options = { allow_cache: true, context: {} }) {
+        // TODO: refactor allow_cache to cache_mode
         if (!options.context) { options.context = {}; }
         const useCache = this._cache && options.allow_cache !== false;
         const useServer = this.isConnected;
@@ -1381,6 +1382,7 @@ class WebApi extends Api {
     }
 
     update(path, updates, options = { allow_cache: true, context: {} }) {
+        // TODO: refactor allow_cache to cache_mode
         const useCache = this._cache && options && options.allow_cache !== false;
         const useServer = this.isConnected;
         options.context.acebase_mutation = options.context.acebase_mutation || {
@@ -1527,7 +1529,7 @@ class WebApi extends Api {
      * @param {string} path 
      * @param {object} [options] 
      * @param {'allow'|'bypass'|'force'} [options.cache_mode='allow'] If a cached value is allowed or forced to be served.
-     * @param {string} [options.cache_cursor] Use a cursor to update the local cache with mutations from the server, then load and serve the entire value from cache. Only works in combination with `allow_cache: true`
+     * @param {string} [options.cache_cursor] Use a cursor to update the local cache with mutations from the server, then load and serve the entire value from cache. Only works in combination with `cache_mode: 'allow'` (previously `allow_cache: true`)
      * @param {string[]}
      * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context
      */
@@ -1668,6 +1670,7 @@ class WebApi extends Api {
     }
     
     exists(path, options = { allow_cache: true }) {
+        // TODO: refactor allow_cache to cache_mode
         const useCache = this._cache && options.allow_cache !== false;
         const getCacheExists = () => {
             return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
@@ -1777,7 +1780,7 @@ class WebApi extends Api {
         let loadValue = cursor === null || typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
         if (loadValue) {
             // Load from server, store in cache (.get takes care of that)
-            const { value, context } = await this.get(path, { allow_cache: false });
+            const { value, context } = await this.get(path, { cache_mode: 'bypass' });
             return { path, used_cursor: cursor, new_cursor: context.acebase_cursor, loaded_value: true, changes: [] };
         }
         // Get effective changes from server

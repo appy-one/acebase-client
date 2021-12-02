@@ -233,7 +233,7 @@ class WebApi extends Api {
                     // Now, subscribe to all top path mutated events
                     const subscribeToMutatedEvents = async () => {
                         let retry = false;
-                        let promises = Object.keys(subscriptions)
+                        const promises = Object.keys(subscriptions)
                             .filter(path => subscriptions[path].some(sub => sub.event === 'mutated' && sub.state !== 'canceled'))
                             .filter((path, i, arr) => !arr.some(otherPath => PathInfo.get(otherPath).isAncestorOf(path)))
                             .reduce((topPaths, path) => (topPaths.includes(path) || topPaths.push(path)) && topPaths, [])
@@ -245,7 +245,7 @@ class WebApi extends Api {
                                         retry = true;
                                     }
                                 });
-                                promises.push(promise);
+                                return promise;
                             });
                         await Promise.all(promises);
                         if (retry) {

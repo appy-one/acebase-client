@@ -69,7 +69,6 @@ class AceBaseClient extends AceBaseBase {
 
         let ready = false;
         this.on('ready', () => { ready = true; });
-        this._connected = false;
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
 
         this.on('connect', () => {
@@ -105,7 +104,7 @@ class AceBaseClient extends AceBaseBase {
                 if (throwErrors) { throw new Error('sync already running'); }
                 return; 
             }
-            if (!this._connected) {
+            if (!this.api.isConnected) {
                 // We'll retry once connected
                 // // Do set firstSync to false, this fixes the issue of the first sync firing after 
                 // // an initial succesful connection, but quick disconnect (sync does not run) 
@@ -163,8 +162,7 @@ class AceBaseClient extends AceBaseBase {
         };
 
         this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
-        if (evt === 'connect') {
-                this._connected = true;
+            if (evt === 'connect') {
                 this.emit('connect');
                 if (!ready) {
                     emitClientReady();
@@ -177,7 +175,6 @@ class AceBaseClient extends AceBaseBase {
                 }
             }            
             else if (evt === 'disconnect') {
-                this._connected = false;
                 this.emit('disconnect');
             }
         });
@@ -187,7 +184,11 @@ class AceBaseClient extends AceBaseBase {
     }
 
     get connected() {
-        return this._connected;
+        return this.api.isConnected;
+    }
+
+    get connectionState() {
+        return this.api.connectionState;
     }
 
     connect() {

@@ -2,6 +2,7 @@ const { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition } = require('
 const connectSocket = require('socket.io-client');
 const Base64 = require('./base64');
 const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
+const { CachedValueUnavailableError } = require('./errors');
 const { promiseTimeout } = require('./promise-timeout');
 const _request = require('./request');
 const _websocketRequest = (socket, event, data, accessToken) => {
@@ -86,6 +87,17 @@ const CONNECTION_STATE_CONNECTED = 'connected';
 const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
 
 /**
+ * @typedef IWebApiSettings
+ * @property {'verbose'|'log'|'warn'|'error'} logLevel
+ * @property {typeof console} debug
+ * @property {string} url
+ * @property {boolean} [autoConnect=true]
+ * @property {number} [autoConnectDelay=0]
+ * @property {{ db: AceBase }} [cache] 
+ * @property {{ monitor: boolean, interval: number }} [network]
+ */
+
+/**
  * Api to connect to a remote AceBase server over http(s)
  */
 class WebApi extends Api {
@@ -93,7 +105,7 @@ class WebApi extends Api {
     /**
      * 
      * @param {string} dbname 
-     * @param {{ logLevel: 'verbose'|'log'|'warn'|'error', debug: object, url: string, autoConnect: boolean, autoConnectDelay: number, cache: object }} settings 
+     * @param {IWebApiSettings} settings 
      * @param {(event: string, ...args: any[]) => void} callback 
      */
     constructor(dbname = "default", settings, callback) {
@@ -136,7 +148,28 @@ class WebApi extends Api {
             //     this._syncCursor = cursor;
             // });
         }
+        if (typeof settings.network !== 'object') { settings.network = { enabled: false, interval: 60 }; }
+        if (typeof settings.network.monitor !== 'boolean') { settings.network.monitor = false; }
+        if (typeof settings.network.interval !== 'number') { settings.network.interval = 60; }
+        if (settings.network.monitor) {
+            // Mobile devices might go offline while the app is suspended (running in the backgound)
+            // no events will fire and when the app resumes, it might assume it is still connected while
+            // it is not. We'll manually poll the server to check the connection
+            const checkConnection = async () => {
+                if (!this.isConnected) { return; }
+                try {
+                    // Websocket is connected, check connectivity to server by sending http/s ping
+                    await this._request({ url: this.serverPingUrl });
+                }
+                catch(err) {
+                    // No need to handle error here, _request will have handled the disconnect
+                }
+            }
+            const interval = setInterval(checkConnection, settings.network.interval * 1000); // ping every x seconds
+            interval.unref && interval.unref();
+        }
         this._realtimeQueries = {};
+        /** @type {typeof settings.debug} */
         this.debug = settings.debug;
         const eventCallback = (event, ...args) => {
             if (event === 'disconnect') {
@@ -623,7 +656,50 @@ class WebApi extends Api {
          */
         this._request = async (options) => {
             if (this.isConnected || options.ignoreConnectionState === true) {
-                const result = await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context });
+                const result = await (async () => {
+                    try {
+                        return await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context });
+                    }
+                    catch (err) {
+                        if (this.isConnected && err.isNetworkError) {
+                            // This is a network error, but the websocket thinks we are still connected. 
+                            this.debug.warn(`A network error occurred loading ${options.url}`);
+
+                            // // Investigate now if we can connect by doing a ping API call.
+                            // this.debug.warn(`Starting connectivity check`);
+
+                            // // Prevent duplicate checks from executing by setting state to disconnected right away
+                            // this._connectionState === CONNECTION_STATE_DISCONNECTED;
+                            // let connected = true;
+                            // try {
+                            //     await _request('GET', this.serverPingUrl);
+                            // }
+                            // catch(err) {
+                            //     // Older servers might not have the ping API method, those will have 
+                            //     // returned a 404, which is not a network error
+                            //     if (err.isNetworkError) {
+                            //         connected = false;
+                            //     }
+                            // }
+                            // if (connected) {
+                            //     this.debug.warn(`Connectivity test with server succeeded, we're online`);
+                            //     this._connectionState === CONNECTION_STATE_CONNECTED;
+                            // }
+                            // else {
+                            //     this.debug.error(`Connectivity test with server failed, we're offline`);
+
+                            // Start reconnection flow
+                            this._connectionState === CONNECTION_STATE_DISCONNECTED;
+                            this.connect().catch(() => {});
+                            console.assert(this._connectionState === CONNECTION_STATE_CONNECTING, 'wrong connection state');
+
+                            // }
+                        }
+
+                        // Rethrow the error
+                        throw err;
+                    }
+                })();
                 if (result.context && result.context.acebase_cursor) {
                     this._updateCursor(result.context.acebase_cursor);
                 }
@@ -795,6 +871,9 @@ class WebApi extends Api {
     }
     get isConnecting() {
         return this._connectionState === CONNECTION_STATE_CONNECTING;
+    }
+    get connectionState() {
+        return this._connectionState;
     }
 
     stats(options = undefined) {
@@ -1338,8 +1417,9 @@ class WebApi extends Api {
 
         Promise.all([ cachePromise, serverPromise ])
         .then(([ cacheResult, serverResult ]) => {
-            if (serverPromise) {
-                // Server was being updated
+            const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
+            if (serverPromise && !networkError) {
+                // Server update succeeded, or failed with a non-network related reason
 
                 if (serverResult.success) {
                     // Server update success
@@ -1349,7 +1429,7 @@ class WebApi extends Api {
                     }
                 }
                 else {
-                    // Server update failed
+                    // Server update failed (with a non-network related reason)
                     if (cacheResult.success) {
                         // Cache update did succeed, rollback to previous value
                         this.debug.error(`Failed to set server value for "${path}", rolling back cache to previous value. Error:`, serverResult.error)
@@ -1411,9 +1491,6 @@ class WebApi extends Api {
                 return cacheApi.update(cachePath, updates, { context: options.context });
             });
         };
-        // const deleteCache = () => {
-        //     return this._cache.db.api.set(`${this.dbname}/cache/${path}`, null);
-        // };
         const rollbackCache = () => {
             return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
@@ -1481,8 +1558,9 @@ class WebApi extends Api {
 
         Promise.all([ cachePromise, serverPromise ])
         .then(([ cacheResult, serverResult ]) => {
-            if (serverPromise) {
-                // Server was being updated
+            const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
+            if (serverPromise && !networkError) {
+                // Server update succeeded, or failed with a non-network related reason
 
                 if (serverResult.success) {
                     // Server update success
@@ -1575,26 +1653,29 @@ class WebApi extends Api {
             }
             return { value, context };
         };
-        const getCacheValue = async () => {
+        const getCacheValue = async (throwOnNull = false) => {
             const result = await this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
             let { value, context } = result;
             if (!('value' in result && 'context' in result)) {
                 console.warn(`Missing context from cache results. Update your acebase package`);
                 value = result, context = {};
             }
+            if (value === null && throwOnNull) {
+                throw new CachedValueUnavailableError(path);
+            }
             delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
             return { value, context };
         };
         if (options.cache_mode === 'force') {
             // Only load cached value
-            const { value, context } = await getCacheValue();
+            const { value, context } = await getCacheValue(false); // Do not throw on null with cache_mode: 'force'
             context.acebase_origin = 'cache';
             return { value, context };
         }
         if (useCache && typeof options.cache_cursor === 'string') {
             // Update cache with mutations from cursor, then load cached value
             const syncResult = await this.updateCache(path, options.cache_cursor);
-            const { value, context } = await getCacheValue();
+            const { value, context } = await getCacheValue(false); // don't throw on null value, it was updated from the server just now
             context.acebase_cursor = syncResult.new_cursor;
             context.acebase_origin = 'hybrid';
             return { value, context };
@@ -1607,7 +1688,8 @@ class WebApi extends Api {
         }
         if (!this.isConnected || this._cache.priority === 'cache') {
             // Server not connected, or priority is set to 'cache'. Get cached value
-            const { value, context } = await getCacheValue();
+            const throwOnNull = this._cache.priority !== 'cache';
+            const { value, context } = await getCacheValue(throwOnNull);
             context.acebase_origin = 'cache';
             return { value, context };
         }
@@ -1615,27 +1697,35 @@ class WebApi extends Api {
         return new Promise((resolve, reject) => {
             let wait = true, done = false;
             const gotValue = (source, val) => {
-                // console.log(`Got ${source} value of "${path}":`, val);
+                this.debug.verbose(`Got ${source} value of "${path}":`, val);
                 if (done) { return; }
                 const { value, context } = val;
                 if (source === 'server') {
                     done = true;
-                    // console.log(`Using server value for "${path}"`);
+                    this.debug.verbose(`Using server value for "${path}"`);
                     context.acebase_origin = 'server';
                     resolve({ value, context });
                 }
                 else if (value === null) {
-                    // Cached results are not available
+                    // Cached value is not available
                     if (!wait) {
-                        const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
-                        error.serverError = errors.find(e => e.source === 'server').error;
+                        const serverError = errors.find(e => e.source === 'server').error;
+                        if (serverError.isNetworkError) {
+                            // On network related errors, we thought we were connected but apparently weren't.
+                            // If we had known this up-front, getCachedValue(true) would have been executed and
+                            // thrown a CachedValueUnavailableError with default message. Let's do that now
+                            return reject(new CachedValueUnavailableError(path));
+                        }
+                        // Could not get server value because of a non-network related issue - possibly unauthorized access
+                        const error = new CachedValueUnavailableError(path, `Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
+                        error.serverError = serverError;
                         return reject(error); 
                     }
                 }
                 else if (!wait) { 
                     // Cached results, don't wait for server value
                     done = true; 
-                    // console.log(`Using cache value for "${path}"`);
+                    this.debug.verbose(`Using cache value for "${path}"`);
                     context.acebase_origin = 'cache';
                     resolve({ value, context });
                 }
@@ -1643,7 +1733,7 @@ class WebApi extends Api {
                     // Cached results, wait 1s before resolving with this value, server value might follow soon
                     setTimeout(() => {
                         if (done) { return; }
-                        console.log(`Using (delayed) cache value for "${path}"`);
+                        this.debug.verbose(`Using (delayed) cache value for "${path}"`);
                         done = true;
                         context.acebase_origin = 'cache';
                         resolve({ value, context });
@@ -1663,7 +1753,7 @@ class WebApi extends Api {
                 .then(val => gotValue('server', val))
                 .catch(err => (wait = false, gotError('server', err)));
 
-            getCacheValue()
+            getCacheValue(false)
                 .then(val => gotValue('cache', val))
                 .catch(err => gotError('cache', err));
         });
@@ -1671,6 +1761,7 @@ class WebApi extends Api {
     
     exists(path, options = { allow_cache: true }) {
         // TODO: refactor allow_cache to cache_mode
+        // TODO: refactor to include context in return value: acebase_origin: 'cache' or 'server'
         const useCache = this._cache && options.allow_cache !== false;
         const getCacheExists = () => {
             return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
@@ -1900,11 +1991,17 @@ class WebApi extends Api {
         });
     }
 
+    get serverPingUrl() {
+        return `${this.url}/ping/${this.dbname}`;
+    }
+
     getServerInfo() {
         return this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
             // Prior to acebase-server v0.9.37, info was at /info (no dbname attached)
-            this.debug.warn(`Could not get server info, update your acebase server version`);
-            return { version: 'unknown', time: Date.now() }
+            if (!err.isNetworkError) {
+                this.debug.warn(`Could not get server info, update your acebase server version`);
+            }
+            return { version: 'unknown', time: Date.now() };
         });
     }
 

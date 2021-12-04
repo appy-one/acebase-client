@@ -1,4 +1,7 @@
 class AceBaseRequestError extends Error {
+    get isNetworkError() {
+        return this.response === null;
+    }
     constructor(request, response, code, message) {
         super(message);
         this.code = code;

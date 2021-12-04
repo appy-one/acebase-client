@@ -73,6 +73,21 @@ export interface AceBaseClientConnectionSettings {
      * Settings for synchronization
      */
     sync?: AceBaseClientSyncSettings
+    /**
+     * Network monitoring settings
+     */
+    network?: {
+        /**
+         * Whether to actively monitor the network, checks connectivity with the server every `interval` seconds. 
+         * NOTE: disconnects to the server are discovered automatically under normal circumstances, 
+         * enabling this might cause disconnects to be detected earlier.
+         */
+        monitor: boolean
+        /**
+         * Perform conncetivity check every `interval` seconds
+         */
+        interval: number
+    }
 }
 
 /**
@@ -87,6 +102,7 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
     constructor(host: string, port: number, dbname: string, https?: boolean);
     readonly auth: AceBaseClientAuth
     readonly connected: boolean
+    readonly connectionState: 'disconnected'|'connecting'|'connected'|'disconnecting';
 
     /**
      * Connects to the server
@@ -383,6 +399,9 @@ export class AceBaseUser {
 // }
 
 export class ServerDate extends Date {}
+export class CachedValueUnavailableError extends Error {
+    path: string
+}
 
 export import DataSnapshot = acebasecore.DataSnapshot;
 export import DataReference = acebasecore.DataReference;

@@ -11,7 +11,7 @@ var u,f,l,d=String.fromCharCode;t.exports={version:"2.1.2",encode:a,decode:h}},f
 
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":41}],2:[function(require,module,exports){
+},{"buffer":42}],2:[function(require,module,exports){
 const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
@@ -83,7 +83,6 @@ class AceBaseClient extends AceBaseBase {
 
         let ready = false;
         this.on('ready', () => { ready = true; });
-        this._connected = false;
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
 
         this.on('connect', () => {
@@ -119,7 +118,7 @@ class AceBaseClient extends AceBaseBase {
                 if (throwErrors) { throw new Error('sync already running'); }
                 return; 
             }
-            if (!this._connected) {
+            if (!this.api.isConnected) {
                 // We'll retry once connected
                 // // Do set firstSync to false, this fixes the issue of the first sync firing after 
                 // // an initial succesful connection, but quick disconnect (sync does not run) 
@@ -177,8 +176,7 @@ class AceBaseClient extends AceBaseBase {
         };
 
         this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
-        if (evt === 'connect') {
-                this._connected = true;
+            if (evt === 'connect') {
                 this.emit('connect');
                 if (!ready) {
                     emitClientReady();
@@ -191,7 +189,6 @@ class AceBaseClient extends AceBaseBase {
                 }
             }            
             else if (evt === 'disconnect') {
-                this._connected = false;
                 this.emit('disconnect');
             }
         });
@@ -201,7 +198,11 @@ class AceBaseClient extends AceBaseBase {
     }
 
     get connected() {
-        return this._connected;
+        return this.api.isConnected;
+    }
+
+    get connectionState() {
+        return this.api.connectionState;
     }
 
     connect() {
@@ -259,11 +260,12 @@ class AceBaseClient extends AceBaseBase {
 }
 
 module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
-},{"./api-web":3,"./auth":4,"./server-date":12,"acebase-core":25}],3:[function(require,module,exports){
+},{"./api-web":3,"./auth":4,"./server-date":13,"acebase-core":26}],3:[function(require,module,exports){
 const { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition } = require('acebase-core');
 const connectSocket = require('socket.io-client');
 const Base64 = require('./base64');
 const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
+const { CachedValueUnavailableError } = require('./errors');
 const { promiseTimeout } = require('./promise-timeout');
 const _request = require('./request');
 const _websocketRequest = (socket, event, data, accessToken) => {
@@ -348,6 +350,17 @@ const CONNECTION_STATE_CONNECTED = 'connected';
 const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
 
 /**
+ * @typedef IWebApiSettings
+ * @property {'verbose'|'log'|'warn'|'error'} logLevel
+ * @property {typeof console} debug
+ * @property {string} url
+ * @property {boolean} [autoConnect=true]
+ * @property {number} [autoConnectDelay=0]
+ * @property {{ db: AceBase }} [cache] 
+ * @property {{ monitor: boolean, interval: number }} [network]
+ */
+
+/**
  * Api to connect to a remote AceBase server over http(s)
  */
 class WebApi extends Api {
@@ -355,7 +368,7 @@ class WebApi extends Api {
     /**
      * 
      * @param {string} dbname 
-     * @param {{ logLevel: 'verbose'|'log'|'warn'|'error', debug: object, url: string, autoConnect: boolean, autoConnectDelay: number, cache: object }} settings 
+     * @param {IWebApiSettings} settings 
      * @param {(event: string, ...args: any[]) => void} callback 
      */
     constructor(dbname = "default", settings, callback) {
@@ -398,7 +411,28 @@ class WebApi extends Api {
             //     this._syncCursor = cursor;
             // });
         }
+        if (typeof settings.network !== 'object') { settings.network = { enabled: false, interval: 60 }; }
+        if (typeof settings.network.monitor !== 'boolean') { settings.network.monitor = false; }
+        if (typeof settings.network.interval !== 'number') { settings.network.interval = 60; }
+        if (settings.network.monitor) {
+            // Mobile devices might go offline while the app is suspended (running in the backgound)
+            // no events will fire and when the app resumes, it might assume it is still connected while
+            // it is not. We'll manually poll the server to check the connection
+            const checkConnection = async () => {
+                if (!this.isConnected) { return; }
+                try {
+                    // Websocket is connected, check connectivity to server by sending http/s ping
+                    await this._request({ url: this.serverPingUrl });
+                }
+                catch(err) {
+                    // No need to handle error here, _request will have handled the disconnect
+                }
+            }
+            const interval = setInterval(checkConnection, settings.network.interval * 1000); // ping every x seconds
+            interval.unref && interval.unref();
+        }
         this._realtimeQueries = {};
+        /** @type {typeof settings.debug} */
         this.debug = settings.debug;
         const eventCallback = (event, ...args) => {
             if (event === 'disconnect') {
@@ -885,7 +919,50 @@ class WebApi extends Api {
          */
         this._request = async (options) => {
             if (this.isConnected || options.ignoreConnectionState === true) {
-                const result = await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context });
+                const result = await (async () => {
+                    try {
+                        return await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context });
+                    }
+                    catch (err) {
+                        if (this.isConnected && err.isNetworkError) {
+                            // This is a network error, but the websocket thinks we are still connected. 
+                            this.debug.warn(`A network error occurred loading ${options.url}`);
+
+                            // // Investigate now if we can connect by doing a ping API call.
+                            // this.debug.warn(`Starting connectivity check`);
+
+                            // // Prevent duplicate checks from executing by setting state to disconnected right away
+                            // this._connectionState === CONNECTION_STATE_DISCONNECTED;
+                            // let connected = true;
+                            // try {
+                            //     await _request('GET', this.serverPingUrl);
+                            // }
+                            // catch(err) {
+                            //     // Older servers might not have the ping API method, those will have 
+                            //     // returned a 404, which is not a network error
+                            //     if (err.isNetworkError) {
+                            //         connected = false;
+                            //     }
+                            // }
+                            // if (connected) {
+                            //     this.debug.warn(`Connectivity test with server succeeded, we're online`);
+                            //     this._connectionState === CONNECTION_STATE_CONNECTED;
+                            // }
+                            // else {
+                            //     this.debug.error(`Connectivity test with server failed, we're offline`);
+
+                            // Start reconnection flow
+                            this._connectionState === CONNECTION_STATE_DISCONNECTED;
+                            this.connect().catch(() => {});
+                            console.assert(this._connectionState === CONNECTION_STATE_CONNECTING, 'wrong connection state');
+
+                            // }
+                        }
+
+                        // Rethrow the error
+                        throw err;
+                    }
+                })();
                 if (result.context && result.context.acebase_cursor) {
                     this._updateCursor(result.context.acebase_cursor);
                 }
@@ -1057,6 +1134,9 @@ class WebApi extends Api {
     }
     get isConnecting() {
         return this._connectionState === CONNECTION_STATE_CONNECTING;
+    }
+    get connectionState() {
+        return this._connectionState;
     }
 
     stats(options = undefined) {
@@ -1600,8 +1680,9 @@ class WebApi extends Api {
 
         Promise.all([ cachePromise, serverPromise ])
         .then(([ cacheResult, serverResult ]) => {
-            if (serverPromise) {
-                // Server was being updated
+            const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
+            if (serverPromise && !networkError) {
+                // Server update succeeded, or failed with a non-network related reason
 
                 if (serverResult.success) {
                     // Server update success
@@ -1611,7 +1692,7 @@ class WebApi extends Api {
                     }
                 }
                 else {
-                    // Server update failed
+                    // Server update failed (with a non-network related reason)
                     if (cacheResult.success) {
                         // Cache update did succeed, rollback to previous value
                         this.debug.error(`Failed to set server value for "${path}", rolling back cache to previous value. Error:`, serverResult.error)
@@ -1673,9 +1754,6 @@ class WebApi extends Api {
                 return cacheApi.update(cachePath, updates, { context: options.context });
             });
         };
-        // const deleteCache = () => {
-        //     return this._cache.db.api.set(`${this.dbname}/cache/${path}`, null);
-        // };
         const rollbackCache = () => {
             return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
@@ -1743,8 +1821,9 @@ class WebApi extends Api {
 
         Promise.all([ cachePromise, serverPromise ])
         .then(([ cacheResult, serverResult ]) => {
-            if (serverPromise) {
-                // Server was being updated
+            const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
+            if (serverPromise && !networkError) {
+                // Server update succeeded, or failed with a non-network related reason
 
                 if (serverResult.success) {
                     // Server update success
@@ -1837,26 +1916,29 @@ class WebApi extends Api {
             }
             return { value, context };
         };
-        const getCacheValue = async () => {
+        const getCacheValue = async (throwOnNull = false) => {
             const result = await this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
             let { value, context } = result;
             if (!('value' in result && 'context' in result)) {
                 console.warn(`Missing context from cache results. Update your acebase package`);
                 value = result, context = {};
             }
+            if (value === null && throwOnNull) {
+                throw new CachedValueUnavailableError(path);
+            }
             delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
             return { value, context };
         };
         if (options.cache_mode === 'force') {
             // Only load cached value
-            const { value, context } = await getCacheValue();
+            const { value, context } = await getCacheValue(false); // Do not throw on null with cache_mode: 'force'
             context.acebase_origin = 'cache';
             return { value, context };
         }
         if (useCache && typeof options.cache_cursor === 'string') {
             // Update cache with mutations from cursor, then load cached value
             const syncResult = await this.updateCache(path, options.cache_cursor);
-            const { value, context } = await getCacheValue();
+            const { value, context } = await getCacheValue(false); // don't throw on null value, it was updated from the server just now
             context.acebase_cursor = syncResult.new_cursor;
             context.acebase_origin = 'hybrid';
             return { value, context };
@@ -1869,7 +1951,8 @@ class WebApi extends Api {
         }
         if (!this.isConnected || this._cache.priority === 'cache') {
             // Server not connected, or priority is set to 'cache'. Get cached value
-            const { value, context } = await getCacheValue();
+            const throwOnNull = this._cache.priority !== 'cache';
+            const { value, context } = await getCacheValue(throwOnNull);
             context.acebase_origin = 'cache';
             return { value, context };
         }
@@ -1877,27 +1960,35 @@ class WebApi extends Api {
         return new Promise((resolve, reject) => {
             let wait = true, done = false;
             const gotValue = (source, val) => {
-                // console.log(`Got ${source} value of "${path}":`, val);
+                this.debug.verbose(`Got ${source} value of "${path}":`, val);
                 if (done) { return; }
                 const { value, context } = val;
                 if (source === 'server') {
                     done = true;
-                    // console.log(`Using server value for "${path}"`);
+                    this.debug.verbose(`Using server value for "${path}"`);
                     context.acebase_origin = 'server';
                     resolve({ value, context });
                 }
                 else if (value === null) {
-                    // Cached results are not available
+                    // Cached value is not available
                     if (!wait) {
-                        const error = new Error(`Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
-                        error.serverError = errors.find(e => e.source === 'server').error;
+                        const serverError = errors.find(e => e.source === 'server').error;
+                        if (serverError.isNetworkError) {
+                            // On network related errors, we thought we were connected but apparently weren't.
+                            // If we had known this up-front, getCachedValue(true) would have been executed and
+                            // thrown a CachedValueUnavailableError with default message. Let's do that now
+                            return reject(new CachedValueUnavailableError(path));
+                        }
+                        // Could not get server value because of a non-network related issue - possibly unauthorized access
+                        const error = new CachedValueUnavailableError(path, `Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
+                        error.serverError = serverError;
                         return reject(error); 
                     }
                 }
                 else if (!wait) { 
                     // Cached results, don't wait for server value
                     done = true; 
-                    // console.log(`Using cache value for "${path}"`);
+                    this.debug.verbose(`Using cache value for "${path}"`);
                     context.acebase_origin = 'cache';
                     resolve({ value, context });
                 }
@@ -1905,7 +1996,7 @@ class WebApi extends Api {
                     // Cached results, wait 1s before resolving with this value, server value might follow soon
                     setTimeout(() => {
                         if (done) { return; }
-                        console.log(`Using (delayed) cache value for "${path}"`);
+                        this.debug.verbose(`Using (delayed) cache value for "${path}"`);
                         done = true;
                         context.acebase_origin = 'cache';
                         resolve({ value, context });
@@ -1925,7 +2016,7 @@ class WebApi extends Api {
                 .then(val => gotValue('server', val))
                 .catch(err => (wait = false, gotError('server', err)));
 
-            getCacheValue()
+            getCacheValue(false)
                 .then(val => gotValue('cache', val))
                 .catch(err => gotError('cache', err));
         });
@@ -1933,6 +2024,7 @@ class WebApi extends Api {
     
     exists(path, options = { allow_cache: true }) {
         // TODO: refactor allow_cache to cache_mode
+        // TODO: refactor to include context in return value: acebase_origin: 'cache' or 'server'
         const useCache = this._cache && options.allow_cache !== false;
         const getCacheExists = () => {
             return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
@@ -2162,11 +2254,17 @@ class WebApi extends Api {
         });
     }
 
+    get serverPingUrl() {
+        return `${this.url}/ping/${this.dbname}`;
+    }
+
     getServerInfo() {
         return this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
             // Prior to acebase-server v0.9.37, info was at /info (no dbname attached)
-            this.debug.warn(`Could not get server info, update your acebase server version`);
-            return { version: 'unknown', time: Date.now() }
+            if (!err.isNetworkError) {
+                this.debug.warn(`Could not get server info, update your acebase server version`);
+            }
+            return { version: 'unknown', time: Date.now() };
         });
     }
 
@@ -2201,7 +2299,7 @@ class WebApi extends Api {
 }
 
 module.exports = { WebApi };
-},{"./base64":5,"./promise-timeout":9,"./request":10,"./request/error":11,"acebase-core":25,"socket.io-client":1}],4:[function(require,module,exports){
+},{"./base64":5,"./errors":7,"./promise-timeout":10,"./request":11,"./request/error":12,"acebase-core":26,"socket.io-client":1}],4:[function(require,module,exports){
 const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
 // const { AceBaseClient } = require('./acebase-client');
 
@@ -2567,7 +2665,7 @@ class AceBaseClientAuth {
 }
 
 module.exports = { AceBaseClientAuth };
-},{"./user":13}],5:[function(require,module,exports){
+},{"./user":14}],5:[function(require,module,exports){
 const Base64 = {
     encode(str) {
         return btoa(unescape(encodeURIComponent(str)));
@@ -2597,10 +2695,21 @@ const acebaseclient = require('./index');
 window.acebaseclient = acebaseclient;
 window.AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
 module.exports = acebaseclient;
-},{"./index":7}],7:[function(require,module,exports){
+},{"./index":8}],7:[function(require,module,exports){
+
+class CachedValueUnavailableError extends Error {
+    constructor(path, message) {
+        super(message || `Value for path "/${path}" is not available in cache`);
+        this.path = path;
+    }
+}
+
+module.exports = { CachedValueUnavailableError };
+},{}],8:[function(require,module,exports){
 const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
 const { ServerDate } = require('./server-date');
+const { CachedValueUnavailableError } = require('./errors');
 
 module.exports = {
     AceBaseClient,
@@ -2612,11 +2721,12 @@ module.exports = {
     ID,
     proxyAccess,
     ServerDate,
-    ObjectCollection
+    ObjectCollection,
+    CachedValueUnavailableError
 };
-},{"./acebase-client":2,"./server-date":12,"acebase-core":25}],8:[function(require,module,exports){
+},{"./acebase-client":2,"./errors":7,"./server-date":13,"acebase-core":26}],9:[function(require,module,exports){
 module.exports = performance;
-},{}],9:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 class PromiseTimeoutError extends Error {}
 function promiseTimeout(promise, ms, comment) {
     return new Promise((resolve, reject) => {
@@ -2630,7 +2740,7 @@ function promiseTimeout(promise, ms, comment) {
     });
 }
 module.exports = { PromiseTimeoutError, promiseTimeout };
-},{}],10:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 const { AceBaseRequestError } = require('./error');
 
 /**
@@ -2714,8 +2824,11 @@ async function request(method, url, options = { accessToken: null, data: null, d
 }
 
 module.exports = request;
-},{"./error":11}],11:[function(require,module,exports){
+},{"./error":12}],12:[function(require,module,exports){
 class AceBaseRequestError extends Error {
+    get isNetworkError() {
+        return this.response === null;
+    }
     constructor(request, response, code, message) {
         super(message);
         this.code = code;
@@ -2726,7 +2839,7 @@ class AceBaseRequestError extends Error {
 const NOT_CONNECTED_ERROR_MESSAGE = 'remote database is not connected'; //'AceBaseClient is not connected';
 
 module.exports = { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE };
-},{}],12:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 const { ID } = require('acebase-core');
 const performance = require('./performance');
 
@@ -2784,7 +2897,7 @@ class ServerDate extends Date {
 }
 
 module.exports = { ServerDate, setServerBias };
-},{"./performance":8,"acebase-core":25}],13:[function(require,module,exports){
+},{"./performance":9,"acebase-core":26}],14:[function(require,module,exports){
 
 class AceBaseUser {
     /**
@@ -2847,7 +2960,7 @@ class AceBaseAuthResult {
 }
 
 module.exports = { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult };
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AceBaseBase = exports.AceBaseBaseSettings = void 0;
@@ -3017,7 +3130,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
 }
 exports.AceBaseBase = AceBaseBase;
 
-},{"./data-reference":21,"./debug":23,"./optional-observable":27,"./simple-colors":33,"./simple-event-emitter":34,"./type-mappings":37}],15:[function(require,module,exports){
+},{"./data-reference":22,"./debug":24,"./optional-observable":28,"./simple-colors":34,"./simple-event-emitter":35,"./type-mappings":38}],16:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Api = void 0;
@@ -3058,7 +3171,7 @@ class Api {
 }
 exports.Api = Api;
 
-},{}],16:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ascii85 = void 0;
@@ -3140,7 +3253,7 @@ exports.ascii85 = {
     }
 };
 
-},{}],17:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const pad_1 = require("../pad");
@@ -3152,7 +3265,7 @@ function fingerprint() {
 }
 exports.default = fingerprint;
 
-},{"../pad":19}],18:[function(require,module,exports){
+},{"../pad":20}],19:[function(require,module,exports){
 "use strict";
 /**
  * cuid.js
@@ -3205,7 +3318,7 @@ function cuid(timebias = 0) {
 exports.default = cuid;
 // Not using slugs, removed code
 
-},{"./fingerprint":17,"./pad":19}],19:[function(require,module,exports){
+},{"./fingerprint":18,"./pad":20}],20:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function pad(num, size) {
@@ -3215,7 +3328,7 @@ function pad(num, size) {
 exports.default = pad;
 ;
 
-},{}],20:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OrderedCollectionProxy = exports.proxyAccess = exports.LiveDataProxy = void 0;
@@ -4347,7 +4460,7 @@ class OrderedCollectionProxy {
 }
 exports.OrderedCollectionProxy = OrderedCollectionProxy;
 
-},{"./data-reference":21,"./data-snapshot":22,"./id":24,"./optional-observable":27,"./path-info":28,"./path-reference":29,"./process":30,"./simple-event-emitter":34,"./utils":38}],21:[function(require,module,exports){
+},{"./data-reference":22,"./data-snapshot":23,"./id":25,"./optional-observable":28,"./path-info":29,"./path-reference":30,"./process":31,"./simple-event-emitter":35,"./utils":39}],22:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataReferenceQuery = exports.DataReference = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = void 0;
@@ -5361,7 +5474,7 @@ class DataReferencesArray extends Array {
 }
 exports.DataReferencesArray = DataReferencesArray;
 
-},{"./data-proxy":20,"./data-snapshot":22,"./id":24,"./optional-observable":27,"./path-info":28,"./subscription":35}],22:[function(require,module,exports){
+},{"./data-proxy":21,"./data-snapshot":23,"./id":25,"./optional-observable":28,"./path-info":29,"./subscription":36}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MutationsDataSnapshot = exports.DataSnapshot = void 0;
@@ -5512,7 +5625,7 @@ class MutationsDataSnapshot extends DataSnapshot {
 }
 exports.MutationsDataSnapshot = MutationsDataSnapshot;
 
-},{"./path-info":28}],23:[function(require,module,exports){
+},{"./path-info":29}],24:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DebugLogger = void 0;
@@ -5542,7 +5655,7 @@ class DebugLogger {
 }
 exports.DebugLogger = DebugLogger;
 
-},{"./process":30}],24:[function(require,module,exports){
+},{"./process":31}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ID = void 0;
@@ -5564,7 +5677,7 @@ class ID {
 }
 exports.ID = ID;
 
-},{"./cuid":18}],25:[function(require,module,exports){
+},{"./cuid":19}],26:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObjectCollection = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
@@ -5616,7 +5729,7 @@ Object.defineProperty(exports, "SchemaDefinition", { enumerable: true, get: func
 var object_collection_1 = require("./object-collection");
 Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: function () { return object_collection_1.ObjectCollection; } });
 
-},{"./acebase-base":14,"./api":15,"./ascii85":16,"./data-proxy":20,"./data-reference":21,"./data-snapshot":22,"./debug":23,"./id":24,"./object-collection":26,"./path-info":28,"./path-reference":29,"./schema":31,"./simple-cache":32,"./simple-colors":33,"./simple-event-emitter":34,"./subscription":35,"./transport":36,"./type-mappings":37,"./utils":38}],26:[function(require,module,exports){
+},{"./acebase-base":15,"./api":16,"./ascii85":17,"./data-proxy":21,"./data-reference":22,"./data-snapshot":23,"./debug":24,"./id":25,"./object-collection":27,"./path-info":29,"./path-reference":30,"./schema":32,"./simple-cache":33,"./simple-colors":34,"./simple-event-emitter":35,"./subscription":36,"./transport":37,"./type-mappings":38,"./utils":39}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObjectCollection = void 0;
@@ -5632,7 +5745,7 @@ class ObjectCollection {
 }
 exports.ObjectCollection = ObjectCollection;
 
-},{"./id":24}],27:[function(require,module,exports){
+},{"./id":25}],28:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObservableShim = exports.setObservable = exports.getObservable = void 0;
@@ -5710,7 +5823,7 @@ class ObservableShim {
 }
 exports.ObservableShim = ObservableShim;
 
-},{"rxjs":39}],28:[function(require,module,exports){
+},{"rxjs":40}],29:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathInfo = void 0;
@@ -5991,7 +6104,7 @@ class PathInfo {
 }
 exports.PathInfo = PathInfo;
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathReference = void 0;
@@ -6006,7 +6119,7 @@ class PathReference {
 }
 exports.PathReference = PathReference;
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = {
@@ -6015,7 +6128,7 @@ exports.default = {
     }
 };
 
-},{}],31:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SchemaDefinition = void 0;
@@ -6357,7 +6470,7 @@ class SchemaDefinition {
 }
 exports.SchemaDefinition = SchemaDefinition;
 
-},{}],32:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleCache = void 0;
@@ -6406,7 +6519,7 @@ class SimpleCache {
 }
 exports.SimpleCache = SimpleCache;
 
-},{"./utils":38}],33:[function(require,module,exports){
+},{"./utils":39}],34:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Colorize = exports.SetColorsEnabled = exports.ColorsSupported = exports.ColorStyle = void 0;
@@ -6558,7 +6671,7 @@ String.prototype.colorize = function (style) {
     return Colorize(this, style);
 };
 
-},{"./process":30}],34:[function(require,module,exports){
+},{"./process":31}],35:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleEventEmitter = void 0;
@@ -6643,7 +6756,7 @@ class SimpleEventEmitter {
 }
 exports.SimpleEventEmitter = SimpleEventEmitter;
 
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EventStream = exports.EventPublisher = exports.EventSubscription = void 0;
@@ -6831,7 +6944,7 @@ class EventStream {
 }
 exports.EventStream = EventStream;
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Transport = void 0;
@@ -6928,7 +7041,7 @@ exports.Transport = {
     }
 };
 
-},{"./ascii85":16,"./path-info":28,"./path-reference":29,"./utils":38}],37:[function(require,module,exports){
+},{"./ascii85":17,"./path-info":29,"./path-reference":30,"./utils":39}],38:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TypeMappings = void 0;
@@ -7228,7 +7341,7 @@ class TypeMappings {
 }
 exports.TypeMappings = TypeMappings;
 
-},{"./data-reference":21,"./data-snapshot":22,"./path-info":28,"./utils":38}],38:[function(require,module,exports){
+},{"./data-reference":22,"./data-snapshot":23,"./path-info":29,"./utils":39}],39:[function(require,module,exports){
 (function (Buffer){(function (){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -7631,9 +7744,9 @@ function defer(fn) {
 exports.defer = defer;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./data-snapshot":22,"./path-reference":29,"./process":30,"buffer":41}],39:[function(require,module,exports){
+},{"./data-snapshot":23,"./path-reference":30,"./process":31,"buffer":42}],40:[function(require,module,exports){
 
-},{}],40:[function(require,module,exports){
+},{}],41:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -7785,7 +7898,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],41:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -9566,7 +9679,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":40,"buffer":41,"ieee754":42}],42:[function(require,module,exports){
+},{"base64-js":41,"buffer":42,"ieee754":43}],43:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m

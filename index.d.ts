@@ -81,12 +81,18 @@ export interface AceBaseClientConnectionSettings {
          * Whether to actively monitor the network, checks connectivity with the server every `interval` seconds. 
          * NOTE: disconnects to the server are discovered automatically under normal circumstances, 
          * enabling this might cause disconnects to be detected earlier.
+         * @default false
          */
-        monitor: boolean
+        monitor?: boolean
         /**
-         * Perform conncetivity check every `interval` seconds
+         * Perform conncetivity check every `interval` seconds. 
+         * @default 60
          */
-        interval: number
+        interval?: number
+        /**
+         * Allows the transport methods and order for socket.io (engine.io) to be changed. Default of acebase-client v1.10.1+ is `['websocket']`, older versions use `['polling','websocket']`
+         */
+        transports?: Array<'polling'|'interval'>
     }
 }
 

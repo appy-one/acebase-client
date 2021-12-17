@@ -357,7 +357,7 @@ const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
  * @property {boolean} [autoConnect=true]
  * @property {number} [autoConnectDelay=0]
  * @property {{ db: AceBase }} [cache] 
- * @property {{ monitor: boolean, interval: number }} [network]
+ * @property {{ monitor?: boolean, interval?: number, transports?: Array<'polling','interval'> }} [network]
  */
 
 /**
@@ -454,6 +454,15 @@ class WebApi extends Api {
                 this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(ColorStyle.red));
             }
     
+            // Change default socket.io (engine.io) transports setting of ['polling', 'websocket']
+            // We should only use websocket (it's almost 2022!), because if an AceBaseServer is running in a cluster, 
+            // polling should be disabled entirely because the server is not stateless: the client might reach 
+            // a different node on a next long-poll connection.
+            // For backward compatibility the transports setting is allowed to be overriden with a setting:
+            const transports = settings.network && settings.network.transports instanceof Array
+                ? settings.network.transports
+                : ['websocket'];
+
             return new Promise((resolve, reject) => {
                 const socket = this.socket = connectSocket(this.url, {
                     // Use default socket.io connection settings:
@@ -463,7 +472,8 @@ class WebApi extends Api {
                     reconnectionDelay: 1000,
                     reconnectionDelayMax: 5000,
                     timeout: 20000,
-                    randomizationFactor: 0.5
+                    randomizationFactor: 0.5,
+                    transports // Override default setting of ['polling', 'websocket']
                 });
 
                 socket.on('connect_error', err => {

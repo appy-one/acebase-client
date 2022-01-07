@@ -660,6 +660,7 @@ class WebApi extends Api {
          * @param {any} [options.data] Data to post when method is PUT or POST
          * @param {any} [options.context] Context to add to PUT or POST requests
          * @param {(chunk: string) => void} [options.dataReceivedCallback] A method that overrides the default data receiving handler. Override for streaming.
+         * @param {(length: number) => string|ArrayBufferView|Promise<string|ArrayBufferView>} [options.dataRequestCallback] A method that overrides the default data send handler. Override for streaming.
          * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
          * @param {boolean} [options.includeContext=false] NEW Whether the returned object should contain an optionally returned context object.
          * @returns {Promise<any|{ context: any, data: any }>} returns a promise that resolves with the returned data, or (when options.includeContext === true) an object containing data and returned context
@@ -668,7 +669,7 @@ class WebApi extends Api {
             if (this.isConnected || options.ignoreConnectionState === true) {
                 const result = await (async () => {
                     try {
-                        return await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context });
+                        return await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, dataRequestCallback: options.dataRequestCallback, context: options.context });
                     }
                     catch (err) {
                         if (this.isConnected && err.isNetworkError) {
@@ -1417,15 +1418,17 @@ class WebApi extends Api {
             await this._addCacheSetMutation(path, value, options.context);
         };
 
-        const cachePromise = updateCache()
+        const cachePromise = updateCache();
+        const tryCachePromise = cachePromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !useServer ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer();
+        const tryServerPromise = !useServer ? null : serverPromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        Promise.all([ cachePromise, serverPromise ])
+        Promise.all([ tryCachePromise, tryServerPromise ])
         .then(([ cacheResult, serverResult ]) => {
             const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
             if (serverPromise && !networkError) {
@@ -1450,7 +1453,7 @@ class WebApi extends Api {
                 }
             }
             else if (cacheResult.success) {
-                // Server was not updated, cache update was successful.
+                // Server was not updated (because we're offline, or a network error occurred), cache update was successful.
                 // Add pending sync action
 
                 addPendingTransaction().catch(err => {
@@ -1558,15 +1561,17 @@ class WebApi extends Api {
             await Promise.all(promises);
         };
 
-        const cachePromise = updateCache()
+        const cachePromise = updateCache();
+        const tryCachePromise = cachePromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !useServer ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer();
+        const tryServerPromise = !useServer ? null : serverPromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        Promise.all([ cachePromise, serverPromise ])
+        Promise.all([ tryCachePromise, tryServerPromise ])
         .then(([ cacheResult, serverResult ]) => {
             const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
             if (serverPromise && !networkError) {
@@ -1601,7 +1606,7 @@ class WebApi extends Api {
                     });
                 });
             }
-        })
+        });
 
         if (!useServer) {
             // Fixes issue #7
@@ -1991,14 +1996,21 @@ class WebApi extends Api {
         }); 
     }
 
-    export(path, stream, options = { format: 'json' }) {
-        options = options || {};
+    export(path, write, options = { format: 'json', type_safe: true }) {
         options.format = 'json';
-        let url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}`;
-        return this._request({ url, dataReceivedCallback: chunk => stream.write(chunk) })
-        .catch(err => {
-            throw err;
-        });
+        options.type_safe = options.type_safe !== false;
+        if (typeof write != 'function') {
+            write = write.write.bind(write);
+        }
+        const url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}&type_safe=${options.type_safe ? 1 : 0}`;
+        return this._request({ url, dataReceivedCallback: chunk => write(chunk) });
+    }
+
+    import(path, read, options = { format: 'json', suppress_events: false }) {
+        options.format = 'json';
+        options.suppress_events = options.suppress_events === true;
+        const url = `${this.url}/import/${this.dbname}/${path}?format=${options.format}&suppress_events=${options.suppress_events ? 1 : 0}`;
+        return this._request({ method: 'POST', url, dataRequestCallback: length => read(length) });
     }
 
     get serverPingUrl() {

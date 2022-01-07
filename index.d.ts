@@ -92,7 +92,7 @@ export interface AceBaseClientConnectionSettings {
         /**
          * Allows the transport methods and order for socket.io (engine.io) to be changed. Default of acebase-client v1.10.1+ is `['websocket']`, older versions use `['polling','websocket']`
          */
-        transports?: Array<'polling'|'interval'>
+        transports?: Array<'polling'|'websocket'>
     }
 }
 
@@ -427,3 +427,4 @@ export import IObjectCollection = acebasecore.IObjectCollection;
 export import ObjectCollection = acebasecore.ObjectCollection;
 export import ID = acebasecore.ID;
 export import proxyAccess = acebasecore.proxyAccess;
+export import PartialArray = acebasecore.PartialArray;

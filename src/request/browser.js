@@ -3,7 +3,7 @@ const { AceBaseRequestError } = require('./error');
 /**
  * @returns {Promise<{ context: any, data: any }>} returns a promise that resolves with an object containing data and an optionally returned context
  */
-async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) {
+async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, dataRequestCallback: null, context: null }) {
     let postData = options.data;
     if (typeof postData === 'undefined' || postData === null) {
         postData = '';
@@ -19,7 +19,24 @@ async function request(method, url, options = { accessToken: null, data: null, d
         method,
         headers
     };
-    if (postData.length > 0) {
+    if (typeof options.dataRequestCallback === 'function') {
+        // Stream data to the server instead of posting all from memory at once
+        let canceled = false;
+        init.body = new ReadableStream({
+            async start(controller) {
+                const chunkSize = controller.desiredSize || 1024 * 16;
+                let chunk;
+                while (!canceled && ![null,''].includes(chunk = await options.dataRequestCallback(chunkSize))) {
+                    controller.enqueue(chunk);
+                }
+                controller.close();
+            },
+            cancel() {
+                canceled = true;
+            }
+        });
+    }
+    else if (postData.length > 0) {
         init.body = postData;
     }
     if (options.accessToken) {

@@ -11,7 +11,7 @@ var u,f,l,d=String.fromCharCode;t.exports={version:"2.1.2",encode:a,decode:h}},f
 
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":42}],2:[function(require,module,exports){
+},{"buffer":43}],2:[function(require,module,exports){
 const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
@@ -923,6 +923,7 @@ class WebApi extends Api {
          * @param {any} [options.data] Data to post when method is PUT or POST
          * @param {any} [options.context] Context to add to PUT or POST requests
          * @param {(chunk: string) => void} [options.dataReceivedCallback] A method that overrides the default data receiving handler. Override for streaming.
+         * @param {(length: number) => string|ArrayBufferView|Promise<string|ArrayBufferView>} [options.dataRequestCallback] A method that overrides the default data send handler. Override for streaming.
          * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
          * @param {boolean} [options.includeContext=false] NEW Whether the returned object should contain an optionally returned context object.
          * @returns {Promise<any|{ context: any, data: any }>} returns a promise that resolves with the returned data, or (when options.includeContext === true) an object containing data and returned context
@@ -931,7 +932,7 @@ class WebApi extends Api {
             if (this.isConnected || options.ignoreConnectionState === true) {
                 const result = await (async () => {
                     try {
-                        return await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, context: options.context });
+                        return await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, dataRequestCallback: options.dataRequestCallback, context: options.context });
                     }
                     catch (err) {
                         if (this.isConnected && err.isNetworkError) {
@@ -1680,15 +1681,17 @@ class WebApi extends Api {
             await this._addCacheSetMutation(path, value, options.context);
         };
 
-        const cachePromise = updateCache()
+        const cachePromise = updateCache();
+        const tryCachePromise = cachePromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !useServer ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer();
+        const tryServerPromise = !useServer ? null : serverPromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        Promise.all([ cachePromise, serverPromise ])
+        Promise.all([ tryCachePromise, tryServerPromise ])
         .then(([ cacheResult, serverResult ]) => {
             const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
             if (serverPromise && !networkError) {
@@ -1713,7 +1716,7 @@ class WebApi extends Api {
                 }
             }
             else if (cacheResult.success) {
-                // Server was not updated, cache update was successful.
+                // Server was not updated (because we're offline, or a network error occurred), cache update was successful.
                 // Add pending sync action
 
                 addPendingTransaction().catch(err => {
@@ -1821,15 +1824,17 @@ class WebApi extends Api {
             await Promise.all(promises);
         };
 
-        const cachePromise = updateCache()
+        const cachePromise = updateCache();
+        const tryCachePromise = cachePromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        const serverPromise = !useServer ? null : updateServer()
+        const serverPromise = !useServer ? null : updateServer();
+        const tryServerPromise = !useServer ? null : serverPromise
             .then(() => ({ success: true }))
             .catch(err => ({ success: false, error: err }));
 
-        Promise.all([ cachePromise, serverPromise ])
+        Promise.all([ tryCachePromise, tryServerPromise ])
         .then(([ cacheResult, serverResult ]) => {
             const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
             if (serverPromise && !networkError) {
@@ -1864,7 +1869,7 @@ class WebApi extends Api {
                     });
                 });
             }
-        })
+        });
 
         if (!useServer) {
             // Fixes issue #7
@@ -2254,14 +2259,21 @@ class WebApi extends Api {
         }); 
     }
 
-    export(path, stream, options = { format: 'json' }) {
-        options = options || {};
+    export(path, write, options = { format: 'json', type_safe: true }) {
         options.format = 'json';
-        let url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}`;
-        return this._request({ url, dataReceivedCallback: chunk => stream.write(chunk) })
-        .catch(err => {
-            throw err;
-        });
+        options.type_safe = options.type_safe !== false;
+        if (typeof write != 'function') {
+            write = write.write.bind(write);
+        }
+        const url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}&type_safe=${options.type_safe ? 1 : 0}`;
+        return this._request({ url, dataReceivedCallback: chunk => write(chunk) });
+    }
+
+    import(path, read, options = { format: 'json', suppress_events: false }) {
+        options.format = 'json';
+        options.suppress_events = options.suppress_events === true;
+        const url = `${this.url}/import/${this.dbname}/${path}?format=${options.format}&suppress_events=${options.suppress_events ? 1 : 0}`;
+        return this._request({ method: 'POST', url, dataRequestCallback: length => read(length) });
     }
 
     get serverPingUrl() {
@@ -2716,7 +2728,7 @@ class CachedValueUnavailableError extends Error {
 
 module.exports = { CachedValueUnavailableError };
 },{}],8:[function(require,module,exports){
-const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection } = require('acebase-core');
+const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection, PartialArray } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
 const { ServerDate } = require('./server-date');
 const { CachedValueUnavailableError } = require('./errors');
@@ -2732,7 +2744,8 @@ module.exports = {
     proxyAccess,
     ServerDate,
     ObjectCollection,
-    CachedValueUnavailableError
+    CachedValueUnavailableError,
+    PartialArray
 };
 },{"./acebase-client":2,"./errors":7,"./server-date":13,"acebase-core":26}],9:[function(require,module,exports){
 module.exports = performance;
@@ -2756,7 +2769,7 @@ const { AceBaseRequestError } = require('./error');
 /**
  * @returns {Promise<{ context: any, data: any }>} returns a promise that resolves with an object containing data and an optionally returned context
  */
-async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, context: null }) {
+async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, dataRequestCallback: null, context: null }) {
     let postData = options.data;
     if (typeof postData === 'undefined' || postData === null) {
         postData = '';
@@ -2765,14 +2778,52 @@ async function request(method, url, options = { accessToken: null, data: null, d
         postData = JSON.stringify(postData);
     }
     const headers = {
-        'AceBase-Context': JSON.stringify(options.context || null),
-        'Content-Type': 'application/json',
+        'AceBase-Context': JSON.stringify(options.context || null)
     };
     const init = {
         method,
         headers
     };
-    if (postData.length > 0) {
+    if (typeof options.dataRequestCallback === 'function') {
+        // Stream data to the server instead of posting all from memory at once
+        headers['Content-Type'] = 'text/plain'; // Prevent server middleware parsing the content as JSON
+        
+        const supportsStreaming = false;
+        if (supportsStreaming) {
+            // Streaming uploads appears not to be implemented in Chromium/Chrome yet. 
+            // Setting the body property to a ReadableStream results in the string "[object ReadableStream]"
+            // See https://bugs.chromium.org/p/chromium/issues/detail?id=688906 and https://stackoverflow.com/questions/40939857/fetch-with-readablestream-as-request-body
+            let canceled = false;
+            init.body = new ReadableStream({
+                async pull(controller) {
+                    const chunkSize = controller.desiredSize || 1024 * 16;
+                    let chunk = await options.dataRequestCallback(chunkSize);
+                    if (canceled || [null,''].includes(chunk)) {
+                        controller.close();
+                    }
+                    else {
+                        controller.enqueue(chunk);
+                    }
+                },
+                async start(controller) {},
+                cancel() {
+                    canceled = true;
+                }
+            });
+        }
+        else {
+            // Streaming not supported
+            postData = '';
+            const chunkSize = 1024 * 512; // Use large chunk size, we have to store everything in memory anyway.
+            let chunk;
+            while ((chunk = await options.dataRequestCallback(chunkSize))) {
+                postData += chunk;
+            }
+            init.body = postData;
+        }
+    }
+    else if (postData.length > 0) {
+        headers['Content-Type'] = 'application/json';
         init.body = postData;
     }
     if (options.accessToken) {
@@ -3140,7 +3191,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
 }
 exports.AceBaseBase = AceBaseBase;
 
-},{"./data-reference":22,"./debug":24,"./optional-observable":28,"./simple-colors":34,"./simple-event-emitter":35,"./type-mappings":38}],16:[function(require,module,exports){
+},{"./data-reference":22,"./debug":24,"./optional-observable":28,"./simple-colors":35,"./simple-event-emitter":36,"./type-mappings":39}],16:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Api = void 0;
@@ -3168,7 +3219,8 @@ class Api {
     exists(path) { throw new NotImplementedError('exists'); }
     query(path, query, options) { throw new NotImplementedError('query'); }
     reflect(path, type, args) { throw new NotImplementedError('reflect'); }
-    export(path, stream, options) { throw new NotImplementedError('export'); }
+    export(path, arg, options) { throw new NotImplementedError('export'); }
+    import(path, stream, options) { throw new NotImplementedError('import'); }
     /** Creates an index on key for all child nodes at path */
     createIndex(path, key, options) { throw new NotImplementedError('createIndex'); }
     getIndexes() { throw new NotImplementedError('getIndexes'); }
@@ -4470,7 +4522,7 @@ class OrderedCollectionProxy {
 }
 exports.OrderedCollectionProxy = OrderedCollectionProxy;
 
-},{"./data-reference":22,"./data-snapshot":23,"./id":25,"./optional-observable":28,"./path-info":29,"./path-reference":30,"./process":31,"./simple-event-emitter":35,"./utils":39}],22:[function(require,module,exports){
+},{"./data-reference":22,"./data-snapshot":23,"./id":25,"./optional-observable":28,"./path-info":30,"./path-reference":31,"./process":32,"./simple-event-emitter":36,"./utils":40}],22:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataReferenceQuery = exports.DataReference = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = void 0;
@@ -4759,7 +4811,7 @@ class DataReference {
      * which will run the callback with a snapshot of the data. If you only wish to receive notifications of the
      * event (without the data), use the "notify_value", "notify_child_added", "notify_child_changed",
      * "notify_child_removed" events instead, which will run the callback with a DataReference to the changed
-     * data. This enables you to manually retreive data upon changes (eg if you want to exclude certain child
+     * data. This enables you to manually retrieve data upon changes (eg if you want to exclude certain child
      * data from loading)
      * @param event Name of the event to subscribe to
      * @param callback Callback function, event settings, or whether or not to run callbacks on current values when using "value" or "child_added" events
@@ -5055,14 +5107,23 @@ class DataReference {
         }
         return this.db.api.reflect(this.path, type, args);
     }
-    async export(stream, options = { format: 'json' }) {
+    async export(write, options = { format: 'json', type_safe: true }) {
         if (this.isWildcardPath) {
             throw new Error(`Cannot export wildcard path "/${this.path}"`);
         }
         if (!this.db.isReady) {
             await this.db.ready();
         }
-        return this.db.api.export(this.path, stream, options);
+        return this.db.api.export(this.path, write, options);
+    }
+    async import(read, options = { format: 'json', suppress_events: false }) {
+        if (this.isWildcardPath) {
+            throw new Error(`Cannot import to wildcard path "/${this.path}"`);
+        }
+        if (!this.db.isReady) {
+            await this.db.ready();
+        }
+        return this.db.api.import(this.path, read, options);
     }
     proxy(defaultValue) {
         return data_proxy_1.LiveDataProxy.create(this, defaultValue);
@@ -5484,7 +5545,7 @@ class DataReferencesArray extends Array {
 }
 exports.DataReferencesArray = DataReferencesArray;
 
-},{"./data-proxy":21,"./data-snapshot":23,"./id":25,"./optional-observable":28,"./path-info":29,"./subscription":36}],23:[function(require,module,exports){
+},{"./data-proxy":21,"./data-snapshot":23,"./id":25,"./optional-observable":28,"./path-info":30,"./subscription":37}],23:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MutationsDataSnapshot = exports.DataSnapshot = void 0;
@@ -5635,7 +5696,7 @@ class MutationsDataSnapshot extends DataSnapshot {
 }
 exports.MutationsDataSnapshot = MutationsDataSnapshot;
 
-},{"./path-info":29}],24:[function(require,module,exports){
+},{"./path-info":30}],24:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DebugLogger = void 0;
@@ -5665,7 +5726,7 @@ class DebugLogger {
 }
 exports.DebugLogger = DebugLogger;
 
-},{"./process":31}],25:[function(require,module,exports){
+},{"./process":32}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ID = void 0;
@@ -5690,7 +5751,7 @@ exports.ID = ID;
 },{"./cuid":19}],26:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ObjectCollection = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
+exports.PartialArray = exports.ObjectCollection = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
 var acebase_base_1 = require("./acebase-base");
 Object.defineProperty(exports, "AceBaseBase", { enumerable: true, get: function () { return acebase_base_1.AceBaseBase; } });
 Object.defineProperty(exports, "AceBaseBaseSettings", { enumerable: true, get: function () { return acebase_base_1.AceBaseBaseSettings; } });
@@ -5738,8 +5799,10 @@ var schema_1 = require("./schema");
 Object.defineProperty(exports, "SchemaDefinition", { enumerable: true, get: function () { return schema_1.SchemaDefinition; } });
 var object_collection_1 = require("./object-collection");
 Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: function () { return object_collection_1.ObjectCollection; } });
+var partial_array_1 = require("./partial-array");
+Object.defineProperty(exports, "PartialArray", { enumerable: true, get: function () { return partial_array_1.PartialArray; } });
 
-},{"./acebase-base":15,"./api":16,"./ascii85":17,"./data-proxy":21,"./data-reference":22,"./data-snapshot":23,"./debug":24,"./id":25,"./object-collection":27,"./path-info":29,"./path-reference":30,"./schema":32,"./simple-cache":33,"./simple-colors":34,"./simple-event-emitter":35,"./subscription":36,"./transport":37,"./type-mappings":38,"./utils":39}],27:[function(require,module,exports){
+},{"./acebase-base":15,"./api":16,"./ascii85":17,"./data-proxy":21,"./data-reference":22,"./data-snapshot":23,"./debug":24,"./id":25,"./object-collection":27,"./partial-array":29,"./path-info":30,"./path-reference":31,"./schema":33,"./simple-cache":34,"./simple-colors":35,"./simple-event-emitter":36,"./subscription":37,"./transport":38,"./type-mappings":39,"./utils":40}],27:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObjectCollection = void 0;
@@ -5833,7 +5896,30 @@ class ObservableShim {
 }
 exports.ObservableShim = ObservableShim;
 
-},{"rxjs":40}],29:[function(require,module,exports){
+},{"rxjs":41}],29:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.PartialArray = void 0;
+/**
+ * Sparse/partial array converted to a serializable object. Use `Object.keys(sparseArray)` and `Object.values(sparseArray)` to iterate its indice and/or values
+ */
+class PartialArray {
+    constructor(sparseArray) {
+        if (sparseArray instanceof Array) {
+            for (let i = 0; i < sparseArray.length; i++) {
+                if (typeof sparseArray[i] !== 'undefined') {
+                    this[i] = sparseArray[i];
+                }
+            }
+        }
+        else if (sparseArray) {
+            Object.assign(this, sparseArray);
+        }
+    }
+}
+exports.PartialArray = PartialArray;
+
+},{}],30:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathInfo = void 0;
@@ -5844,7 +5930,7 @@ function getPathKeys(path) {
     }
     let keys = path.split('/');
     return keys.map(key => {
-        return key.startsWith('[') ? parseInt(key.substr(1, key.length - 2)) : key;
+        return key.startsWith('[') ? parseInt(key.slice(1, -1)) : key;
     });
 }
 class PathInfo {
@@ -6114,7 +6200,7 @@ class PathInfo {
 }
 exports.PathInfo = PathInfo;
 
-},{}],30:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PathReference = void 0;
@@ -6129,7 +6215,7 @@ class PathReference {
 }
 exports.PathReference = PathReference;
 
-},{}],31:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = {
@@ -6138,7 +6224,7 @@ exports.default = {
     }
 };
 
-},{}],32:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SchemaDefinition = void 0;
@@ -6480,7 +6566,7 @@ class SchemaDefinition {
 }
 exports.SchemaDefinition = SchemaDefinition;
 
-},{}],33:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleCache = void 0;
@@ -6529,7 +6615,7 @@ class SimpleCache {
 }
 exports.SimpleCache = SimpleCache;
 
-},{"./utils":39}],34:[function(require,module,exports){
+},{"./utils":40}],35:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Colorize = exports.SetColorsEnabled = exports.ColorsSupported = exports.ColorStyle = void 0;
@@ -6681,7 +6767,7 @@ String.prototype.colorize = function (style) {
     return Colorize(this, style);
 };
 
-},{"./process":31}],35:[function(require,module,exports){
+},{"./process":32}],36:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleEventEmitter = void 0;
@@ -6766,7 +6852,7 @@ class SimpleEventEmitter {
 }
 exports.SimpleEventEmitter = SimpleEventEmitter;
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EventStream = exports.EventPublisher = exports.EventSubscription = void 0;
@@ -6954,7 +7040,7 @@ class EventStream {
 }
 exports.EventStream = EventStream;
 
-},{}],37:[function(require,module,exports){
+},{}],38:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Transport = void 0;
@@ -6962,6 +7048,7 @@ const path_reference_1 = require("./path-reference");
 const utils_1 = require("./utils");
 const ascii85_1 = require("./ascii85");
 const path_info_1 = require("./path-info");
+const partial_array_1 = require("./partial-array");
 exports.Transport = {
     deserialize(data) {
         if (data.map === null || typeof data.map === "undefined") {
@@ -6981,6 +7068,9 @@ exports.Transport = {
             }
             else if (type === "regexp") {
                 return new RegExp(val.pattern, val.flags);
+            }
+            else if (type === 'array') {
+                return new partial_array_1.PartialArray(val);
             }
             return val;
         };
@@ -7015,6 +7105,9 @@ exports.Transport = {
         }
         obj = utils_1.cloneObject(obj); // Make sure we don't alter the original object
         const process = (obj, mappings, prefix) => {
+            if (obj instanceof partial_array_1.PartialArray) {
+                mappings[prefix] = "array";
+            }
             Object.keys(obj).forEach(key => {
                 const val = obj[key];
                 const path = prefix.length === 0 ? key : `${prefix}/${key}`;
@@ -7051,7 +7144,7 @@ exports.Transport = {
     }
 };
 
-},{"./ascii85":17,"./path-info":29,"./path-reference":30,"./utils":39}],38:[function(require,module,exports){
+},{"./ascii85":17,"./partial-array":29,"./path-info":30,"./path-reference":31,"./utils":40}],39:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TypeMappings = void 0;
@@ -7351,13 +7444,14 @@ class TypeMappings {
 }
 exports.TypeMappings = TypeMappings;
 
-},{"./data-reference":22,"./data-snapshot":23,"./path-info":29,"./utils":39}],39:[function(require,module,exports){
+},{"./data-reference":22,"./data-snapshot":23,"./path-info":30,"./utils":40}],40:[function(require,module,exports){
 (function (Buffer){(function (){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.defer = exports.getChildValues = exports.getMutations = exports.compareValues = exports.ObjectDifferences = exports.valuesAreEqual = exports.cloneObject = exports.concatTypedArrays = exports.decodeString = exports.encodeString = exports.bytesToNumber = exports.numberToBytes = void 0;
 const path_reference_1 = require("./path-reference");
 const process_1 = require("./process");
+const partial_array_1 = require("./partial-array");
 function numberToBytes(number) {
     const bytes = new Uint8Array(8);
     const view = new DataView(bytes.buffer);
@@ -7566,12 +7660,6 @@ function cloneObject(original, stack) {
         if (val === null || val instanceof Date || val instanceof ArrayBuffer || val instanceof path_reference_1.PathReference || val instanceof RegExp) { // || val instanceof ID
             return val;
         }
-        else if (val instanceof Array) {
-            stack.push(val);
-            val = val.map(item => cloneValue(item));
-            stack.pop();
-            return val;
-        }
         else if (typeof val === "object") {
             stack.push(val);
             val = cloneObject(val, stack);
@@ -7585,7 +7673,7 @@ function cloneObject(original, stack) {
     if (typeof stack === "undefined") {
         stack = [original];
     }
-    const clone = original instanceof Array ? [] : {};
+    const clone = original instanceof Array ? [] : original instanceof partial_array_1.PartialArray ? new partial_array_1.PartialArray() : {};
     Object.keys(original).forEach(key => {
         let val = original[key];
         if (typeof val === "function") {
@@ -7754,9 +7842,9 @@ function defer(fn) {
 exports.defer = defer;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./data-snapshot":23,"./path-reference":30,"./process":31,"buffer":42}],40:[function(require,module,exports){
+},{"./data-snapshot":23,"./partial-array":29,"./path-reference":31,"./process":32,"buffer":43}],41:[function(require,module,exports){
 
-},{}],41:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -7908,7 +7996,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],42:[function(require,module,exports){
+},{}],43:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -9689,7 +9777,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":41,"buffer":42,"ieee754":43}],43:[function(require,module,exports){
+},{"base64-js":42,"buffer":43,"ieee754":44}],44:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m

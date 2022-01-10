@@ -12,8 +12,7 @@ async function request(method, url, options = { accessToken: null, data: null, d
         postData = JSON.stringify(postData);
     }
     const headers = {
-        'AceBase-Context': JSON.stringify(options.context || null),
-        'Content-Type': 'application/json',
+        'AceBase-Context': JSON.stringify(options.context || null)
     };
     const init = {
         method,
@@ -21,22 +20,44 @@ async function request(method, url, options = { accessToken: null, data: null, d
     };
     if (typeof options.dataRequestCallback === 'function') {
         // Stream data to the server instead of posting all from memory at once
-        let canceled = false;
-        init.body = new ReadableStream({
-            async start(controller) {
-                const chunkSize = controller.desiredSize || 1024 * 16;
-                let chunk;
-                while (!canceled && ![null,''].includes(chunk = await options.dataRequestCallback(chunkSize))) {
-                    controller.enqueue(chunk);
+        headers['Content-Type'] = 'text/plain'; // Prevent server middleware parsing the content as JSON
+        
+        const supportsStreaming = false;
+        if (supportsStreaming) {
+            // Streaming uploads appears not to be implemented in Chromium/Chrome yet. 
+            // Setting the body property to a ReadableStream results in the string "[object ReadableStream]"
+            // See https://bugs.chromium.org/p/chromium/issues/detail?id=688906 and https://stackoverflow.com/questions/40939857/fetch-with-readablestream-as-request-body
+            let canceled = false;
+            init.body = new ReadableStream({
+                async pull(controller) {
+                    const chunkSize = controller.desiredSize || 1024 * 16;
+                    let chunk = await options.dataRequestCallback(chunkSize);
+                    if (canceled || [null,''].includes(chunk)) {
+                        controller.close();
+                    }
+                    else {
+                        controller.enqueue(chunk);
+                    }
+                },
+                async start(controller) {},
+                cancel() {
+                    canceled = true;
                 }
-                controller.close();
-            },
-            cancel() {
-                canceled = true;
+            });
+        }
+        else {
+            // Streaming not supported
+            postData = '';
+            const chunkSize = 1024 * 512; // Use large chunk size, we have to store everything in memory anyway.
+            let chunk;
+            while ((chunk = await options.dataRequestCallback(chunkSize))) {
+                postData += chunk;
             }
-        });
+            init.body = postData;
+        }
     }
     else if (postData.length > 0) {
+        headers['Content-Type'] = 'application/json';
         init.body = postData;
     }
     if (options.accessToken) {

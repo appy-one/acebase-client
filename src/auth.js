@@ -26,10 +26,11 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.signIn(username, password);
+        if (this.user) { this.eventCallback("signout", { source: "signin", user: this.user }); }
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
         this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
-        return { user: this.user, accessToken: this.accessToken }; // success: true, 
+        return { user: this.user, accessToken: this.accessToken };
     }
 
     /**
@@ -43,6 +44,7 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.signInWithEmail(email, password);
+        if (this.user) { this.eventCallback("signout", { source: "email_signin", user: this.user }); }
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
         this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
@@ -59,6 +61,7 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.signInWithToken(accessToken);
+        if (this.user) { this.eventCallback("signout", { source: "token_signin", user: this.user }); }
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
         this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
@@ -76,7 +79,7 @@ class AceBaseClientAuth {
     }
 
     /**
-     * If the server has been configured with Auth providers, use this to kick off the authentication flow.
+     * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
      * This method returs a Promise that resolves with the url you have to redirect your user to authenticate 
      * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
      * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
@@ -90,7 +93,7 @@ class AceBaseClientAuth {
         if (!this.client.isReady) {
             await this.client.ready();
         }
-        const details = await this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user, options);
+        const details = await this.client.api.startAuthProviderSignIn(providerName, callbackUrl, options);
         return details.redirectUrl;
     }
 
@@ -104,9 +107,11 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.finishAuthProviderSignIn(callbackResult);
+        const isOtherUser = !this.user || this.user.uid !== details.user.uid;
+        isOtherUser && this.eventCallback("signout", { source: "oauth_signin", user: this.user });
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
-        this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
+        isOtherUser && this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
         return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
     }
 
@@ -232,7 +237,17 @@ class AceBaseClientAuth {
         return await this.client.api.verifyEmailAddress(verificationCode);
     }
 
-    async _updateUserDetails(details) {
+    /**
+     * Updates one or more user account details
+     * @param {object} details 
+     * @param {string} [details.username] New username
+     * @param {string} [details.email] New email address
+     * @param {string} [details.display_name] New display name
+     * @param {{ url: string, width: number, height: number }} [details.picture] New profile picture
+     * @param {object} [details.settings] selection of user settings to update
+     * @returns returns a promise with the updated user details
+     */
+    async updateUserDetails(details) {
         if (!this.client.isReady) {
             await this.client.ready();
         }
@@ -255,7 +270,16 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     async changeUsername(newUsername) {
-        return await this._updateUserDetails({ username: newUsername });
+        return await this.updateUserDetails({ username: newUsername });
+    }
+
+    /**
+     * Changes the display name of the currrently signed into account
+     * @param {string} newName 
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+    async changeDisplayName(newName) {
+        return await this.updateUserDetails({ display_name: newName });
     }
 
     /**
@@ -264,7 +288,7 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     async changeEmail(newEmail) {
-        return await this._updateUserDetails({ email: newEmail });
+        return await this.updateUserDetails({ email: newEmail });
     }
 
     /**
@@ -276,7 +300,7 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
      async changePicture(newPicture) {
-        return await this._updateUserDetails({ picture: newPicture });
+        return await this.updateUserDetails({ picture: newPicture });
     }
 
     /**
@@ -285,7 +309,7 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     async updateUserSettings(settings) {
-        return await this._updateUserDetails({ settings });
+        return await this.updateUserDetails({ settings });
     }
 
     /**

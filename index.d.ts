@@ -81,7 +81,8 @@ export interface AceBaseClientConnectionSettings {
          * Whether to actively monitor the network, checks connectivity with the server every `interval` seconds. 
          * NOTE: disconnects to the server are discovered automatically under normal circumstances, 
          * enabling this might cause disconnects to be detected earlier.
-         * @default false
+         * 
+         * Default is `false` if `realtime` is `true` (default) and vice versa
          */
         monitor?: boolean
         /**
@@ -93,6 +94,11 @@ export interface AceBaseClientConnectionSettings {
          * Allows the transport methods and order for socket.io (engine.io) to be changed. Default of acebase-client v1.10.1+ is `['websocket']`, older versions use `['polling','websocket']`
          */
         transports?: Array<'polling'|'websocket'>
+        /**
+         * Whether to connect to a serverwebsocket to enable realtime event notifications. 
+         * Default is `true`. Disable this option if you only want to use the server's REST API.
+         */
+        realtime?: boolean
     }
 }
 
@@ -311,11 +317,25 @@ export class AceBaseClientAuth {
     verifyEmailAddress(verificationCode): Promise<void>
 
     /**
+     * Updates one or more user account details
+     * @param details selection of user details to update
+     * @returns returns a promise with the updated user details
+     */
+    updateUserDetails(details: Partial<{ username: string, email: string, display_name: string, picture: { url: string, width: number, height: number }, settings: { [key: string]: string|number|boolean } }>): Promise<{ user: AceBaseUser }>
+
+    /**
      * Changes the username of the currrently signed into account
      * @param {string} newUsername 
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     changeUsername(newUsername: string): Promise<{ user: AceBaseUser }>
+
+    /**
+     * Changes the display name of the currrently signed into account
+     * @param {string} newName 
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+    changeDisplayName(newName: string): Promise<{ user: AceBaseUser }>
 
     /**
      * Changes the email address of the currrently signed in user

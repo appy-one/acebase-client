@@ -19,6 +19,11 @@ class AceBaseClientConnectionSettings {
      * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
      * @param {object} [settings.sync] Settings for synchronization
      * @param {'connect'|'signin'|'auto'|'manual'} [settings.sync.timing] Determines when synchronization should execute
+     * @param {object} [settings.network] Network settings
+     * @param {boolean} [settings.network.monitor=false] Whether to actively monitor the network for availability by pinging the server every `interval` seconds. This results in quicker offline detection. Default is `false` if `realtime` is `true` and vice versa
+     * @param {number} [settings.network.interval=60] Interval in seconds to send pings if `monitor` is `true`. Default is `60`
+     * @param {string[]} [settings.network.transports] Transport methods to try connecting to the server for realtime event notifications (in specified order). Default is `['websocket']`. Supported transport methods are `"websocket"` and `"polling"`. 
+     * @param {boolean} [settings.network.realtime=true] Whether to connect to a serverwebsocket to enable realtime event notifications. Default is `true`. Disable this option if you only want to use the server's REST API.  
      */
     constructor(settings) {
         this.dbname = settings.dbname;
@@ -33,6 +38,7 @@ class AceBaseClientConnectionSettings {
         if (!['connect','signin','auto','manual'].includes(this.sync.timing)) {
             this.sync.timing = 'auto';
         }
+        this.network = typeof settings.network === 'object' ? settings.network : { transports: ['websocket'], realtime: true, monitor: false };
     }
 }
 
@@ -71,21 +77,22 @@ class AceBaseClient extends AceBaseBase {
         this.on('ready', () => { ready = true; });
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
 
+        const synchronizeClocks = async () => {
+            // Synchronize date/time
+            // const start = Date.now(); // performance.now();
+            const info = await this.api.getServerInfo()
+            const now = Date.now(),
+                // roundtrip = now - start, //performance.now() - start,
+                // expectedTime = now - Math.floor(roundtrip / 2),
+                // bias = info.time - expectedTime;
+                bias = info.time - now;
+            setServerBias(bias);
+        };
+
         this.on('connect', () => {
             // Disable cache db's ipc events, we are already notified of data changes by the server (prevents double event callbacks)
             if (cacheDb) { cacheDb.settings.ipcEvents = false; }
-
-            // Synchronize date/time
-            // const start = Date.now(); // performance.now();
-            this.api.getServerInfo()
-            .then(info => {
-                const now = Date.now(),
-                    // roundtrip = now - start, //performance.now() - start,
-                    // expectedTime = now - Math.floor(roundtrip / 2),
-                    // bias = info.time - expectedTime;
-                    bias = info.time - now;
-                setServerBias(bias);
-            });
+            synchronizeClocks();
         });
 
         this.on('disconnect', () => {
@@ -161,7 +168,7 @@ class AceBaseClient extends AceBaseBase {
             this.emit('ready');
         };
 
-        this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
+        this.api = new WebApi(settings.dbname, { network: settings.network, logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
             if (evt === 'connect') {
                 this.emit('connect');
                 if (!ready) {

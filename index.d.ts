@@ -42,10 +42,16 @@ export interface AceBaseClientSyncSettings {
      * to `"signin"`. If not, set this to `"connect"`. The `"auto"` setting is default and provided 
      * for backward compatibility, but should not be used anymore. If you want to manually
      * trigger synchronization with `client.sync()`, set this to `"manual"`
-     * 
-     @default 'auto'
+     * @default 'auto'
      */
-    timing: 'connect'|'signin'|'auto'|'manual'
+    timing?: 'connect'|'signin'|'auto'|'manual';
+
+    /**
+     * Specifies whether to use cursor synchronization if transaction logging is enabled in the server configuration. 
+     * Synchronization with a cursor is faster and consumes (a lot) less bandwidth
+     * @default true
+     */
+    useCursor?: boolean;
 }
 export interface AceBaseClientConnectionSettings {
     dbname: string

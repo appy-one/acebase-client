@@ -19,6 +19,7 @@ class AceBaseClientConnectionSettings {
      * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
      * @param {object} [settings.sync] Settings for synchronization
      * @param {'connect'|'signin'|'auto'|'manual'} [settings.sync.timing] Determines when synchronization should execute
+     * @param {boolean} [settings.sync.useCursor] Whether to enable cursor synchronization if transaction logging is enabled in the server configuration
      * @param {object} [settings.network] Network settings
      * @param {boolean} [settings.network.monitor=false] Whether to actively monitor the network for availability by pinging the server every `interval` seconds. This results in quicker offline detection. Default is `false` if `realtime` is `true` and vice versa
      * @param {number} [settings.network.interval=60] Interval in seconds to send pings if `monitor` is `true`. Default is `60`
@@ -34,11 +35,20 @@ class AceBaseClientConnectionSettings {
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
-        this.sync = typeof settings.sync === 'object' ? settings.sync : { timing: 'auto' };
-        if (!['connect','signin','auto','manual'].includes(this.sync.timing)) {
-            this.sync.timing = 'auto';
-        }
-        this.network = typeof settings.network === 'object' ? settings.network : { transports: ['websocket'], realtime: true, monitor: false };
+        
+        // Set sync settings
+        this.sync = settings.sync;
+        if (this.sync === null || typeof this.sync !== 'object') { this.sync = {}; }
+        if (!['connect','signin','auto','manual'].includes(this.sync.timing)) { this.sync.timing = 'auto'; }
+        if (typeof this.sync.useCursor !== 'boolean') { this.sync.useCursor = true; }
+        
+        // Set network settings
+        this.network = settings.network;
+        if (this.network === null || typeof this.network !== 'object') { this.network = {}; }
+        if (!(this.network.transports instanceof Array)) { this.network.transports = ['websocket'] }
+        if (typeof this.network.realtime !== 'boolean') { this.network.realtime = true; }
+        if (typeof this.network.monitor !== 'boolean') { this.network.monitor = !this.network.realtime; }
+        if (typeof this.network.interval !== 'number') { this.network.interval = 60; }
     }
 }
 
@@ -146,7 +156,7 @@ class AceBaseClient extends AceBaseBase {
         }
         let syncTimeout = 0;
         this.on('connect', () => {
-            if (settings.sync.timing === 'connect') {
+            if (settings.sync.timing === 'connect' || (settings.sync.timing === 'signin' && this.auth.accessToken)) {
                 syncPendingChanges();
             }
             else if (settings.sync.timing === 'auto') {
@@ -168,7 +178,7 @@ class AceBaseClient extends AceBaseBase {
             this.emit('ready');
         };
 
-        this.api = new WebApi(settings.dbname, { network: settings.network, logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
+        this.api = new WebApi(settings.dbname, { network: settings.network, sync: settings.sync, logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
             if (evt === 'connect') {
                 this.emit('connect');
                 if (!ready) {

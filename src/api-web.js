@@ -91,6 +91,7 @@ const CONNECTION_STATE_CONNECTED = 'connected';
 const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
 
 /**
+ * TODO: Use AceBaseClientSettings instead when refactoring to TypeScript
  * @typedef IWebApiSettings
  * @property {'verbose'|'log'|'warn'|'error'} logLevel
  * @property {typeof console} debug
@@ -98,7 +99,8 @@ const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
  * @property {boolean} [autoConnect=true]
  * @property {number} [autoConnectDelay=0]
  * @property {{ db: AceBase }} [cache] 
- * @property {{ monitor?: boolean, interval?: number, transports?: Array<'polling','interval'>, realtime?: boolean }} [network]
+ * @property {{ monitor: boolean, interval: number, transports: Array<'polling','interval'>, realtime: boolean }} network
+ * @property {{ timing: 'connect'|'signin'|'auto'|'manual', useCursor: boolean }} sync
  */
 
 /**
@@ -153,11 +155,6 @@ class WebApi extends Api {
             //     this._syncCursor = cursor;
             // });
         }
-
-        if (typeof settings.network !== 'object') { settings.network = { realtime: true, monitor: false, interval: 60 }; }
-        if (typeof settings.network.realtime !== 'boolean') { settings.network.realtime = true; }
-        if (typeof settings.network.monitor !== 'boolean') { settings.network.monitor = !settings.network.realtime; }
-        if (typeof settings.network.interval !== 'number') { settings.network.interval = 60; }
         
         const manualConnectionMonitor = new SimpleEventEmitter();
         const checkConnection = async () => {
@@ -984,7 +981,8 @@ class WebApi extends Api {
 
         try {
             let totalPendingChanges = 0;
-            const cursor = this._cursor.sync;
+            const useCursor = this.settings.sync.useCursor !== false;
+            const cursor = useCursor ? this._cursor.sync : null;
             const cacheApi = this._cache && this._cache.db.api;
             if (this._cache) {
                 // Part 1: PUSH local changes
@@ -1034,19 +1032,20 @@ class WebApi extends Api {
                                 if (!parentUpdate) {
                                     // Create new parent update
                                     // change.context.acebase_sync = { }; // TODO: Think about what context we could add to let receivers know why this merged update happens
-                                    mutations.push({ id, type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
+                                    mutations.push({ ids: [id], type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
                                 }
                                 else {
                                     // Add this change to parent update
                                     parentUpdate.data[pathInfo.key] = value;
+                                    parentUpdate.ids.push(id);
                                 }
                             }
                             return mutations;
                         }, []);
 
                     for (let m of mutations) {
-                        const id = m.id;
-                        this.debug.verbose(`SYNC pushing mutation ${id}: `, m);
+                        const ids = m.ids;
+                        this.debug.verbose(`SYNC pushing mutations ${ids.join(',')}: `, m);
                         totalPendingChanges++;
 
                         try {
@@ -1063,13 +1062,14 @@ class WebApi extends Api {
                             else {
                                 throw new Error(`unsupported mutation type "${m.type}"`);
                             }
-                            this.debug.verbose(`SYNC mutation ${id} processed ok`);
+                            this.debug.verbose(`SYNC mutation ${ids.join(',')} processed ok`);
 
-                            cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                            const updates = ids.reduce((updates, id) => (updates[id] = null, updates), {});
+                            cacheApi.update(`${this.dbname}/pending`, updates); // delete from cache db
                         }
                         catch(err) {
                             // Updating remote db failed
-                            this.debug.error(`SYNC mutation ${id} failed: ${err.message}`);
+                            this.debug.error(`SYNC mutations ${ids.join(',')} failed: ${err.message}`);
                             if (!this.isConnected) {
                                 // Connection was broken, should retry later
                                 throw err;
@@ -1081,25 +1081,28 @@ class WebApi extends Api {
 
                             // Store error report
                             const errorReport = { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack };
-                            cacheApi.transaction(`${this.dbname}/pending/${id}`, m => {
-                                if (!m.error) {
-                                    m.error = {
-                                        first: errorReport, 
-                                        last: errorReport,
-                                        retries: 0
-                                    };
-                                }
-                                else {
-                                    m.error.last = errorReport;
-                                    m.error.retries++;
-                                }
-                                if (m.error.retries === 3) {
-                                    // After 3 failed retries, move to /dbname/failed/id
-                                    cacheApi.set(`${this.dbname}/failed/${id}`, m);
-                                    return null; // remove pending
-                                }
-                                return m;
+                            ids.forEach(id => {
+                                cacheApi.transaction(`${this.dbname}/pending/${id}`, m => {
+                                    if (!m.error) {
+                                        m.error = {
+                                            first: errorReport, 
+                                            last: errorReport,
+                                            retries: 0
+                                        };
+                                    }
+                                    else {
+                                        m.error.last = errorReport;
+                                        m.error.retries++;
+                                    }
+                                    if (m.error.retries === 3) {
+                                        // After 3 failed retries, move to /dbname/failed/id
+                                        cacheApi.set(`${this.dbname}/failed/${id}`, m);
+                                        return null; // remove pending
+                                    }
+                                    return m;
+                                });
                             });
+
                             cacheApi.set(`${this.dbname}/stats/last_sync_error`, errorReport).catch(handleStatsUpdateError);
                             // TODO: Send error report to server?
                             // this.reportError({ code: 'sync-mutation', report: errorReport });

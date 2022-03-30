@@ -33,6 +33,12 @@ class AceBaseClientConnectionSettings {
      * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
      * @param {object} [settings.sync] Settings for synchronization
      * @param {'connect'|'signin'|'auto'|'manual'} [settings.sync.timing] Determines when synchronization should execute
+     * @param {boolean} [settings.sync.useCursor] Whether to enable cursor synchronization if transaction logging is enabled in the server configuration
+     * @param {object} [settings.network] Network settings
+     * @param {boolean} [settings.network.monitor=false] Whether to actively monitor the network for availability by pinging the server every `interval` seconds. This results in quicker offline detection. Default is `false` if `realtime` is `true` and vice versa
+     * @param {number} [settings.network.interval=60] Interval in seconds to send pings if `monitor` is `true`. Default is `60`
+     * @param {string[]} [settings.network.transports] Transport methods to try connecting to the server for realtime event notifications (in specified order). Default is `['websocket']`. Supported transport methods are `"websocket"` and `"polling"`. 
+     * @param {boolean} [settings.network.realtime=true] Whether to connect to a serverwebsocket to enable realtime event notifications. Default is `true`. Disable this option if you only want to use the server's REST API.  
      */
     constructor(settings) {
         this.dbname = settings.dbname;
@@ -43,10 +49,20 @@ class AceBaseClientConnectionSettings {
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
-        this.sync = typeof settings.sync === 'object' ? settings.sync : { timing: 'auto' };
-        if (!['connect','signin','auto','manual'].includes(this.sync.timing)) {
-            this.sync.timing = 'auto';
-        }
+        
+        // Set sync settings
+        this.sync = settings.sync;
+        if (this.sync === null || typeof this.sync !== 'object') { this.sync = {}; }
+        if (!['connect','signin','auto','manual'].includes(this.sync.timing)) { this.sync.timing = 'auto'; }
+        if (typeof this.sync.useCursor !== 'boolean') { this.sync.useCursor = true; }
+        
+        // Set network settings
+        this.network = settings.network;
+        if (this.network === null || typeof this.network !== 'object') { this.network = {}; }
+        if (!(this.network.transports instanceof Array)) { this.network.transports = ['websocket'] }
+        if (typeof this.network.realtime !== 'boolean') { this.network.realtime = true; }
+        if (typeof this.network.monitor !== 'boolean') { this.network.monitor = !this.network.realtime; }
+        if (typeof this.network.interval !== 'number') { this.network.interval = 60; }
     }
 }
 
@@ -85,21 +101,22 @@ class AceBaseClient extends AceBaseBase {
         this.on('ready', () => { ready = true; });
         this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
 
+        const synchronizeClocks = async () => {
+            // Synchronize date/time
+            // const start = Date.now(); // performance.now();
+            const info = await this.api.getServerInfo()
+            const now = Date.now(),
+                // roundtrip = now - start, //performance.now() - start,
+                // expectedTime = now - Math.floor(roundtrip / 2),
+                // bias = info.time - expectedTime;
+                bias = info.time - now;
+            setServerBias(bias);
+        };
+
         this.on('connect', () => {
             // Disable cache db's ipc events, we are already notified of data changes by the server (prevents double event callbacks)
             if (cacheDb) { cacheDb.settings.ipcEvents = false; }
-
-            // Synchronize date/time
-            // const start = Date.now(); // performance.now();
-            this.api.getServerInfo()
-            .then(info => {
-                const now = Date.now(),
-                    // roundtrip = now - start, //performance.now() - start,
-                    // expectedTime = now - Math.floor(roundtrip / 2),
-                    // bias = info.time - expectedTime;
-                    bias = info.time - now;
-                setServerBias(bias);
-            });
+            synchronizeClocks();
         });
 
         this.on('disconnect', () => {
@@ -153,7 +170,7 @@ class AceBaseClient extends AceBaseBase {
         }
         let syncTimeout = 0;
         this.on('connect', () => {
-            if (settings.sync.timing === 'connect') {
+            if (settings.sync.timing === 'connect' || (settings.sync.timing === 'signin' && this.auth.accessToken)) {
                 syncPendingChanges();
             }
             else if (settings.sync.timing === 'auto') {
@@ -175,7 +192,7 @@ class AceBaseClient extends AceBaseBase {
             this.emit('ready');
         };
 
-        this.api = new WebApi(settings.dbname, { logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
+        this.api = new WebApi(settings.dbname, { network: settings.network, sync: settings.sync, logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
             if (evt === 'connect') {
                 this.emit('connect');
                 if (!ready) {
@@ -261,7 +278,7 @@ class AceBaseClient extends AceBaseBase {
 
 module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
 },{"./api-web":3,"./auth":4,"./server-date":13,"acebase-core":26}],3:[function(require,module,exports){
-const { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition } = require('acebase-core');
+const { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition, SimpleEventEmitter } = require('acebase-core');
 const connectSocket = require('socket.io-client');
 const Base64 = require('./base64');
 const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
@@ -275,7 +292,11 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     request.req_id = requestId;
     request.access_token = accessToken;
 
-    return new Promise((resolve, reject) => { 
+    return new Promise((resolve, reject) => {
+        if (!socket) {
+            return reject(new AceBaseRequestError(request, null, 'websocket', 'No open websocket connection'));
+        }
+
         let timeout;
         const send = (retry = 0) => { 
             socket.emit(event, request);
@@ -350,6 +371,7 @@ const CONNECTION_STATE_CONNECTED = 'connected';
 const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
 
 /**
+ * TODO: Use AceBaseClientSettings instead when refactoring to TypeScript
  * @typedef IWebApiSettings
  * @property {'verbose'|'log'|'warn'|'error'} logLevel
  * @property {typeof console} debug
@@ -357,7 +379,8 @@ const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
  * @property {boolean} [autoConnect=true]
  * @property {number} [autoConnectDelay=0]
  * @property {{ db: AceBase }} [cache] 
- * @property {{ monitor?: boolean, interval?: number, transports?: Array<'polling','interval'> }} [network]
+ * @property {{ monitor: boolean, interval: number, transports: Array<'polling','interval'>, realtime: boolean }} network
+ * @property {{ timing: 'connect'|'signin'|'auto'|'manual', useCursor: boolean }} sync
  */
 
 /**
@@ -378,6 +401,7 @@ class WebApi extends Api {
 
         this._id = ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
         this.url = settings.url;
+        this.socket = null;
         this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this._autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.dbname = dbname;
@@ -411,26 +435,54 @@ class WebApi extends Api {
             //     this._syncCursor = cursor;
             // });
         }
-        if (typeof settings.network !== 'object') { settings.network = { enabled: false, interval: 60 }; }
-        if (typeof settings.network.monitor !== 'boolean') { settings.network.monitor = false; }
-        if (typeof settings.network.interval !== 'number') { settings.network.interval = 60; }
+        
+        const manualConnectionMonitor = new SimpleEventEmitter();
+        const checkConnection = async () => {
+            // Websocket connection is used
+            if (settings.network.realtime && !this.isConnected) {
+                // socket.io handles reconnects, we don't have to monitor
+                return; 
+            }
+            if (!settings.network.realtime && ![CONNECTION_STATE_CONNECTING, CONNECTION_STATE_CONNECTED].includes(this._connectionState)) {
+                // No websocket connection. Do not check if we're not connecting or connected
+                return;
+            }
+            const wasConnected = this.isConnected;
+            try {
+                // Websocket is connected (or realtime is not used), check connectivity to server by sending http/s ping
+                await this._request({ url: this.serverPingUrl, ignoreConnectionState: true });
+                if (!wasConnected) {
+                    manualConnectionMonitor.emit('connect');
+                }
+            }
+            catch (err) {
+                // No need to handle error here, _request will have handled the disconnect by calling this._handleDetectedDisconnect
+            }
+        };
+        this._handleDetectedDisconnect = () => {
+            if (settings.network.realtime) {
+                // Launch reconnect flow by recycling the websocket
+                this._connectionState === CONNECTION_STATE_DISCONNECTED;
+                this.connect().catch(() => {});
+                // console.assert(this._connectionState === CONNECTION_STATE_CONNECTING, 'wrong connection state');
+            }
+            else {
+                if (this._connectionState === CONNECTION_STATE_CONNECTING) {
+                    manualConnectionMonitor.emit('connect_error', err);
+                }
+                else if (this._connectionState === CONNECTION_STATE_CONNECTED) {
+                    manualConnectionMonitor.emit('disconnect');
+                }
+            }
+        }
         if (settings.network.monitor) {
             // Mobile devices might go offline while the app is suspended (running in the backgound)
             // no events will fire and when the app resumes, it might assume it is still connected while
             // it is not. We'll manually poll the server to check the connection
-            const checkConnection = async () => {
-                if (!this.isConnected) { return; }
-                try {
-                    // Websocket is connected, check connectivity to server by sending http/s ping
-                    await this._request({ url: this.serverPingUrl });
-                }
-                catch(err) {
-                    // No need to handle error here, _request will have handled the disconnect
-                }
-            }
             const interval = setInterval(checkConnection, settings.network.interval * 1000); // ping every x seconds
             interval.unref && interval.unref();
         }
+        this.settings = settings;
         this._realtimeQueries = {};
         /** @type {typeof settings.debug} */
         this.debug = settings.debug;
@@ -464,6 +516,49 @@ class WebApi extends Api {
                 : ['websocket'];
 
             return new Promise((resolve, reject) => {
+
+                if (!settings.network.realtime) {
+                    // New option: not using websocket connection. Check if we can reach the server.
+
+                    // Make sure any previously attached events are removed
+                    manualConnectionMonitor.off('connect');
+                    manualConnectionMonitor.off('connect_error');
+                    manualConnectionMonitor.off('disconnect');
+
+                    manualConnectionMonitor.on('connect', () => {
+                        this._connectionState = CONNECTION_STATE_CONNECTED;
+                        this._eventTimeline.connect = Date.now();                    
+                        manualConnectionMonitor.off('connect_error'); // prevent connect_error to fire after a successful connect
+                        eventCallback('connect');
+                        resolve();
+                    });
+                    manualConnectionMonitor.on('connect_error', (err) => {
+                        // New connection failed to establish. Attempts will be made to reconnect, but fail for now
+                        this.debug.error(`API connection error: ${err.message || err}`);
+                        eventCallback('connect_error', err);
+                        reject(err);
+                    });
+                    manualConnectionMonitor.on('disconnect', () => {
+                        // Existing connection was broken, by us or network
+                        if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
+                            // Disconnect was requested by us: reason === 'client namespace disconnect'
+                            this._connectionState = CONNECTION_STATE_DISCONNECTED;
+                            // Remove event listeners
+                            manualConnectionMonitor.off('connect');
+                            manualConnectionMonitor.off('disconnect');
+                            manualConnectionMonitor.off('connect_error');
+                        }
+                        else {
+                            // Disconnect was not requested.
+                            this._connectionState = CONNECTION_STATE_CONNECTING;
+                            this._eventTimeline.disconnect = Date.now();
+                        }
+                        eventCallback('disconnect');
+                    });
+                    this._connectionState = CONNECTION_STATE_CONNECTING;
+                    return setTimeout(() => checkConnection(), 0);      
+                }
+    
                 const socket = this.socket = connectSocket(this.url, {
                     // Use default socket.io connection settings:
                     autoConnect: true,
@@ -722,7 +817,13 @@ class WebApi extends Api {
         }
 
         this.disconnect = () => {
-            if (this.socket !== null && typeof this.socket === 'object') {
+            if (!settings.network.realtime) {
+                // No websocket connectino is used
+                this._connectionState = CONNECTION_STATE_DISCONNECTING;
+                this._eventTimeline.disconnect = Date.now();
+                manualConnectionMonitor.emit('disconnect');
+            }
+            else if (this.socket !== null && typeof this.socket === 'object') {
                 this._connectionState = CONNECTION_STATE_DISCONNECTING;
                 this._eventTimeline.disconnect = Date.now();
                 this.socket.disconnect();
@@ -739,6 +840,9 @@ class WebApi extends Api {
          * @returns 
          */
         this.subscribe = async (path, event, callback, settings) => {
+            if (!this.settings.network.realtime) {
+                throw new Error(`Cannot subscribe to realtime events because it has been disabled in the network settings`);
+            }
             let pathSubs = subscriptions[path];
             if (!pathSubs) { pathSubs = subscriptions[path] = []; }
             let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event)
@@ -773,6 +877,9 @@ class WebApi extends Api {
         };
 
         this.unsubscribe = (path, event = undefined, callback = undefined) => {
+            if (!this.settings.network.realtime) {
+                throw new Error(`Cannot unsubscribe from realtime events because it has been disabled in the network settings`);
+            }
             let pathSubs = subscriptions[path];
             if (!pathSubs) { return Promise.resolve(); }
 
@@ -840,80 +947,79 @@ class WebApi extends Api {
                 flow: 'server'
             };
             const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-            let cacheUpdateVal;
-            const startedCallback = (data) => {
-                if (data.id === id) {
-                    this.socket.off("tx_started", startedCallback);
-                    const currentValue = Transport.deserialize(data.value);
-                    const val = callback(currentValue);
-                    const finish = (val) => {
-                        const newValue = Transport.serialize(val);
-                        this.socket.emit("transaction", { action: "finish", id: id, path, value: newValue, access_token: accessToken });
-                        if (this._cache) {
-                            cacheUpdateVal = val;
+
+            return new Promise(async (resolve, reject) => {
+                let cacheUpdateVal;
+                const handleSuccess = async () => {
+                    if (this._cache && typeof cacheUpdateVal !== 'undefined') {
+                        // Update cache db value
+                        await this._cache.db.api.set(cachePath, cacheUpdateVal);
+                    }
+                    resolve(this);
+                };
+                if (this.isConnected && settings.network.realtime) {
+                    // Use websocket connection
+                    const startedCallback = async (data) => {
+                        if (data.id === id) {
+                            this.socket.off("tx_started", startedCallback);
+                            const currentValue = Transport.deserialize(data.value);
+                            let newValue = callback(currentValue);
+                            if (newValue instanceof Promise) {
+                                newValue = await newValue;
+                            }
+                            this.socket.emit("transaction", { action: "finish", id: id, path, value: Transport.serialize(newValue), access_token: accessToken });
+                            if (this._cache) {
+                                cacheUpdateVal = newValue;
+                            }
                         }
                     };
-                    if (val instanceof Promise) {
-                        val.then(finish);
+                    const completedCallback = (data) => {
+                        if (data.id === id) {
+                            this.socket.off("tx_completed", completedCallback);
+                            this.socket.off("tx_error", errorCallback);
+                            handleSuccess();
+                        }
+                    };
+                    const errorCallback = data => {
+                        if (data.id === id) {
+                            this.socket.off("tx_started", startedCallback);
+                            this.socket.off("tx_completed", completedCallback);
+                            this.socket.off("tx_error", errorCallback);
+                            reject(new Error(data.reason));
+                        }
+                    };
+                    this.socket.on("tx_started", startedCallback);
+                    this.socket.on("tx_completed", completedCallback);
+                    this.socket.on("tx_error", errorCallback);
+                    // TODO: socket.on('disconnect', disconnectedCallback);
+                    this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken, context: options.context });
+                }
+                else { 
+                    // Websocket not connected. Try http call instead
+                    const startData = JSON.stringify({ path });
+                    try {
+                        const tx = await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/start`, data: startData, context: options.context });
+                        const id = tx.id;
+                        const currentValue = Transport.deserialize(tx.value);
+                        let newValue = callback(currentValue);
+                        if (newValue instanceof Promise) {
+                            newValue = await newValue;
+                        }
+                        if (this._cache) {
+                            cacheUpdateVal = newValue;
+                        }
+                        const finishData = JSON.stringify({ id, value: Transport.serialize(newValue) });
+                        await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data: finishData, context: options.context });
+                        await handleSuccess();
                     }
-                    else {
-                        finish(val);
+                    catch (err) {
+                        if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE', 'fetch_failed'].includes(err.code)) {
+                            err.message = NOT_CONNECTED_ERROR_MESSAGE;
+                        }
+                        reject(err);
                     }
                 }
-            };
-            let txResolve, txReject, txPromise = new Promise((resolve, reject) => {
-                txResolve = resolve;
-                txReject = reject;
             });
-            const handleSuccess = () => {
-                if (this._cache && typeof cacheUpdateVal !== 'undefined') {
-                    // Update cache db value
-                    this._cache.db.api.set(cachePath, cacheUpdateVal).then(() => {
-                        txResolve(this);
-                    })
-                }
-                else {
-                    txResolve(this);
-                }
-            };
-            const handleFailure = err => {
-                txReject(err);
-            }
-            const completedCallback = (data) => {
-                if (data.id === id) {
-                    this.socket.off("tx_completed", completedCallback);
-                    handleSuccess();
-                }
-            }
-            const connectedCallback = () => {
-                this.socket.on("tx_started", startedCallback);
-                this.socket.on("tx_completed", completedCallback);
-                // TODO: socket.on('disconnect', disconnectedCallback);
-                this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken, context: options.context });
-            };
-            if (this.isConnected) { 
-                connectedCallback(); 
-            }
-            else { 
-                // Websocket might not be connected. Try http call instead
-                const data = JSON.stringify({ path });
-                this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/start`, data, context: options.context })
-                .then(tx => {
-                    const id = tx.id;
-                    const currentValue = Transport.deserialize(tx.value);
-                    const value = callback(currentValue);
-                    const data = JSON.stringify({ id, value: Transport.serialize(value) });
-                    return this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data, context: options.context })
-                })
-                .catch(err => {
-                    if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE', 'fetch_failed'].includes(err.code)) {
-                        err.message = NOT_CONNECTED_ERROR_MESSAGE;
-                        // handleFailure(new Error(NOT_CONNECTED_ERROR_MESSAGE));
-                    }
-                    handleFailure(err);
-                });
-            }
-            return txPromise;
         };
 
         /**
@@ -939,35 +1045,8 @@ class WebApi extends Api {
                             // This is a network error, but the websocket thinks we are still connected. 
                             this.debug.warn(`A network error occurred loading ${options.url}`);
 
-                            // // Investigate now if we can connect by doing a ping API call.
-                            // this.debug.warn(`Starting connectivity check`);
-
-                            // // Prevent duplicate checks from executing by setting state to disconnected right away
-                            // this._connectionState === CONNECTION_STATE_DISCONNECTED;
-                            // let connected = true;
-                            // try {
-                            //     await _request('GET', this.serverPingUrl);
-                            // }
-                            // catch(err) {
-                            //     // Older servers might not have the ping API method, those will have 
-                            //     // returned a 404, which is not a network error
-                            //     if (err.isNetworkError) {
-                            //         connected = false;
-                            //     }
-                            // }
-                            // if (connected) {
-                            //     this.debug.warn(`Connectivity test with server succeeded, we're online`);
-                            //     this._connectionState === CONNECTION_STATE_CONNECTED;
-                            // }
-                            // else {
-                            //     this.debug.error(`Connectivity test with server failed, we're offline`);
-
                             // Start reconnection flow
-                            this._connectionState === CONNECTION_STATE_DISCONNECTED;
-                            this.connect().catch(() => {});
-                            console.assert(this._connectionState === CONNECTION_STATE_CONNECTING, 'wrong connection state');
-
-                            // }
+                            this._handleDetectedDisconnect();
                         }
 
                         // Rethrow the error
@@ -991,8 +1070,9 @@ class WebApi extends Api {
                 // are only executed if they are not allowed to use cached responses. Wait for a
                 // connection to be established (max 1s), then retry or fail
 
-                if (!this.isConnecting) {
-                    // We're currently not trying to connect. Fail now
+                if (!this.isConnecting || !settings.network.realtime) {
+                    // We're currently not trying to connect, or not using websocket connection (normal connection logic is still used).
+                    // Fail now
                     throw new Error(NOT_CONNECTED_ERROR_MESSAGE);
                 }
 
@@ -1008,20 +1088,20 @@ class WebApi extends Api {
             this._eventTimeline.signIn = Date.now();
             const details = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
             accessToken = details.accessToken;
-            this.socket.emit('signin', details.accessToken);  // Make sure the connected websocket server knows who we are as well.
+            this.socket & this.socket.emit('signin', details.accessToken); // Make sure the connected websocket server knows who we are as well.
             emitEvent && eventCallback('signin', details);
             return details;
         }
 
         this.signIn = async (username, password) => {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket.id } });
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket && this.socket.id } });
             return handleSignInResult(result);
         };
 
         this.signInWithEmail = async (email, password) => {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket.id } });
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket && this.socket.id } });
             return handleSignInResult(result);
         };
 
@@ -1029,7 +1109,7 @@ class WebApi extends Api {
             if (!this.isConnected) { 
                 throw new Error('Cannot sign in because client is not connected to the server. If you want to automatically sign in the user with this access token once a connection is established, use client.auth.setAccessToken(token)'); 
             }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket.id } });
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket && this.socket.id } });
             return handleSignInResult(result, emitEvent);
         };
 
@@ -1039,20 +1119,32 @@ class WebApi extends Api {
 
         this.startAuthProviderSignIn = async (providerName, callbackUrl, options) => {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const optionParams = options && typeof options === 'object' && '&' + Object.keys(options).map(key => `option_${key}=${encodeURIComponent(options[key])}`).join('&');
+            const optionParams = typeof options === 'object' 
+                ? '&' + Object.keys(options).map(key => `option_${key}=${encodeURIComponent(options[key])}`).join('&')
+                : '';
             const result = await this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}${optionParams}` });
             return { redirectUrl: result.redirectUrl };
         };
 
         this.finishAuthProviderSignIn = async (callbackResult) => {
-            /** @type {{ provider: { name: string, access_token: string, refresh_token: string, expires_in: number }, access_token: string, user: AceBaseUser }} */
+            /** @type {{ provider: { name: string, access_token: string, refresh_token: string, expires_in: number }, access_token: string, user?: AceBaseUser }} */
             let result;
             try {
                 result = JSON.parse(Base64.decode(callbackResult));
-                // TODO: Implement server check
             }
             catch (err) {
                 throw new Error(`Invalid result`);
+            }
+            if (!result.user) {
+                // AceBaseServer 1.9.0+ does not include user details in the redirect.
+                // We must get (and validate) auth state with received access token
+                accessToken = result.access_token;
+                const authState = await this._request({ url: `${this.url}/auth/${this.dbname}/state` });
+                if (!authState.signed_in) {
+                    accessToken = null;
+                    throw new Error(`Invalid access token received: not signed in`);
+                }
+                result.user = authState.user;
             }
             return handleSignInResult(result);
         };
@@ -1075,8 +1167,8 @@ class WebApi extends Api {
 
             if (!accessToken) { return; }
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket.id, everywhere: options.everywhere } });
-            this.socket.emit('signout', accessToken); // Make sure the connected websocket server knows we signed out as well. 
+            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket && this.socket.id, everywhere: options.everywhere } });
+            this.socket && this.socket.emit('signout', accessToken); // Make sure the connected websocket server knows we signed out as well. 
             accessToken = null;
             if (this._cache && options.clearCache) {
                 // Clear cache, but don't wait for it to finish
@@ -1132,7 +1224,7 @@ class WebApi extends Api {
             if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
             const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } });
             if (signOut) {
-                this.socket.emit('signout', accessToken);
+                this.socket && this.socket.emit('signout', accessToken);
                 accessToken = null;
                 eventCallback('signout');
             }
@@ -1169,7 +1261,8 @@ class WebApi extends Api {
 
         try {
             let totalPendingChanges = 0;
-            const cursor = this._cursor.sync;
+            const useCursor = this.settings.sync.useCursor !== false;
+            const cursor = useCursor ? this._cursor.sync : null;
             const cacheApi = this._cache && this._cache.db.api;
             if (this._cache) {
                 // Part 1: PUSH local changes
@@ -1219,19 +1312,20 @@ class WebApi extends Api {
                                 if (!parentUpdate) {
                                     // Create new parent update
                                     // change.context.acebase_sync = { }; // TODO: Think about what context we could add to let receivers know why this merged update happens
-                                    mutations.push({ id, type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
+                                    mutations.push({ ids: [id], type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
                                 }
                                 else {
                                     // Add this change to parent update
                                     parentUpdate.data[pathInfo.key] = value;
+                                    parentUpdate.ids.push(id);
                                 }
                             }
                             return mutations;
                         }, []);
 
                     for (let m of mutations) {
-                        const id = m.id;
-                        this.debug.verbose(`SYNC pushing mutation ${id}: `, m);
+                        const ids = m.ids;
+                        this.debug.verbose(`SYNC pushing mutations ${ids.join(',')}: `, m);
                         totalPendingChanges++;
 
                         try {
@@ -1248,13 +1342,14 @@ class WebApi extends Api {
                             else {
                                 throw new Error(`unsupported mutation type "${m.type}"`);
                             }
-                            this.debug.verbose(`SYNC mutation ${id} processed ok`);
+                            this.debug.verbose(`SYNC mutation ${ids.join(',')} processed ok`);
 
-                            cacheApi.set(`${this.dbname}/pending/${id}`, null); // delete from cache db
+                            const updates = ids.reduce((updates, id) => (updates[id] = null, updates), {});
+                            cacheApi.update(`${this.dbname}/pending`, updates); // delete from cache db
                         }
                         catch(err) {
                             // Updating remote db failed
-                            this.debug.error(`SYNC mutation ${id} failed: ${err.message}`);
+                            this.debug.error(`SYNC mutations ${ids.join(',')} failed: ${err.message}`);
                             if (!this.isConnected) {
                                 // Connection was broken, should retry later
                                 throw err;
@@ -1266,25 +1361,28 @@ class WebApi extends Api {
 
                             // Store error report
                             const errorReport = { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack };
-                            cacheApi.transaction(`${this.dbname}/pending/${id}`, m => {
-                                if (!m.error) {
-                                    m.error = {
-                                        first: errorReport, 
-                                        last: errorReport,
-                                        retries: 0
-                                    };
-                                }
-                                else {
-                                    m.error.last = errorReport;
-                                    m.error.retries++;
-                                }
-                                if (m.error.retries === 3) {
-                                    // After 3 failed retries, move to /dbname/failed/id
-                                    cacheApi.set(`${this.dbname}/failed/${id}`, m);
-                                    return null; // remove pending
-                                }
-                                return m;
+                            ids.forEach(id => {
+                                cacheApi.transaction(`${this.dbname}/pending/${id}`, m => {
+                                    if (!m.error) {
+                                        m.error = {
+                                            first: errorReport, 
+                                            last: errorReport,
+                                            retries: 0
+                                        };
+                                    }
+                                    else {
+                                        m.error.last = errorReport;
+                                        m.error.retries++;
+                                    }
+                                    if (m.error.retries === 3) {
+                                        // After 3 failed retries, move to /dbname/failed/id
+                                        cacheApi.set(`${this.dbname}/failed/${id}`, m);
+                                        return null; // remove pending
+                                    }
+                                    return m;
+                                });
                             });
+
                             cacheApi.set(`${this.dbname}/stats/last_sync_error`, errorReport).catch(handleStatsUpdateError);
                             // TODO: Send error report to server?
                             // this.reportError({ code: 'sync-mutation', report: errorReport });
@@ -2212,6 +2310,9 @@ class WebApi extends Api {
         };
         if (options.monitor === true || (typeof options.monitor === 'object' && (options.monitor.add || options.monitor.change || options.monitor.remove))) {
             console.assert(typeof options.eventHandler === 'function', `no eventHandler specified to handle realtime changes`);
+            if (!this.socket) {
+                throw new Error(`Cannot create realtime query because websocket is not connected. Check your AceBaseClient network.realtime setting`);
+            }
             request.query_id = ID.generate();
             request.client_id = this.socket.id;
             this._realtimeQueries[request.query_id] = { query, options };
@@ -2350,10 +2451,11 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.signIn(username, password);
+        if (this.user) { this.eventCallback("signout", { source: "signin", user: this.user }); }
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
         this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
-        return { user: this.user, accessToken: this.accessToken }; // success: true, 
+        return { user: this.user, accessToken: this.accessToken };
     }
 
     /**
@@ -2367,6 +2469,7 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.signInWithEmail(email, password);
+        if (this.user) { this.eventCallback("signout", { source: "email_signin", user: this.user }); }
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
         this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
@@ -2383,6 +2486,7 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.signInWithToken(accessToken);
+        if (this.user) { this.eventCallback("signout", { source: "token_signin", user: this.user }); }
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
         this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
@@ -2400,7 +2504,7 @@ class AceBaseClientAuth {
     }
 
     /**
-     * If the server has been configured with Auth providers, use this to kick off the authentication flow.
+     * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
      * This method returs a Promise that resolves with the url you have to redirect your user to authenticate 
      * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
      * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
@@ -2414,7 +2518,7 @@ class AceBaseClientAuth {
         if (!this.client.isReady) {
             await this.client.ready();
         }
-        const details = await this.client.api.startAuthProviderSignIn(providerName, callbackUrl, this.user, options);
+        const details = await this.client.api.startAuthProviderSignIn(providerName, callbackUrl, options);
         return details.redirectUrl;
     }
 
@@ -2428,9 +2532,11 @@ class AceBaseClientAuth {
             await this.client.ready();
         }
         const details = await this.client.api.finishAuthProviderSignIn(callbackResult);
+        const isOtherUser = !this.user || this.user.uid !== details.user.uid;
+        isOtherUser && this.eventCallback("signout", { source: "oauth_signin", user: this.user });
         this.accessToken = details.accessToken;
         this.user = new AceBaseUser(details.user);
-        this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
+        isOtherUser && this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
         return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
     }
 
@@ -2556,7 +2662,17 @@ class AceBaseClientAuth {
         return await this.client.api.verifyEmailAddress(verificationCode);
     }
 
-    async _updateUserDetails(details) {
+    /**
+     * Updates one or more user account details
+     * @param {object} details 
+     * @param {string} [details.username] New username
+     * @param {string} [details.email] New email address
+     * @param {string} [details.display_name] New display name
+     * @param {{ url: string, width: number, height: number }} [details.picture] New profile picture
+     * @param {object} [details.settings] selection of user settings to update
+     * @returns returns a promise with the updated user details
+     */
+    async updateUserDetails(details) {
         if (!this.client.isReady) {
             await this.client.ready();
         }
@@ -2579,7 +2695,16 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     async changeUsername(newUsername) {
-        return await this._updateUserDetails({ username: newUsername });
+        return await this.updateUserDetails({ username: newUsername });
+    }
+
+    /**
+     * Changes the display name of the currrently signed into account
+     * @param {string} newName 
+     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
+     */
+    async changeDisplayName(newName) {
+        return await this.updateUserDetails({ display_name: newName });
     }
 
     /**
@@ -2588,7 +2713,7 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     async changeEmail(newEmail) {
-        return await this._updateUserDetails({ email: newEmail });
+        return await this.updateUserDetails({ email: newEmail });
     }
 
     /**
@@ -2600,7 +2725,7 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
      async changePicture(newPicture) {
-        return await this._updateUserDetails({ picture: newPicture });
+        return await this.updateUserDetails({ picture: newPicture });
     }
 
     /**
@@ -2609,7 +2734,7 @@ class AceBaseClientAuth {
      * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
      */
     async updateUserSettings(settings) {
-        return await this._updateUserDetails({ settings });
+        return await this.updateUserDetails({ settings });
     }
 
     /**
@@ -4889,6 +5014,7 @@ class DataReference {
                 callbacks.splice(callbacks.indexOf(cb), 1);
                 this.db.api.unsubscribe(this.path, event, cb.ourCallback);
                 // Call cancelCallbacks
+                this.db.debug.error(`Subscription "${event}" on path "/${this.path}" canceled because of an error: ${err.message}`);
                 eventPublisher.cancel(err.message);
             };
             let authorized = this.db.api.subscribe(this.path, event, cb.ourCallback, { newOnly: advancedOptions.newOnly, cancelCallback: cancelSubscription, syncFallback: advancedOptions.syncFallback });
@@ -6571,17 +6697,30 @@ exports.SchemaDefinition = SchemaDefinition;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimpleCache = void 0;
 const utils_1 = require("./utils");
+const calculateExpiryTime = (expirySeconds) => expirySeconds > 0 ? Date.now() + (expirySeconds * 1000) : Infinity;
 /**
  * Simple cache implementation that retains immutable values in memory for a limited time.
  * Immutability is enforced by cloning the stored and retrieved values. To change a cached value, it will have to be `set` again with the new value.
  */
 class SimpleCache {
-    constructor(expirySeconds) {
+    constructor(options) {
+        var _a;
         this.enabled = true;
-        this.expirySeconds = expirySeconds;
+        if (typeof options === 'number') {
+            // Old signature: only expirySeconds given
+            options = { expirySeconds: options };
+        }
+        options.cloneValues = options.cloneValues !== false;
+        if (typeof options.expirySeconds !== 'number' && typeof options.maxEntries !== 'number') {
+            throw new Error(`Either expirySeconds or maxEntries must be specified`);
+        }
+        this.options = options;
         this.cache = new Map();
-        setInterval(() => { this.cleanUp(); }, 60 * 1000); // Cleanup every minute
+        // Cleanup every minute
+        const interval = setInterval(() => { this.cleanUp(); }, 60 * 1000);
+        (_a = interval.unref) === null || _a === void 0 ? void 0 : _a.call(interval);
     }
+    get size() { return this.cache.size; }
     has(key) {
         if (!this.enabled) {
             return false;
@@ -6596,10 +6735,32 @@ class SimpleCache {
         if (!entry) {
             return null;
         } // if (!entry || entry.expires <= Date.now()) { return null; }
-        return utils_1.cloneObject(entry.value);
+        entry.expires = calculateExpiryTime(this.options.expirySeconds);
+        entry.accessed = Date.now();
+        return this.options.cloneValues ? utils_1.cloneObject(entry.value) : entry.value;
     }
     set(key, value) {
-        this.cache.set(key, { value: utils_1.cloneObject(value), expires: Date.now() + (this.expirySeconds * 1000) });
+        if (this.options.maxEntries > 0 && this.cache.size >= this.options.maxEntries && !this.cache.has(key)) {
+            // console.warn(`* cache limit ${this.options.maxEntries} reached: ${this.cache.size}`);
+            // Remove an expired item or the one that was accessed longest ago
+            let oldest = null;
+            const now = Date.now();
+            for (let [key, entry] of this.cache.entries()) {
+                if (entry.expires <= now) {
+                    // Found an expired item. Remove it now and stop
+                    this.cache.delete(key);
+                    oldest = null;
+                    break;
+                }
+                if (!oldest || entry.accessed < oldest.accessed) {
+                    oldest = { key, accessed: entry.accessed };
+                }
+            }
+            if (oldest !== null) {
+                this.cache.delete(oldest.key);
+            }
+        }
+        this.cache.set(key, { value: this.options.cloneValues ? utils_1.cloneObject(value) : value, added: Date.now(), accessed: Date.now(), expires: calculateExpiryTime(this.options.expirySeconds) });
     }
     remove(key) {
         this.cache.delete(key);
@@ -7555,22 +7716,17 @@ function decodeString(buffer) {
         return decoder.decode(buf);
     }
     else if (typeof Buffer === 'function') {
-        // Node.js
-        if (buffer instanceof Buffer) {
-            return buffer.toString('utf-8');
+        // Node.js (v10 and below)
+        if (buffer instanceof Array) {
+            buffer = Uint8Array.from(buffer); // convert to typed array
         }
-        else if (buffer instanceof Array) {
-            const typedArray = Uint8Array.from(buffer);
-            const buf = Buffer.from(typedArray.buffer, typedArray.byteOffset, typedArray.byteOffset + typedArray.byteLength);
-            return buf.toString('utf-8');
+        if (!(buffer instanceof Buffer) && 'buffer' in buffer && buffer.buffer instanceof ArrayBuffer) {
+            buffer = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength); // Convert typed array to node.js Buffer
         }
-        else if ('buffer' in buffer && buffer['buffer'] instanceof ArrayBuffer) {
-            const buf = Buffer.from(buffer['buffer'], buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-            return buf.toString('utf-8');
-        }
-        else {
+        if (!(buffer instanceof Buffer)) {
             throw new Error(`Unsupported buffer argument`);
         }
+        return buffer.toString('utf-8');
     }
     else {
         // Older browsers. Manually decode!

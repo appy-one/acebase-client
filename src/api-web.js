@@ -126,6 +126,7 @@ class WebApi extends Api {
         this._autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.dbname = dbname;
         this._connectionState = CONNECTION_STATE_DISCONNECTED;
+        this._serverVersion = 'unknown';
         this._cursor = {
             /** Last cursor received by the server */
             current: null,
@@ -2125,7 +2126,6 @@ class WebApi extends Api {
         return `${this.url}/ping/${this.dbname}`;
     }
 
-    _serverVersion = 'unknown';
     async getServerInfo() {
         const info = await this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
             // Prior to acebase-server v0.9.37, info was at /info (no dbname attached)

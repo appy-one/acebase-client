@@ -234,6 +234,7 @@ class WebApi extends Api {
             const transports = settings.network && settings.network.transports instanceof Array
                 ? settings.network.transports
                 : ['websocket'];
+            this.debug.log(`Using ${transports.join(',')} transport${transports.length > 1 ? 's' : ''} for socket.io`);
 
             return new Promise((resolve, reject) => {
 
@@ -381,6 +382,7 @@ class WebApi extends Api {
                 });
 
                 socket.on('disconnect', reason => {
+                    this.debug.warn(`Websocket disconnected: ${reason}`);
                     // Existing connection was broken, by us or network
                     if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
                         // disconnect was requested by us: reason === 'client namespace disconnect'
@@ -390,6 +392,14 @@ class WebApi extends Api {
                         // Automatic reconnect should be done by socket.io
                         this._connectionState = CONNECTION_STATE_CONNECTING;
                         this._eventTimeline.disconnect = Date.now();
+                        if (reason === 'io server disconnect') {
+                            // if the server has shut down and disconnected all clients, we have to reconnect manually
+                            this.socket = null;
+                            this.connect().catch(err => {
+                                // Immediate reconnect failed, which is ok. 
+                                // socket.io will retry now
+                            });
+                        }
                     }
                     eventCallback('disconnect');
                 });
@@ -2049,19 +2059,36 @@ class WebApi extends Api {
         }
     }
 
-    createIndex(path, key, options) {
-        const data = JSON.stringify({ action: "create", path, key, options });
-        return this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}`, data })
-        .catch(err => {
-            throw err;
-        });
+    async createIndex(path, key, options) {
+        if (options && options.config && Object.values(options.config).find(val => typeof val === 'function')) {
+            throw new Error(`Cannot create an index with callback functions through a client. Move your code serverside`);
+        }
+        const version = this._serverVersion.split('.');
+        if (version.length === 3 && +version[0] >= 1 && +version[1] >= 10) {
+            // acebase-server v1.10+ has a new dedicated endpoint at /index/dbname/create
+            const data = JSON.stringify({ path, key, options });
+            return await this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}/create`, data }); 
+        }
+        else {
+            const data = JSON.stringify({ action: 'create', path, key, options });
+            return await this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}`, data });
+        }
     }
 
     getIndexes() {
-        return this._request({ url: `${this.url}/index/${this.dbname}` })
-        .catch(err => {
-            throw err;
-        });         
+        return this._request({ url: `${this.url}/index/${this.dbname}` });
+    }
+
+    async deleteIndex(fileName) {
+        // Requires acebase-server v1.10+
+        const version = this._serverVersion.split('.');
+        if (version.length === 3 && +version[0] >= 1 && +version[1] >= 10) {
+            const data = JSON.stringify({ fileName });
+            return this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}/delete`, data });
+        }
+        else {
+            throw new Error(`not supported, requires acebase-server 1.10 or higher`);
+        }
     }
 
     reflect(path, type, args) {
@@ -2074,10 +2101,7 @@ class WebApi extends Api {
                 url += `&${query.join('&')}`;
             }
         }
-        return this._request({ url })
-        .catch(err => {
-            throw err;
-        }); 
+        return this._request({ url });
     }
 
     export(path, write, options = { format: 'json', type_safe: true }) {
@@ -2101,14 +2125,17 @@ class WebApi extends Api {
         return `${this.url}/ping/${this.dbname}`;
     }
 
-    getServerInfo() {
-        return this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
+    _serverVersion = 'unknown';
+    async getServerInfo() {
+        const info = await this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
             // Prior to acebase-server v0.9.37, info was at /info (no dbname attached)
             if (!err.isNetworkError) {
                 this.debug.warn(`Could not get server info, update your acebase server version`);
             }
             return { version: 'unknown', time: Date.now() };
         });
+        this._serverVersion = info.version;
+        return info;
     }
 
     setSchema(path, schema) {

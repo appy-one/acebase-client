@@ -2060,7 +2060,8 @@ class AceBaseClientConnectionSettings {
      * @param {boolean} [settings.network.monitor=false] Whether to actively monitor the network for availability by pinging the server every `interval` seconds. This results in quicker offline detection. Default is `false` if `realtime` is `true` and vice versa
      * @param {number} [settings.network.interval=60] Interval in seconds to send pings if `monitor` is `true`. Default is `60`
      * @param {string[]} [settings.network.transports] Transport methods to try connecting to the server for realtime event notifications (in specified order). Default is `['websocket']`. Supported transport methods are `"websocket"` and `"polling"`. 
-     * @param {boolean} [settings.network.realtime=true] Whether to connect to a serverwebsocket to enable realtime event notifications. Default is `true`. Disable this option if you only want to use the server's REST API.  
+     * @param {boolean} [settings.network.realtime=true] Whether to connect to a serverwebsocket to enable realtime event notifications. Default is `true`. Disable this option if you only want to use the server's REST API. 
+     * @param {boolean} [settings.sponsor=false] You can turn this on if you are a sponsor. See https://github.com/appy-one/acebase/discussions/100 for more info
      */
     constructor(settings) {
         this.dbname = settings.dbname;
@@ -2071,6 +2072,7 @@ class AceBaseClientConnectionSettings {
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
+        this.sponsor = typeof settings.sponsor === 'boolean' ? settings.sponsor : false;
         
         // Set sync settings
         this.sync = settings.sync;
@@ -2110,7 +2112,7 @@ class AceBaseClient extends AceBaseBase {
         if (!(settings instanceof AceBaseClientConnectionSettings)) {
             settings = new AceBaseClientConnectionSettings(settings);
         }
-        super(settings.dbname, { info: 'realtime database client' });
+        super(settings.dbname, { info: 'realtime database client', sponsor: settings.sponsor });
 
         /*
             TODO: improve init flow with await/async (requires Node 7.6+) 
@@ -3738,7 +3740,8 @@ class WebApi extends Api {
                 return `${key}=${val}`;
             })
             .join('&');
-        const { data: mutations, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
+        const { data, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
+        const mutations = Transport.deserialize2(data);
         return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, mutations };
     }
 
@@ -3761,7 +3764,8 @@ class WebApi extends Api {
                 return `${key}=${val}`;
             })
             .join('&');
-        const { data: changes, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
+        const { data, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
+        const changes = Transport.deserialize2(data);
         return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, changes };
     }
 
@@ -5210,10 +5214,10 @@ exports.AceBaseBase = exports.AceBaseBaseSettings = void 0;
     \_| |_/\___\___\____/ \__,_|___/\___|
                         realtime database
                                      
-   Copyright 2018 by Ewout Stortenbeker (me@appy.one)
+   Copyright 2018-2022 by Ewout Stortenbeker (me@appy.one)
    Published under MIT license
 
-   See docs at https://www.npmjs.com/package/acebase
+   See docs at https://github.com/appy-one/acebase
    ________________________________________________________________________________
   
 */
@@ -5231,6 +5235,7 @@ class AceBaseBaseSettings {
         this.logLevel = options.logLevel || 'log';
         this.logColors = typeof options.logColors === 'boolean' ? options.logColors : true;
         this.info = typeof options.info === 'string' ? options.info : undefined;
+        this.sponsor = typeof options.sponsor === 'boolean' ? options.sponsor : false;
     }
 }
 exports.AceBaseBaseSettings = AceBaseBaseSettings;
@@ -5255,8 +5260,11 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
             '   | | | | (_|  __/ |_/ / (_| \\__ \\  __/' + '\n' +
             '   \\_| |_/\\___\\___\\____/ \\__,_|___/\\___|';
         const info = (options.info ? ''.padStart(40 - options.info.length, ' ') + options.info + '\n' : '');
-        this.debug.write(logo.colorize(logoStyle));
-        info && this.debug.write(info.colorize(simple_colors_1.ColorStyle.magenta));
+        if (!options.sponsor) {
+            // if you are a sponsor, you can switch off the "AceBase banner ad"
+            this.debug.write(logo.colorize(logoStyle));
+            info && this.debug.write(info.colorize(simple_colors_1.ColorStyle.magenta));
+        }
         // Setup type mapping functionality
         this.types = new type_mappings_1.TypeMappings(this);
         this.once("ready", () => {
@@ -8016,7 +8024,7 @@ function getObservable() {
         return _observable;
     }
     try {
-        const { Observable } = require('rxjs');
+        const { Observable } = require('rxjs'); // fails in ESM module, need an elegant way to handle this. Can't use dynamic import() because it 1) requires Node 12+ and 2) causes Webpack build to fail if rxjs is not installed
         if (!Observable) {
             throw new Error('not loaded');
         }
@@ -8663,9 +8671,6 @@ function checkType(path, type, value, partial, trailKeys) {
     if (value === null) {
         return ok;
     }
-    if (typeof value !== type.typeOf) {
-        return { ok: false, reason: `path "${path}" must be typeof ${type.typeOf}` };
-    }
     if (type.instanceOf === Object && (typeof value !== 'object' || value instanceof Array || value instanceof Date)) {
         return { ok: false, reason: `path "${path}" must be an object collection` };
     }
@@ -8674,6 +8679,9 @@ function checkType(path, type, value, partial, trailKeys) {
     }
     if ('value' in type && value !== type.value) {
         return { ok: false, reason: `path "${path}" must be value: ${type.value}` };
+    }
+    if (typeof value !== type.typeOf) {
+        return { ok: false, reason: `path "${path}" must be typeof ${type.typeOf}` };
     }
     if (type.instanceOf === Array && type.genericTypes && !value.every(v => type.genericTypes.some(t => checkType(path, t, v, false).ok))) {
         return { ok: false, reason: `every array value of path "${path}" must match one of the specified types` };
@@ -8710,7 +8718,7 @@ class SchemaDefinition {
             //         street: String
             //     }
             // };
-            // Resulting ts: "{name:string,born:Date,instrument:'guitar'|'piano',address?:{street:string}"
+            // Resulting ts: "{name:string,born:Date,instrument:'guitar'|'piano',address?:{street:string}}"
             const toTS = obj => {
                 return '{' + Object.keys(obj)
                     .map(key => {
@@ -9270,24 +9278,58 @@ const utils_1 = require("./utils");
 const ascii85_1 = require("./ascii85");
 const path_info_1 = require("./path-info");
 const partial_array_1 = require("./partial-array");
+/**
+ * There are now 2 different serialization methods for transporting values.
+ *
+ * v1:
+ * The original version (v1) created an object with "map" and "val" properties.
+ * The "map" property was made optional in v1.14.1 so they won't be present for values needing no serializing
+ *
+ * v2:
+ * The new version replaces serialized values inline by objects containing ".type" and ".val" properties.
+ * This serializing method was introduced by `export` and `import` methods because they use streaming and
+ * are unable to prepare type mappings up-front. This format is smaller in transmission (in many cases),
+ * and easier to read and process.
+ *
+ * original: { "date": (some date) }
+ * v1 serialized: { "map": { "date": "date" }, "val": { date: "2022-04-22T07:49:23Z" } }
+ * v2 serialized: { "date": { ".type": "date", ".val": "2022-04-22T07:49:23Z" } }
+ *
+ * original: (some date)
+ * v1 serialized: { "map": "date", "val": "2022-04-22T07:49:23Z" }
+ * v2 serialized: { ".type": "date", ".val": "2022-04-22T07:49:23Z" }
+ * comment: top level value that need serializing is wrapped in an object with ".type" and ".val". v1 is smaller in this case
+ *
+ * original: 'some string'
+ * v1 serialized: { "map": {}, "val": "some string" }
+ * v2 serialized: "some string"
+ * comment: primitive types such as strings don't need serializing and are returned as is in v2
+ *
+ * original: { "date": (some date), "text": "Some string" }
+ * v1 serialized: { "map": { "date": "date" }, "val": { date: "2022-04-22T07:49:23Z", "text": "Some string" } }
+ * v2 serialized: { "date": { ".type": "date", ".val": "2022-04-22T07:49:23Z" }, "text": "Some string" }
+ */
 exports.Transport = {
     deserialize(data) {
-        if (data.map === null || typeof data.map === "undefined") {
+        if (data.map === null || typeof data.map === 'undefined') {
+            if (typeof data.val === 'undefined') {
+                throw new Error(`serialized value must have a val property`);
+            }
             return data.val;
         }
         const deserializeValue = (type, val) => {
-            if (type === "date") {
+            if (type === 'date') {
                 // Date was serialized as a string (UTC)
                 return new Date(val);
             }
-            else if (type === "binary") {
+            else if (type === 'binary') {
                 // ascii85 encoded binary data
                 return ascii85_1.ascii85.decode(val);
             }
-            else if (type === "reference") {
+            else if (type === 'reference') {
                 return new path_reference_1.PathReference(val);
             }
-            else if (type === "regexp") {
+            else if (type === 'regexp') {
                 return new RegExp(val.pattern, val.flags);
             }
             else if (type === 'array') {
@@ -9295,7 +9337,7 @@ exports.Transport = {
             }
             return val;
         };
-        if (typeof data.map === "string") {
+        if (typeof data.map === 'string') {
             // Single value
             return deserializeValue(data.map, data.val);
         }
@@ -9303,7 +9345,7 @@ exports.Transport = {
             const type = data.map[path];
             const keys = path_info_1.PathInfo.getPathKeys(path);
             let parent = data;
-            let key = "val";
+            let key = 'val';
             let val = data.val;
             keys.forEach(k => {
                 key = k;
@@ -9314,20 +9356,38 @@ exports.Transport = {
         });
         return data.val;
     },
+    detectSerializeVersion(data) {
+        if (typeof data !== 'object' || data === null) {
+            // This can only be v2, which allows primitive types to bypass serializing
+            return 2;
+        }
+        if ('map' in data && 'val' in data) {
+            return 1;
+        }
+        else if ('val' in data) {
+            // If it's v1, 'val' will be the only key in the object because serialize2 adds ".version": 2 to the object to prevent confusion.
+            if (Object.keys(data).length > 1) {
+                return 2;
+            }
+            return 1;
+        }
+        return 2;
+    },
     serialize(obj) {
+        var _a;
         // Recursively find dates and binary data
-        if (obj === null || typeof obj !== "object" || obj instanceof Date || obj instanceof ArrayBuffer || obj instanceof path_reference_1.PathReference) {
+        if (obj === null || typeof obj !== 'object' || obj instanceof Date || obj instanceof ArrayBuffer || obj instanceof path_reference_1.PathReference || obj instanceof RegExp) {
             // Single value
-            const ser = this.serialize({ value: obj });
+            const ser = exports.Transport.serialize({ value: obj });
             return {
-                map: ser.map.value,
+                map: (_a = ser.map) === null || _a === void 0 ? void 0 : _a.value,
                 val: ser.val.value
             };
         }
         obj = (0, utils_1.cloneObject)(obj); // Make sure we don't alter the original object
         const process = (obj, mappings, prefix) => {
             if (obj instanceof partial_array_1.PartialArray) {
-                mappings[prefix] = "array";
+                mappings[prefix] = 'array';
             }
             Object.keys(obj).forEach(key => {
                 const val = obj[key];
@@ -9335,33 +9395,165 @@ exports.Transport = {
                 if (val instanceof Date) {
                     // serialize date to UTC string
                     obj[key] = val.toISOString();
-                    mappings[path] = "date";
+                    mappings[path] = 'date';
                 }
                 else if (val instanceof ArrayBuffer) {
                     // Serialize binary data with ascii85
                     obj[key] = ascii85_1.ascii85.encode(val); //ascii85.encode(Buffer.from(val)).toString();
-                    mappings[path] = "binary";
+                    mappings[path] = 'binary';
                 }
                 else if (val instanceof path_reference_1.PathReference) {
                     obj[key] = val.path;
-                    mappings[path] = "reference";
+                    mappings[path] = 'reference';
                 }
                 else if (val instanceof RegExp) {
                     // Queries using the 'matches' filter with a regular expression can now also be used on remote db's
                     obj[key] = { pattern: val.source, flags: val.flags };
-                    mappings[path] = "regexp";
+                    mappings[path] = 'regexp';
                 }
-                else if (typeof val === "object" && val !== null) {
+                else if (typeof val === 'object' && val !== null) {
                     process(val, mappings, path);
                 }
             });
         };
         const mappings = {};
-        process(obj, mappings, "");
-        return {
-            map: mappings,
-            val: obj
+        process(obj, mappings, '');
+        const serialized = { val: obj };
+        if (Object.keys(mappings).length > 0) {
+            serialized.map = mappings;
+        }
+        return serialized;
+    },
+    serialize2(obj) {
+        // Recursively find data that needs serializing
+        const getSerializedValue = (val) => {
+            if (val instanceof Date) {
+                // serialize date to UTC string
+                return {
+                    '.type': 'date',
+                    '.val': val.toISOString()
+                };
+            }
+            else if (val instanceof ArrayBuffer) {
+                // Serialize binary data with ascii85
+                return {
+                    '.type': 'binary',
+                    '.val': ascii85_1.ascii85.encode(val)
+                };
+            }
+            else if (val instanceof path_reference_1.PathReference) {
+                return {
+                    '.type': 'reference',
+                    '.val': val.path
+                };
+            }
+            else if (val instanceof RegExp) {
+                // Queries using the 'matches' filter with a regular expression can now also be used on remote db's
+                return {
+                    '.type': 'regexp',
+                    '.val': `/${val.source}/${val.flags}` // new: shorter
+                    // '.val': {
+                    //     pattern: val.source,
+                    //     flags: val.flags
+                    // }
+                };
+            }
+            else if (typeof val === 'object' && val !== null) {
+                if (val instanceof Array) {
+                    const copy = [];
+                    for (let i = 0; i < val.length; i++) {
+                        copy[i] = getSerializedValue(val[i]);
+                    }
+                    return copy;
+                }
+                else {
+                    const copy = {}; //val instanceof Array ? [] : {} as SerializedValueV2;
+                    if (val instanceof partial_array_1.PartialArray) {
+                        // Mark the object as partial ("sparse") array
+                        copy['.type'] = 'array';
+                    }
+                    for (const prop in val) {
+                        copy[prop] = getSerializedValue(val[prop]);
+                    }
+                    return copy;
+                }
+            }
+            else {
+                // Primitive value. Don't serialize
+                return val;
+            }
         };
+        const serialized = getSerializedValue(obj);
+        if (typeof serialized === 'object' && 'val' in serialized && Object.keys(serialized).length === 1) {
+            // acebase-core v1.14.1 made the 'map' property optional.
+            // This v2 serialized object might be confused with a v1 without mappings, because it only has a "val" property
+            // To prevent this, mark the serialized object with version 2
+            serialized['.version'] = 2;
+        }
+        return serialized;
+    },
+    deserialize2(data) {
+        if (typeof data !== 'object' || data === null) {
+            // primitive value, not serialized
+            return data;
+        }
+        switch (data['.type']) {
+            case undefined: {
+                // No type given: this is a plain object or array
+                if (data instanceof Array) {
+                    // Plain array, deserialize items into a copy
+                    const copy = [];
+                    const arr = data;
+                    for (let i = 0; i < arr.length; i++) {
+                        copy.push(exports.Transport.deserialize2(arr[i]));
+                    }
+                    return copy;
+                }
+                else {
+                    // Plain object, deserialize properties into a copy
+                    const copy = {};
+                    const obj = data;
+                    for (const prop in obj) {
+                        copy[prop] = exports.Transport.deserialize2(obj[prop]);
+                    }
+                    return copy;
+                }
+            }
+            case 'array': {
+                // partial ("sparse") array, deserialize children into a copy
+                const copy = {};
+                for (const index in data) {
+                    copy[index] = exports.Transport.deserialize2(data[index]);
+                }
+                delete copy['.type'];
+                return new partial_array_1.PartialArray(copy);
+            }
+            case 'date': {
+                // Date was serialized as a string (UTC)
+                const val = data['.val'];
+                return new Date(val);
+            }
+            case 'binary': {
+                // ascii85 encoded binary data
+                const val = data['.val'];
+                return ascii85_1.ascii85.decode(val);
+            }
+            case 'reference': {
+                const val = data['.val'];
+                return new path_reference_1.PathReference(val);
+            }
+            case 'regexp': {
+                const val = data['.val'];
+                if (typeof val === 'string') {
+                    // serialized as '/(pattern)/flags'
+                    const match = /^\/(.*)\/([a-z]+)$/.exec(val);
+                    return new RegExp(match[1], match[2]);
+                }
+                // serialized as object with pattern & flags properties
+                return new RegExp(val.pattern, val.flags);
+            }
+        }
+        throw new Error(`Unknown data type "${data['.type']}" in serialized value`);
     }
 };
 
@@ -9850,8 +10042,8 @@ function concatTypedArrays(a, b) {
 }
 exports.concatTypedArrays = concatTypedArrays;
 function cloneObject(original, stack) {
-    const { DataSnapshot } = require('./data-snapshot'); // Don't move to top, because data-snapshot requires this script (utils)
-    if (original instanceof DataSnapshot) {
+    var _a;
+    if (((_a = original === null || original === void 0 ? void 0 : original.constructor) === null || _a === void 0 ? void 0 : _a.name) === 'DataSnapshot') {
         throw new TypeError(`Object to clone is a DataSnapshot (path "${original.ref.path}")`);
     }
     const checkAndFixTypedArray = obj => {
@@ -10058,5 +10250,5 @@ function defer(fn) {
 exports.defer = defer;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./data-snapshot":27,"./partial-array":33,"./path-reference":35,"./process":36,"buffer":3}]},{},[10])(10)
+},{"./partial-array":33,"./path-reference":35,"./process":36,"buffer":3}]},{},[10])(10)
 });

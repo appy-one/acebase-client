@@ -1436,7 +1436,8 @@ class WebApi extends Api {
                 return `${key}=${val}`;
             })
             .join('&');
-        const { data: mutations, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
+        const { data, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
+        const mutations = Transport.deserialize2(data);
         return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, mutations };
     }
 
@@ -1459,7 +1460,8 @@ class WebApi extends Api {
                 return `${key}=${val}`;
             })
             .join('&');
-        const { data: changes, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
+        const { data, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
+        const changes = Transport.deserialize2(data);
         return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, changes };
     }
 

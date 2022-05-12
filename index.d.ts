@@ -106,6 +106,8 @@ export interface AceBaseClientConnectionSettings {
          */
         realtime?: boolean
     }
+    /** You can turn this on if you are a sponsor. See https://github.com/appy-one/acebase/discussions/100 for more info */
+    sponsor?: boolean
 }
 
 /**

@@ -24,7 +24,8 @@ class AceBaseClientConnectionSettings {
      * @param {boolean} [settings.network.monitor=false] Whether to actively monitor the network for availability by pinging the server every `interval` seconds. This results in quicker offline detection. Default is `false` if `realtime` is `true` and vice versa
      * @param {number} [settings.network.interval=60] Interval in seconds to send pings if `monitor` is `true`. Default is `60`
      * @param {string[]} [settings.network.transports] Transport methods to try connecting to the server for realtime event notifications (in specified order). Default is `['websocket']`. Supported transport methods are `"websocket"` and `"polling"`. 
-     * @param {boolean} [settings.network.realtime=true] Whether to connect to a serverwebsocket to enable realtime event notifications. Default is `true`. Disable this option if you only want to use the server's REST API.  
+     * @param {boolean} [settings.network.realtime=true] Whether to connect to a serverwebsocket to enable realtime event notifications. Default is `true`. Disable this option if you only want to use the server's REST API. 
+     * @param {boolean} [settings.sponsor=false] You can turn this on if you are a sponsor. See https://github.com/appy-one/acebase/discussions/100 for more info
      */
     constructor(settings) {
         this.dbname = settings.dbname;
@@ -35,6 +36,7 @@ class AceBaseClientConnectionSettings {
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
+        this.sponsor = typeof settings.sponsor === 'boolean' ? settings.sponsor : false;
         
         // Set sync settings
         this.sync = settings.sync;
@@ -74,7 +76,7 @@ class AceBaseClient extends AceBaseBase {
         if (!(settings instanceof AceBaseClientConnectionSettings)) {
             settings = new AceBaseClientConnectionSettings(settings);
         }
-        super(settings.dbname, { info: 'realtime database client' });
+        super(settings.dbname, { info: 'realtime database client', sponsor: settings.sponsor });
 
         /*
             TODO: improve init flow with await/async (requires Node 7.6+) 

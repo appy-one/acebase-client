@@ -2034,7 +2034,7 @@ var u,f,l,d=String.fromCharCode;t.exports={version:"2.1.2",encode:a,decode:h}},f
 
 }).call(this)}).call(this,require("buffer").Buffer)
 },{"buffer":3}],6:[function(require,module,exports){
-const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
+const { AceBaseBase, DebugLogger, ColorStyle, DataSnapshot } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
 const { setServerBias } = require('./server-date');
@@ -2296,7 +2296,20 @@ class AceBaseClient extends AceBaseBase {
         const update = (path, cursor) => {
             return this.api.updateCache(path, cursor);
         };
-        return { clear, update };
+        /**
+         * Loads a value from cache database.If a cursor is provided, the cache will be updated with remote changes 
+         * first. If the value is not available in cache, it will be loaded from the server and stored in cache.
+         * This method is a shortcut for common cache logic provided by `db.ref(path).get` with the `cache_mode` 
+         * and `cache_cursor` options.
+         * @param {string} path target path to load
+         * @param {string} [cursor] A previously acquired cursor
+         * @returns {Promise<DataSnapshot>} Returns a Promise that resolves with a snapshot of the value
+         */
+        const get = async (path, cursor) => {
+            // Update the cache with provided cursor
+            return this.ref(path).get({ cache_mode: cursor ? 'allow' : 'force', cache_cursor: cursor });
+        };
+        return { clear, update, get };
     }
 }
 
@@ -3737,8 +3750,9 @@ class WebApi extends Api {
             .map(key => {
                 let val = filter[key];
                 if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
-                return `${key}=${val}`;
+                return typeof val !== 'undefined' ? `${key}=${val}` : null;
             })
+            .filter(p => p != null)
             .join('&');
         const { data, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
         const mutations = Transport.deserialize2(data);
@@ -3761,8 +3775,9 @@ class WebApi extends Api {
             .map(key => {
                 let val = filter[key];
                 if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
-                return `${key}=${val}`;
+                return typeof val !== 'undefined' ? `${key}=${val}` : null;
             })
+            .filter(p => p != null)
             .join('&');
         const { data, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
         const changes = Transport.deserialize2(data);
@@ -4021,7 +4036,9 @@ class WebApi extends Api {
      * @param {object} [options] 
      * @param {'allow'|'bypass'|'force'} [options.cache_mode='allow'] If a cached value is allowed or forced to be served.
      * @param {string} [options.cache_cursor] Use a cursor to update the local cache with mutations from the server, then load and serve the entire value from cache. Only works in combination with `cache_mode: 'allow'` (previously `allow_cache: true`)
-     * @param {string[]}
+     * @param {string[]} [options.include]
+     * @param {string[]} [options.exclude]
+     * @param {boolean} [options.child_objects]
      * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context
      */
     async get(path, options = { cache_mode: 'allow' }) {
@@ -5538,9 +5555,7 @@ const fingerprint_1 = require("./fingerprint");
 const pad_1 = require("./pad");
 var c = 0, blockSize = 4, base = 36, discreteValues = Math.pow(base, blockSize);
 function randomBlock() {
-    return (0, pad_1.default)((Math.random() *
-        discreteValues << 0)
-        .toString(base), blockSize);
+    return (0, pad_1.default)((Math.random() * discreteValues << 0).toString(base), blockSize);
 }
 function safeCounter() {
     c = c < discreteValues ? c : 0;
@@ -5612,13 +5627,14 @@ class LiveDataProxy {
      * with live data by listening for 'mutations' events. Any changes made to the value by the client will be synced back
      * to the database.
      * @param ref DataReference to create proxy for.
-     * @param options TODO: implement LiveDataProxyOptions to allow cursor to be specified (and ref.get({ cursor }) will have to be able to get cached value augmented with changes since cursor)
-     * @param defaultValue Default value to use for the proxy if the database path does not exist yet. This value will also
+     * @param options proxy initialization options
      * be written to the database.
      */
-    static async create(ref, defaultValue) {
+    static async create(ref, options) {
+        var _a;
         ref = new data_reference_1.DataReference(ref.db, ref.path); // Use copy to prevent context pollution on original reference
         let cache, loaded = false;
+        let latestCursor = options === null || options === void 0 ? void 0 : options.cursor;
         let proxy;
         const proxyId = id_1.ID.generate(); //ref.push().key;
         let onMutationCallback;
@@ -5692,6 +5708,7 @@ class LiveDataProxy {
                 return true;
             });
             if (proceed) {
+                latestCursor = snap.context().acebase_cursor;
                 localMutationsEmitter.emit('mutations', { origin: 'remote', snap });
             }
             else {
@@ -5981,15 +5998,18 @@ class LiveDataProxy {
                 });
             }
         };
-        const snap = await ref.get({ allow_cache: true });
-        const gotOfflineStartValue = snap.context().acebase_origin === 'cache';
-        if (gotOfflineStartValue) {
-            console.warn(`Started data proxy with cached value of "${ref.path}", check if its value is reloaded on next connection!`);
+        const snap = await ref.get({ cache_mode: 'allow', cache_cursor: options === null || options === void 0 ? void 0 : options.cursor });
+        // const gotOfflineStartValue = snap.context().acebase_origin === 'cache';
+        // if (gotOfflineStartValue) {
+        //     console.warn(`Started data proxy with cached value of "${ref.path}", check if its value is reloaded on next connection!`);
+        // }
+        if (snap.context().acebase_origin !== 'cache') {
+            latestCursor = (_a = snap.context().acebase_cursor) !== null && _a !== void 0 ? _a : null;
         }
         loaded = true;
         cache = snap.val();
-        if (cache === null && typeof defaultValue !== 'undefined') {
-            cache = defaultValue;
+        if (cache === null && typeof (options === null || options === void 0 ? void 0 : options.defaultValue) !== 'undefined') {
+            cache = options.defaultValue;
             await ref
                 .context({ acebase_proxy: { id: proxyId, source: 'defaultvalue', update_id: id_1.ID.generate() } })
                 .set(cache);
@@ -6063,6 +6083,9 @@ class LiveDataProxy {
             },
             get ref() {
                 return ref;
+            },
+            get cursor() {
+                return latestCursor;
             },
             reload,
             onMutation(callback) {
@@ -6751,6 +6774,7 @@ class DataRetrievalOptions {
             : typeof options.allow_cache === 'boolean'
                 ? options.allow_cache ? 'allow' : 'bypass'
                 : 'allow';
+        this.cache_cursor = typeof options.cache_cursor === 'string' ? options.cache_cursor : undefined;
     }
 }
 exports.DataRetrievalOptions = DataRetrievalOptions;
@@ -7317,8 +7341,13 @@ class DataReference {
         }
         return this.db.api.import(this.path, read, options);
     }
-    proxy(defaultValue) {
-        return data_proxy_1.LiveDataProxy.create(this, defaultValue);
+    proxy(options) {
+        const isOptionsArg = typeof options === 'object' && (typeof options.cursor !== 'undefined' || typeof options.defaultValue !== 'undefined');
+        if (typeof options !== 'undefined' && !isOptionsArg) {
+            this.db.debug.warn(`Warning: live data proxy is being initialized with a deprecated method signature. Use ref.proxy(options) instead of ref.proxy(defaultValue)`);
+            options = { defaultValue: options };
+        }
+        return data_proxy_1.LiveDataProxy.create(this, options);
     }
     observe(options) {
         // options should not be used yet - we can't prevent/filter mutation events on excluded paths atm 

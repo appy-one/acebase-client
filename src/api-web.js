@@ -1433,8 +1433,9 @@ class WebApi extends Api {
             .map(key => {
                 let val = filter[key];
                 if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
-                return `${key}=${val}`;
+                return typeof val !== 'undefined' ? `${key}=${val}` : null;
             })
+            .filter(p => p != null)
             .join('&');
         const { data, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
         const mutations = Transport.deserialize2(data);
@@ -1457,8 +1458,9 @@ class WebApi extends Api {
             .map(key => {
                 let val = filter[key];
                 if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
-                return `${key}=${val}`;
+                return typeof val !== 'undefined' ? `${key}=${val}` : null;
             })
+            .filter(p => p != null)
             .join('&');
         const { data, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
         const changes = Transport.deserialize2(data);
@@ -1717,7 +1719,9 @@ class WebApi extends Api {
      * @param {object} [options] 
      * @param {'allow'|'bypass'|'force'} [options.cache_mode='allow'] If a cached value is allowed or forced to be served.
      * @param {string} [options.cache_cursor] Use a cursor to update the local cache with mutations from the server, then load and serve the entire value from cache. Only works in combination with `cache_mode: 'allow'` (previously `allow_cache: true`)
-     * @param {string[]}
+     * @param {string[]} [options.include]
+     * @param {string[]} [options.exclude]
+     * @param {boolean} [options.child_objects]
      * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context
      */
     async get(path, options = { cache_mode: 'allow' }) {

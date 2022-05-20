@@ -1,4 +1,4 @@
-const { AceBaseBase, DebugLogger, ColorStyle } = require('acebase-core');
+const { AceBaseBase, DebugLogger, ColorStyle, DataSnapshot } = require('acebase-core');
 const { WebApi } = require('./api-web');
 const { AceBaseClientAuth } = require('./auth');
 const { setServerBias } = require('./server-date');
@@ -260,7 +260,20 @@ class AceBaseClient extends AceBaseBase {
         const update = (path, cursor) => {
             return this.api.updateCache(path, cursor);
         };
-        return { clear, update };
+        /**
+         * Loads a value from cache database.If a cursor is provided, the cache will be updated with remote changes 
+         * first. If the value is not available in cache, it will be loaded from the server and stored in cache.
+         * This method is a shortcut for common cache logic provided by `db.ref(path).get` with the `cache_mode` 
+         * and `cache_cursor` options.
+         * @param {string} path target path to load
+         * @param {string} [cursor] A previously acquired cursor
+         * @returns {Promise<DataSnapshot>} Returns a Promise that resolves with a snapshot of the value
+         */
+        const get = async (path, cursor) => {
+            // Update the cache with provided cursor
+            return this.ref(path).get({ cache_mode: cursor ? 'allow' : 'force', cache_cursor: cursor });
+        };
+        return { clear, update, get };
     }
 }
 

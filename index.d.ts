@@ -167,6 +167,17 @@ export class AceBaseClient extends acebasecore.AceBaseBase {
          * @param cursor A previously acquired cursor to update the cache with. If not specified or null, `path`'s entire value will be loaded from the server.
          */
         update(path?: string, cursor?: string|null): Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>
+
+        /**
+         * Loads a value from cache database.If a cursor is provided, the cache will be updated with remote changes 
+         * first. If the value is not available in cache, it will be loaded from the server and stored in cache.
+         * This method is a shortcut for common cache logic provided by `db.ref(path).get` with the `cache_mode` 
+         * and `cache_cursor` options.
+         * @param path target path to load
+         * @param cursor A previously acquired cursor
+         * @returns Returns a Promise that resolves with a snapshot of the value
+         */
+         get(path: string, cursor?: string): Promise<DataSnapshot>        
     }
 
 }

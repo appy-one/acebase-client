@@ -536,7 +536,7 @@ class WebApi extends Api {
                     }
                     if (keepMonitoring === false) {
                         delete this._realtimeQueries[data.query_id];
-                        socket.emit("query_unsubscribe", { query_id: data.query_id });
+                        socket.emit("query-unsubscribe", { query_id: data.query_id });
                     }
                 });
             });
@@ -670,6 +670,7 @@ class WebApi extends Api {
         this.transaction = (path, callback, options = { context: {} }) => {
             const id = ID.generate();
             options.context = options.context || {};
+            // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
             options.context.acebase_mutation = {
                 client_id: this._id,
                 id,
@@ -681,12 +682,12 @@ class WebApi extends Api {
 
             return new Promise(async (resolve, reject) => {
                 let cacheUpdateVal;
-                const handleSuccess = async () => {
+                const handleSuccess = async (context) => {
                     if (this._cache && typeof cacheUpdateVal !== 'undefined') {
                         // Update cache db value
                         await this._cache.db.api.set(cachePath, cacheUpdateVal);
                     }
-                    resolve(this);
+                    resolve({ cursor: context && context.acebase_cursor });
                 };
                 if (this.isConnected && settings.network.realtime) {
                     // Use websocket connection
@@ -708,7 +709,7 @@ class WebApi extends Api {
                         if (data.id === id) {
                             this.socket.off("tx_completed", completedCallback);
                             this.socket.off("tx_error", errorCallback);
-                            handleSuccess();
+                            handleSuccess(data.context);
                         }
                     };
                     const errorCallback = data => {
@@ -740,8 +741,8 @@ class WebApi extends Api {
                             cacheUpdateVal = newValue;
                         }
                         const finishData = JSON.stringify({ id, value: Transport.serialize(newValue) });
-                        await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data: finishData, context: options.context });
-                        await handleSuccess();
+                        const { context } = await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data: finishData, context: options.context, includeContext: true });
+                        await handleSuccess(context);
                     }
                     catch (err) {
                         if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE', 'fetch_failed'].includes(err.code)) {
@@ -1484,6 +1485,7 @@ class WebApi extends Api {
         if (!options.context) { options.context = {}; }
         const useCache = this._cache && options.allow_cache !== false;
         const useServer = this.isConnected;
+        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -1491,9 +1493,12 @@ class WebApi extends Api {
             path,
             flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
         };
-        const updateServer = () => {
+        const updateServer = async () => {
             const data = JSON.stringify(Transport.serialize(value));
-            return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context })
+            const { context } = await this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
+            Object.assign(options.context, context); // Add to request context
+            const cursor = context && context.acebase_cursor;
+            return { cursor }; // And return the cursor
         };
         if (!useCache) {
             return updateServer();
@@ -1574,6 +1579,7 @@ class WebApi extends Api {
         // TODO: refactor allow_cache to cache_mode
         const useCache = this._cache && options && options.allow_cache !== false;
         const useServer = this.isConnected;
+        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -1581,9 +1587,12 @@ class WebApi extends Api {
             path,
             flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
         };
-        const updateServer = () => {
+        const updateServer = async () => {
             const data = JSON.stringify(Transport.serialize(updates));
-            return this._request({ method: 'POST', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context });
+            const { context } = await this._request({ method: 'POST', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
+            Object.assign(options.context, context); // Add to request context
+            const cursor = context && context.acebase_cursor;
+            return { cursor }; // And return the cursor
         };
         if (!useCache) {
             return updateServer();
@@ -1722,7 +1731,7 @@ class WebApi extends Api {
      * @param {string[]} [options.include]
      * @param {string[]} [options.exclude]
      * @param {boolean} [options.child_objects]
-     * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context
+     * @returns {Promise<{ value: any, context: object, cursor?: string }>} Returns a promise that resolves with the value, context and optionally a server cursor
      */
     async get(path, options = { cache_mode: 'allow' }) {
         if (typeof options.cache_mode !== 'string') { options.cache_mode = 'allow'; }
@@ -1749,6 +1758,7 @@ class WebApi extends Api {
             }
             const result = await this._request({ url, includeContext: true });
             const context = result.context;
+            const cursor = context && context.acebase_cursor;
             const value = Transport.deserialize(result.data);
             if (this._cache) {
                 // Update cache without waiting
@@ -1764,7 +1774,7 @@ class WebApi extends Api {
                     });
                 }
             }
-            return { value, context };
+            return { value, context, cursor };
         };
         const getCacheValue = async (throwOnNull = false) => {
             const result = await this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
@@ -1791,13 +1801,13 @@ class WebApi extends Api {
             const { value, context } = await getCacheValue(false); // don't throw on null value, it was updated from the server just now
             context.acebase_cursor = syncResult.new_cursor;
             context.acebase_origin = 'hybrid';
-            return { value, context };
+            return { value, context, cursor: context.acebase_cursor };
         }
         if (!useCache) {
             // Cache not available or allowed to be used, get server value
-            const { value, context } = await getServerValue();
+            const { value, context, cursor } = await getServerValue();
             context.acebase_origin = 'server';
-            return { value, context };
+            return { value, context, cursor };
         }
         if (!this.isConnected || this._cache.priority === 'cache') {
             // Server not connected, or priority is set to 'cache'. Get cached value
@@ -1812,12 +1822,12 @@ class WebApi extends Api {
             const gotValue = (source, val) => {
                 this.debug.verbose(`Got ${source} value of "${path}":`, val);
                 if (done) { return; }
-                const { value, context } = val;
+                const { value, context, cursor } = val;
                 if (source === 'server') {
                     done = true;
                     this.debug.verbose(`Using server value for "${path}"`);
                     context.acebase_origin = 'server';
-                    resolve({ value, context });
+                    resolve({ value, context, cursor });
                 }
                 else if (value === null) {
                     // Cached value is not available
@@ -2023,7 +2033,7 @@ class WebApi extends Api {
      * @param {boolean} [options.monitor.change=false] monitor changed children that still match this query
      * @param {boolean} [options.monitor.remove=false] monitor children that don't match this query anymore
      * @ param {(event:string, path: string, value?: any) => boolean} [options.monitor.callback] NEW (BETA) callback with subscription to enable monitoring of new matches
-     * @returns {Promise<{ results: object[]|string[]>, context: any }} returns a promise that resolves with matching data or paths in `results`
+     * @returns {Promise<{ results: Array<object[]|string[]>, context: any, stop(): Promise<void> }} returns a promise that resolves with matching data or paths in `results`
      */
      async query(path, query, options = { snapshots: false, cache_mode: 'allow', eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
         const useCache = this._cache && (options.cache_mode === 'force' || (options.cache_mode === 'allow' && !this.isConnected));
@@ -2059,7 +2069,12 @@ class WebApi extends Api {
             const { data, context } = await this._request({ method: 'POST', url: `${this.url}/query/${this.dbname}/${path}`, data: reqData, includeContext: true });
             let results = Transport.deserialize(data);
             context.acebase_origin = 'server';
-            return { results: results.list, context };
+            const stop = async () => {
+                // Stops subscription of realtime query results. Requires acebase-server v1.10.0+
+                delete this._realtimeQueries[request.query_id];
+                await _websocketRequest(socket, "query-unsubscribe", { query_id: request.query_id });
+            };
+            return { results: results.list, context, stop };
         }
         catch (err) {
             throw err;

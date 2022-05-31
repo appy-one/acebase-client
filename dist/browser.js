@@ -2853,7 +2853,7 @@ class WebApi extends Api {
                     }
                     if (keepMonitoring === false) {
                         delete this._realtimeQueries[data.query_id];
-                        socket.emit("query_unsubscribe", { query_id: data.query_id });
+                        socket.emit("query-unsubscribe", { query_id: data.query_id });
                     }
                 });
             });
@@ -2987,6 +2987,7 @@ class WebApi extends Api {
         this.transaction = (path, callback, options = { context: {} }) => {
             const id = ID.generate();
             options.context = options.context || {};
+            // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
             options.context.acebase_mutation = {
                 client_id: this._id,
                 id,
@@ -2998,12 +2999,12 @@ class WebApi extends Api {
 
             return new Promise(async (resolve, reject) => {
                 let cacheUpdateVal;
-                const handleSuccess = async () => {
+                const handleSuccess = async (context) => {
                     if (this._cache && typeof cacheUpdateVal !== 'undefined') {
                         // Update cache db value
                         await this._cache.db.api.set(cachePath, cacheUpdateVal);
                     }
-                    resolve(this);
+                    resolve({ cursor: context && context.acebase_cursor });
                 };
                 if (this.isConnected && settings.network.realtime) {
                     // Use websocket connection
@@ -3025,7 +3026,7 @@ class WebApi extends Api {
                         if (data.id === id) {
                             this.socket.off("tx_completed", completedCallback);
                             this.socket.off("tx_error", errorCallback);
-                            handleSuccess();
+                            handleSuccess(data.context);
                         }
                     };
                     const errorCallback = data => {
@@ -3057,8 +3058,8 @@ class WebApi extends Api {
                             cacheUpdateVal = newValue;
                         }
                         const finishData = JSON.stringify({ id, value: Transport.serialize(newValue) });
-                        await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data: finishData, context: options.context });
-                        await handleSuccess();
+                        const { context } = await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data: finishData, context: options.context, includeContext: true });
+                        await handleSuccess(context);
                     }
                     catch (err) {
                         if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE', 'fetch_failed'].includes(err.code)) {
@@ -3801,6 +3802,7 @@ class WebApi extends Api {
         if (!options.context) { options.context = {}; }
         const useCache = this._cache && options.allow_cache !== false;
         const useServer = this.isConnected;
+        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -3808,9 +3810,12 @@ class WebApi extends Api {
             path,
             flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
         };
-        const updateServer = () => {
+        const updateServer = async () => {
             const data = JSON.stringify(Transport.serialize(value));
-            return this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context })
+            const { context } = await this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
+            Object.assign(options.context, context); // Add to request context
+            const cursor = context && context.acebase_cursor;
+            return { cursor }; // And return the cursor
         };
         if (!useCache) {
             return updateServer();
@@ -3891,6 +3896,7 @@ class WebApi extends Api {
         // TODO: refactor allow_cache to cache_mode
         const useCache = this._cache && options && options.allow_cache !== false;
         const useServer = this.isConnected;
+        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
         options.context.acebase_mutation = options.context.acebase_mutation || {
             client_id: this._id,
             id: ID.generate(),
@@ -3898,9 +3904,12 @@ class WebApi extends Api {
             path,
             flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
         };
-        const updateServer = () => {
+        const updateServer = async () => {
             const data = JSON.stringify(Transport.serialize(updates));
-            return this._request({ method: 'POST', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context });
+            const { context } = await this._request({ method: 'POST', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
+            Object.assign(options.context, context); // Add to request context
+            const cursor = context && context.acebase_cursor;
+            return { cursor }; // And return the cursor
         };
         if (!useCache) {
             return updateServer();
@@ -4039,7 +4048,7 @@ class WebApi extends Api {
      * @param {string[]} [options.include]
      * @param {string[]} [options.exclude]
      * @param {boolean} [options.child_objects]
-     * @returns {Promise<{ value: any, context: object }>} Returns a promise that resolves with the value and context
+     * @returns {Promise<{ value: any, context: object, cursor?: string }>} Returns a promise that resolves with the value, context and optionally a server cursor
      */
     async get(path, options = { cache_mode: 'allow' }) {
         if (typeof options.cache_mode !== 'string') { options.cache_mode = 'allow'; }
@@ -4066,6 +4075,7 @@ class WebApi extends Api {
             }
             const result = await this._request({ url, includeContext: true });
             const context = result.context;
+            const cursor = context && context.acebase_cursor;
             const value = Transport.deserialize(result.data);
             if (this._cache) {
                 // Update cache without waiting
@@ -4081,7 +4091,7 @@ class WebApi extends Api {
                     });
                 }
             }
-            return { value, context };
+            return { value, context, cursor };
         };
         const getCacheValue = async (throwOnNull = false) => {
             const result = await this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
@@ -4108,13 +4118,13 @@ class WebApi extends Api {
             const { value, context } = await getCacheValue(false); // don't throw on null value, it was updated from the server just now
             context.acebase_cursor = syncResult.new_cursor;
             context.acebase_origin = 'hybrid';
-            return { value, context };
+            return { value, context, cursor: context.acebase_cursor };
         }
         if (!useCache) {
             // Cache not available or allowed to be used, get server value
-            const { value, context } = await getServerValue();
+            const { value, context, cursor } = await getServerValue();
             context.acebase_origin = 'server';
-            return { value, context };
+            return { value, context, cursor };
         }
         if (!this.isConnected || this._cache.priority === 'cache') {
             // Server not connected, or priority is set to 'cache'. Get cached value
@@ -4129,12 +4139,12 @@ class WebApi extends Api {
             const gotValue = (source, val) => {
                 this.debug.verbose(`Got ${source} value of "${path}":`, val);
                 if (done) { return; }
-                const { value, context } = val;
+                const { value, context, cursor } = val;
                 if (source === 'server') {
                     done = true;
                     this.debug.verbose(`Using server value for "${path}"`);
                     context.acebase_origin = 'server';
-                    resolve({ value, context });
+                    resolve({ value, context, cursor });
                 }
                 else if (value === null) {
                     // Cached value is not available
@@ -4340,7 +4350,7 @@ class WebApi extends Api {
      * @param {boolean} [options.monitor.change=false] monitor changed children that still match this query
      * @param {boolean} [options.monitor.remove=false] monitor children that don't match this query anymore
      * @ param {(event:string, path: string, value?: any) => boolean} [options.monitor.callback] NEW (BETA) callback with subscription to enable monitoring of new matches
-     * @returns {Promise<{ results: object[]|string[]>, context: any }} returns a promise that resolves with matching data or paths in `results`
+     * @returns {Promise<{ results: Array<object[]|string[]>, context: any, stop(): Promise<void> }} returns a promise that resolves with matching data or paths in `results`
      */
      async query(path, query, options = { snapshots: false, cache_mode: 'allow', eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
         const useCache = this._cache && (options.cache_mode === 'force' || (options.cache_mode === 'allow' && !this.isConnected));
@@ -4376,7 +4386,12 @@ class WebApi extends Api {
             const { data, context } = await this._request({ method: 'POST', url: `${this.url}/query/${this.dbname}/${path}`, data: reqData, includeContext: true });
             let results = Transport.deserialize(data);
             context.acebase_origin = 'server';
-            return { results: results.list, context };
+            const stop = async () => {
+                // Stops subscription of realtime query results. Requires acebase-server v1.10.0+
+                delete this._realtimeQueries[request.query_id];
+                await _websocketRequest(socket, "query-unsubscribe", { query_id: request.query_id });
+            };
+            return { results: results.list, context, stop };
         }
         catch (err) {
             throw err;
@@ -4923,7 +4938,7 @@ class CachedValueUnavailableError extends Error {
 
 module.exports = { CachedValueUnavailableError };
 },{}],12:[function(require,module,exports){
-const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection, PartialArray } = require('acebase-core');
+const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection, PartialArray, Transport } = require('acebase-core');
 const { AceBaseClient } = require('./acebase-client');
 const { ServerDate } = require('./server-date');
 const { CachedValueUnavailableError } = require('./errors');
@@ -4940,7 +4955,8 @@ module.exports = {
     ServerDate,
     ObjectCollection,
     CachedValueUnavailableError,
-    PartialArray
+    PartialArray,
+    Transport
 };
 },{"./acebase-client":6,"./errors":11,"./server-date":17,"acebase-core":30}],13:[function(require,module,exports){
 module.exports = performance;
@@ -5405,6 +5421,9 @@ exports.Api = void 0;
 class NotImplementedError extends Error {
     constructor(name) { super(`${name} is not implemented`); }
 }
+/**
+ * Refactor to type/interface once acebase and acebase-client have been ported to TS
+ */
 class Api {
     constructor(dbname, settings, readyCallback) { }
     /**
@@ -5637,11 +5656,16 @@ class LiveDataProxy {
         let latestCursor = options === null || options === void 0 ? void 0 : options.cursor;
         let proxy;
         const proxyId = id_1.ID.generate(); //ref.push().key;
-        let onMutationCallback;
-        let onErrorCallback = err => {
-            console.error(err.message, err.details);
-        };
+        // let onMutationCallback: ProxyObserveMutationsCallback;
+        // let onErrorCallback: ProxyObserveErrorCallback = err => {
+        //     console.error(err.message, err.details);
+        // };
         const clientSubscriptions = [];
+        const clientEventEmitter = new simple_event_emitter_1.SimpleEventEmitter();
+        clientEventEmitter.on('cursor', (cursor) => latestCursor = cursor);
+        clientEventEmitter.on('error', (err) => {
+            console.error(err.message, err.details);
+        });
         const applyChange = (keys, newValue) => {
             // Make changes to cache
             if (keys.length === 0) {
@@ -5700,15 +5724,16 @@ class LiveDataProxy {
                 if (!applyChange(mutation.target, mutation.val)) {
                     return false;
                 }
-                if (onMutationCallback) {
-                    const changeRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
-                    const changeSnap = new data_snapshot_1.DataSnapshot(changeRef, mutation.val, false, mutation.prev, snap.context());
-                    onMutationCallback(changeSnap, isRemote); // onMutationCallback uses try/catch for client callback
-                }
+                // if (onMutationCallback) {
+                const changeRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
+                const changeSnap = new data_snapshot_1.DataSnapshot(changeRef, mutation.val, false, mutation.prev, snap.context());
+                // onMutationCallback(changeSnap, isRemote); // onMutationCallback uses try/catch for client callback
+                clientEventEmitter.emit('mutation', { snapshot: changeSnap, isRemote });
+                // }
                 return true;
             });
             if (proceed) {
-                latestCursor = snap.context().acebase_cursor;
+                clientEventEmitter.emit('cursor', context.acebase_cursor); // // NOTE: cursor is only present in mutations done remotely. For our own updates, server cursors are returned by ref.set and ref.update
                 localMutationsEmitter.emit('mutations', { origin: 'remote', snap });
             }
             else {
@@ -5740,20 +5765,21 @@ class LiveDataProxy {
             // Run local onMutation & onChange callbacks in the next tick
             process_1.default.nextTick(() => {
                 // Run onMutation callback for each changed node
-                const context = { acebase_proxy: { id: proxyId, source: 'update', local: true } };
-                if (onMutationCallback) {
-                    mutations.forEach(mutation => {
-                        const mutationRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
-                        const mutationSnap = new data_snapshot_1.DataSnapshot(mutationRef, mutation.value, false, mutation.previous, context);
-                        onMutationCallback(mutationSnap, false);
-                    });
-                }
+                const context = { acebase_proxy: { id: proxyId, source: 'update' } };
+                // if (onMutationCallback) {
+                mutations.forEach(mutation => {
+                    const mutationRef = mutation.target.reduce((ref, key) => ref.child(key), ref);
+                    const mutationSnap = new data_snapshot_1.DataSnapshot(mutationRef, mutation.value, false, mutation.previous, context);
+                    // onMutationCallback(mutationSnap, false);
+                    clientEventEmitter.emit('mutation', { snapshot: mutationSnap, isRemote: false });
+                });
+                // }
                 // Notify local subscribers
                 const snap = new data_snapshot_1.MutationsDataSnapshot(ref, mutations.map(m => ({ target: m.target, val: m.value, prev: m.previous })), context);
                 localMutationsEmitter.emit('mutations', { origin: 'local', snap });
             });
             // Update database async
-            const batchId = id_1.ID.generate();
+            // const batchId = ID.generate();
             processPromise = mutations
                 .reduce((mutations, m, i, arr) => {
                 // Only keep top path mutations to prevent unneccessary child path updates
@@ -5787,12 +5813,25 @@ class LiveDataProxy {
                 .reduce(async (promise, update, i, updates) => {
                 // Execute db update
                 // i === 0 && console.log(`Proxy: processing ${updates.length} db updates to paths:`, updates.map(update => update.ref.path));
+                const context = {
+                    acebase_proxy: {
+                        id: proxyId,
+                        source: update.type,
+                        // update_id: ID.generate(), 
+                        // batch_id: batchId, 
+                        // batch_updates: updates.length 
+                    }
+                };
                 await promise;
-                return update.ref
-                    .context({ acebase_proxy: { id: proxyId, source: 'update', update_id: id_1.ID.generate(), batch_id: batchId, batch_updates: updates.length } })[update.type](update.value) // .set or .update
+                await update.ref
+                    .context(context)[update.type](update.value) // .set or .update
                     .catch(err => {
-                    onErrorCallback({ source: 'update', message: `Error processing update of "/${ref.path}"`, details: err });
+                    clientEventEmitter.emit('error', { source: 'update', message: `Error processing update of "/${ref.path}"`, details: err });
                 });
+                if (update.ref.cursor) {
+                    // Should also be available in context.acebase_cursor now
+                    clientEventEmitter.emit('cursor', update.ref.cursor);
+                }
             }, processPromise);
             await processPromise;
         };
@@ -5886,7 +5925,7 @@ class LiveDataProxy {
                         keepSubscription = false !== callback(Object.freeze(newValue), Object.freeze(previousValue), !causedByOurProxy, context);
                     }
                     catch (err) {
-                        onErrorCallback({ source: origin === 'remote' ? 'remote_update' : 'local_update', message: `Error running subscription callback`, details: err });
+                        clientEventEmitter.emit('error', { source: origin === 'remote' ? 'remote_update' : 'local_update', message: `Error running subscription callback`, details: err });
                     }
                     if (keepSubscription === false) {
                         stop();
@@ -5895,7 +5934,7 @@ class LiveDataProxy {
             };
             localMutationsEmitter.on('mutations', mutationsHandler);
             const stop = () => {
-                localMutationsEmitter.off('mutations', mutationsHandler);
+                localMutationsEmitter.off('mutations').off('mutations', mutationsHandler);
                 clientSubscriptions.splice(clientSubscriptions.findIndex(cs => cs.stop === stop), 1);
             };
             clientSubscriptions.push({ target, stop });
@@ -6004,15 +6043,20 @@ class LiveDataProxy {
         //     console.warn(`Started data proxy with cached value of "${ref.path}", check if its value is reloaded on next connection!`);
         // }
         if (snap.context().acebase_origin !== 'cache') {
-            latestCursor = (_a = snap.context().acebase_cursor) !== null && _a !== void 0 ? _a : null;
+            clientEventEmitter.emit('cursor', (_a = ref.cursor) !== null && _a !== void 0 ? _a : null); // latestCursor = snap.context().acebase_cursor ?? null;
         }
         loaded = true;
         cache = snap.val();
         if (cache === null && typeof (options === null || options === void 0 ? void 0 : options.defaultValue) !== 'undefined') {
             cache = options.defaultValue;
-            await ref
-                .context({ acebase_proxy: { id: proxyId, source: 'defaultvalue', update_id: id_1.ID.generate() } })
-                .set(cache);
+            const context = {
+                acebase_proxy: {
+                    id: proxyId,
+                    source: 'default',
+                    // update_id: ID.generate() 
+                }
+            };
+            await ref.context(context).set(cache);
         }
         proxy = createProxy({ root: { ref, get cache() { return cache; } }, target: [], id: proxyId, flag: handleFlag });
         const assertProxyAvailable = () => {
@@ -6038,13 +6082,13 @@ class LiveDataProxy {
             // Run onMutation callback for each changed node
             const context = snap.context(); // context might contain acebase_cursor if server support that
             context.acebase_proxy = { id: proxyId, source: 'reload' };
-            if (onMutationCallback) {
-                mutations.forEach(m => {
-                    const targetRef = getTargetRef(ref, m.target);
-                    const newSnap = new data_snapshot_1.DataSnapshot(targetRef, m.val, m.val === null, m.prev, context);
-                    onMutationCallback(newSnap, true);
-                });
-            }
+            // if (onMutationCallback) {
+            mutations.forEach(m => {
+                const targetRef = getTargetRef(ref, m.target);
+                const newSnap = new data_snapshot_1.DataSnapshot(targetRef, m.val, m.val === null, m.prev, context);
+                clientEventEmitter.emit('mutation', { snapshot: newSnap, isRemote: true });
+            });
+            // }
             // Notify local subscribers
             const mutationsSnap = new data_snapshot_1.MutationsDataSnapshot(ref, mutations, context);
             localMutationsEmitter.emit('mutations', { origin: 'local', snap: mutationsSnap });
@@ -6057,6 +6101,7 @@ class LiveDataProxy {
                     ...clientSubscriptions.map(cs => cs.stop())
                 ];
                 await Promise.all(promises);
+                ['cursor', 'mutation', 'error'].forEach(event => clientEventEmitter.off(event));
                 cache = null; // Remove cache
                 proxy = null;
             },
@@ -6091,26 +6136,34 @@ class LiveDataProxy {
             onMutation(callback) {
                 // Fires callback each time anything changes
                 assertProxyAvailable();
-                onMutationCallback = (...args) => {
+                clientEventEmitter.off('mutation'); // Mimic legacy behaviour that overwrites handler
+                clientEventEmitter.on('mutation', ({ snapshot, isRemote }) => {
                     try {
-                        callback(...args);
+                        callback(snapshot, isRemote);
                     }
                     catch (err) {
-                        onErrorCallback({ source: 'mutation_callback', message: 'Error in dataproxy onMutation callback', details: err });
+                        clientEventEmitter.emit('error', { source: 'mutation_callback', message: 'Error in dataproxy onMutation callback', details: err });
                     }
-                };
+                });
             },
             onError(callback) {
                 // Fires callback each time anything goes wrong
                 assertProxyAvailable();
-                onErrorCallback = (...args) => {
+                clientEventEmitter.off('error'); // Mimic legacy behaviour that overwrites handler
+                clientEventEmitter.on('error', (err) => {
                     try {
-                        callback(...args);
+                        callback(err);
                     }
                     catch (err) {
                         console.error(`Error in dataproxy onError callback: ${err.message}`);
                     }
-                };
+                });
+            },
+            on(event, callback) {
+                clientEventEmitter.on(event, callback);
+            },
+            off(event, callback) {
+                clientEventEmitter.off(event, callback);
             }
         };
     }
@@ -6816,7 +6869,8 @@ class DataReference {
             get callbacks() { return callbacks; },
             vars: vars || {},
             context: {},
-            pushed: false
+            pushed: false,
+            cursor: null
         };
         this.db = db; //Object.defineProperty(this, "db", ...)
     }
@@ -6840,6 +6894,18 @@ class DataReference {
         else {
             throw new Error('Invalid context argument');
         }
+    }
+    /**
+     * Contains the last received cursor for this referenced path (if the connected database has transaction logging enabled).
+     * If you want to be notified if this value changes, add a handler with `ref.onCursor(callback)`
+     */
+    get cursor() {
+        return this[_private].cursor;
+    }
+    set cursor(value) {
+        var _a;
+        this[_private].cursor = value;
+        (_a = this.onCursor) === null || _a === void 0 ? void 0 : _a.call(this, value);
     }
     /**
     * The path this instance was created with
@@ -6899,7 +6965,8 @@ class DataReference {
                 await this.db.ready();
             }
             value = this.db.types.serialize(this.path, value);
-            await this.db.api.set(this.path, value, { context: this[_private].context });
+            const { cursor } = await this.db.api.set(this.path, value, { context: this[_private].context });
+            this.cursor = cursor;
             if (typeof onComplete === 'function') {
                 try {
                     onComplete(null, this);
@@ -6947,7 +7014,8 @@ class DataReference {
             }
             else {
                 updates = this.db.types.serialize(this.path, updates);
-                await this.db.api.update(this.path, updates, { context: this[_private].context });
+                const { cursor } = await this.db.api.update(this.path, updates, { context: this[_private].context });
+                this.cursor = cursor;
             }
             if (typeof onComplete === 'function') {
                 try {
@@ -7014,7 +7082,8 @@ class DataReference {
                 return this.db.types.serialize(this.path, newValue);
             }
         };
-        const result = await this.db.api.transaction(this.path, cb, { context: this[_private].context });
+        const { cursor } = await this.db.api.transaction(this.path, cb, { context: this[_private].context });
+        this.cursor = cursor;
         if (throwError) {
             // Rethrow error from callback code
             throw throwError;
@@ -7075,6 +7144,9 @@ class DataReference {
                     }
                 }
                 eventPublisher.publish(callbackObject);
+                if (eventContext === null || eventContext === void 0 ? void 0 : eventContext.acebase_cursor) {
+                    this.cursor = eventContext.acebase_cursor;
+                }
             }
         };
         this[_private].callbacks.push(cb);
@@ -7217,6 +7289,7 @@ class DataReference {
         }
         const options = new DataRetrievalOptions(typeof optionsOrCallback === 'object' ? optionsOrCallback : { cache_mode: 'allow' });
         const promise = this.db.api.get(this.path, options).then(result => {
+            var _a;
             const isNewApiResult = ('context' in result && 'value' in result);
             if (!isNewApiResult) {
                 // acebase-core version package was updated but acebase or acebase-client package was not? Warn, but don't throw an error.
@@ -7225,6 +7298,9 @@ class DataReference {
             }
             const value = this.db.types.deserialize(this.path, result.value);
             const snapshot = new data_snapshot_1.DataSnapshot(this, value, undefined, undefined, result.context);
+            if ((_a = result.context) === null || _a === void 0 ? void 0 : _a.acebase_cursor) {
+                this.cursor = result.context.acebase_cursor;
+            }
             return snapshot;
         });
         if (callback) {
@@ -7584,14 +7660,19 @@ class DataReferenceQuery {
                 options.monitor.remove = true;
             }
         }
-        const db = this.ref.db;
+        // Stop realtime results if they are still enabled on a previous .get on this instance
+        this.stop();
         // NOTE: returning promise here, regardless of callback argument. Good argument to refactor method to async/await soon
+        const db = this.ref.db;
         return db.api.query(this.ref.path, this[_private], options)
             .catch(err => {
             throw new Error(err);
         })
             .then(res => {
-            let { results, context } = res;
+            let { results, context, stop } = res;
+            this.stop = async () => {
+                await stop();
+            };
             if (!('results' in res && 'context' in res)) {
                 console.warn(`Query results missing context. Update your acebase and/or acebase-client packages`);
                 results = res, context = {};
@@ -7612,6 +7693,12 @@ class DataReferenceQuery {
             callback && callback(results);
             return results;
         });
+    }
+    /**
+     * Stops a realtime query, no more notifications will be received.
+     */
+    async stop() {
+        // Overridden by .get
     }
     /**
      * Executes the query and returns references. Short for `.get({ snapshots: false })`
@@ -7998,8 +8085,7 @@ var subscription_1 = require("./subscription");
 Object.defineProperty(exports, "EventStream", { enumerable: true, get: function () { return subscription_1.EventStream; } });
 Object.defineProperty(exports, "EventPublisher", { enumerable: true, get: function () { return subscription_1.EventPublisher; } });
 Object.defineProperty(exports, "EventSubscription", { enumerable: true, get: function () { return subscription_1.EventSubscription; } });
-var transport_1 = require("./transport");
-Object.defineProperty(exports, "Transport", { enumerable: true, get: function () { return transport_1.Transport; } });
+exports.Transport = require("./transport");
 var type_mappings_1 = require("./type-mappings");
 Object.defineProperty(exports, "TypeMappings", { enumerable: true, get: function () { return type_mappings_1.TypeMappings; } });
 exports.Utils = require("./utils");
@@ -8473,7 +8559,7 @@ function parse(definition) {
             pos++;
         }
         if (prop.name.length === 0) {
-            throw new Error(`Property name expected at position ${pos}`);
+            throw new Error(`Property name expected at position ${pos}, found: ${definition.slice(pos, pos + 10)}..`);
         }
         if (definition[pos] === '?') {
             prop.optional = true;
@@ -8630,7 +8716,7 @@ function checkObject(path, properties, obj, partial) {
         : Object.keys(obj).filter(key => ![null, undefined].includes(obj[key]) // Ignore null or undefined values
             && !properties.find(prop => prop.name === key));
     if (invalidProperties.length > 0) {
-        return { ok: false, reason: `Object at path "${path}" cannot have properties ${invalidProperties.map(p => `"${p}"`).join(', ')}` };
+        return { ok: false, reason: `Object at path "${path}" cannot have propert${invalidProperties.length === 1 ? 'y' : 'ies'} ${invalidProperties.map(p => `"${p}"`).join(', ')}` };
     }
     // Loop through properties that should be present
     function checkProperty(property) {
@@ -8642,7 +8728,7 @@ function checkObject(path, properties, obj, partial) {
             return checkType(`${path}/${property.name}`, property.types[0], obj[property.name], false);
         }
         if (hasValue && !property.types.some(type => checkType(`${path}/${property.name}`, type, obj[property.name], false).ok)) {
-            return { ok: false, reason: `Property at path "${path}/${property.name}" is of the wrong type` };
+            return { ok: false, reason: `Property at path "${path}/${property.name}" does not match any of ${property.types.length} allowed types` };
         }
         return { ok: true };
     }
@@ -9301,290 +9387,318 @@ exports.EventStream = EventStream;
 },{}],42:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.Transport = void 0;
+exports.deserialize2 = exports.serialize2 = exports.serialize = exports.detectSerializeVersion = exports.deserialize = void 0;
 const path_reference_1 = require("./path-reference");
 const utils_1 = require("./utils");
 const ascii85_1 = require("./ascii85");
 const path_info_1 = require("./path-info");
 const partial_array_1 = require("./partial-array");
+/*
+    There are now 2 different serialization methods for transporting values.
+ 
+    v1:
+    The original version (v1) created an object with "map" and "val" properties.
+    The "map" property was made optional in v1.14.1 so they won't be present for values needing no serializing
+
+    v2:
+    The new version replaces serialized values inline by objects containing ".type" and ".val" properties.
+    This serializing method was introduced by `export` and `import` methods because they use streaming and
+    are unable to prepare type mappings up-front. This format is smaller in transmission (in many cases),
+    and easier to read and process.
+
+    original: { "date": (some date) }
+    v1 serialized: { "map": { "date": "date" }, "val": { date: "2022-04-22T07:49:23Z" } }
+    v2 serialized: { "date": { ".type": "date", ".val": "2022-04-22T07:49:23Z" } }
+
+    original: (some date)
+    v1 serialized: { "map": "date", "val": "2022-04-22T07:49:23Z" }
+    v2 serialized: { ".type": "date", ".val": "2022-04-22T07:49:23Z" }
+    comment: top level value that need serializing is wrapped in an object with ".type" and ".val". v1 is smaller in this case
+    
+    original: 'some string'
+    v1 serialized: { "map": {}, "val": "some string" }
+    v2 serialized: "some string"
+    comment: primitive types such as strings don't need serializing and are returned as is in v2
+
+    original: { "date": (some date), "text": "Some string" }
+    v1 serialized: { "map": { "date": "date" }, "val": { date: "2022-04-22T07:49:23Z", "text": "Some string" } }
+    v2 serialized: { "date": { ".type": "date", ".val": "2022-04-22T07:49:23Z" }, "text": "Some string" }
+*/
 /**
- * There are now 2 different serialization methods for transporting values.
- *
- * v1:
- * The original version (v1) created an object with "map" and "val" properties.
- * The "map" property was made optional in v1.14.1 so they won't be present for values needing no serializing
- *
- * v2:
- * The new version replaces serialized values inline by objects containing ".type" and ".val" properties.
- * This serializing method was introduced by `export` and `import` methods because they use streaming and
- * are unable to prepare type mappings up-front. This format is smaller in transmission (in many cases),
- * and easier to read and process.
- *
- * original: { "date": (some date) }
- * v1 serialized: { "map": { "date": "date" }, "val": { date: "2022-04-22T07:49:23Z" } }
- * v2 serialized: { "date": { ".type": "date", ".val": "2022-04-22T07:49:23Z" } }
- *
- * original: (some date)
- * v1 serialized: { "map": "date", "val": "2022-04-22T07:49:23Z" }
- * v2 serialized: { ".type": "date", ".val": "2022-04-22T07:49:23Z" }
- * comment: top level value that need serializing is wrapped in an object with ".type" and ".val". v1 is smaller in this case
- *
- * original: 'some string'
- * v1 serialized: { "map": {}, "val": "some string" }
- * v2 serialized: "some string"
- * comment: primitive types such as strings don't need serializing and are returned as is in v2
- *
- * original: { "date": (some date), "text": "Some string" }
- * v1 serialized: { "map": { "date": "date" }, "val": { date: "2022-04-22T07:49:23Z", "text": "Some string" } }
- * v2 serialized: { "date": { ".type": "date", ".val": "2022-04-22T07:49:23Z" }, "text": "Some string" }
+ * Original deserialization method using global `map` and `val` properties
+ * @param data
+ * @returns
  */
-exports.Transport = {
-    deserialize(data) {
-        if (data.map === null || typeof data.map === 'undefined') {
-            if (typeof data.val === 'undefined') {
-                throw new Error(`serialized value must have a val property`);
-            }
-            return data.val;
+const deserialize = (data) => {
+    if (data.map === null || typeof data.map === 'undefined') {
+        if (typeof data.val === 'undefined') {
+            throw new Error(`serialized value must have a val property`);
         }
-        const deserializeValue = (type, val) => {
-            if (type === 'date') {
-                // Date was serialized as a string (UTC)
-                return new Date(val);
-            }
-            else if (type === 'binary') {
-                // ascii85 encoded binary data
-                return ascii85_1.ascii85.decode(val);
-            }
-            else if (type === 'reference') {
-                return new path_reference_1.PathReference(val);
-            }
-            else if (type === 'regexp') {
-                return new RegExp(val.pattern, val.flags);
-            }
-            else if (type === 'array') {
-                return new partial_array_1.PartialArray(val);
-            }
-            return val;
-        };
-        if (typeof data.map === 'string') {
-            // Single value
-            return deserializeValue(data.map, data.val);
-        }
-        Object.keys(data.map).forEach(path => {
-            const type = data.map[path];
-            const keys = path_info_1.PathInfo.getPathKeys(path);
-            let parent = data;
-            let key = 'val';
-            let val = data.val;
-            keys.forEach(k => {
-                key = k;
-                parent = val;
-                val = val[key]; // If an error occurs here, there's something wrong with the calling code...
-            });
-            parent[key] = deserializeValue(type, val);
-        });
         return data.val;
-    },
-    detectSerializeVersion(data) {
-        if (typeof data !== 'object' || data === null) {
-            // This can only be v2, which allows primitive types to bypass serializing
+    }
+    const deserializeValue = (type, val) => {
+        if (type === 'date') {
+            // Date was serialized as a string (UTC)
+            return new Date(val);
+        }
+        else if (type === 'binary') {
+            // ascii85 encoded binary data
+            return ascii85_1.ascii85.decode(val);
+        }
+        else if (type === 'reference') {
+            return new path_reference_1.PathReference(val);
+        }
+        else if (type === 'regexp') {
+            return new RegExp(val.pattern, val.flags);
+        }
+        else if (type === 'array') {
+            return new partial_array_1.PartialArray(val);
+        }
+        return val;
+    };
+    if (typeof data.map === 'string') {
+        // Single value
+        return deserializeValue(data.map, data.val);
+    }
+    Object.keys(data.map).forEach(path => {
+        const type = data.map[path];
+        const keys = path_info_1.PathInfo.getPathKeys(path);
+        let parent = data;
+        let key = 'val';
+        let val = data.val;
+        keys.forEach(k => {
+            key = k;
+            parent = val;
+            val = val[key]; // If an error occurs here, there's something wrong with the calling code...
+        });
+        parent[key] = deserializeValue(type, val);
+    });
+    return data.val;
+};
+exports.deserialize = deserialize;
+/**
+ * Function to detect the used serialization method with for the given object
+ * @param data
+ * @returns
+ */
+const detectSerializeVersion = (data) => {
+    if (typeof data !== 'object' || data === null) {
+        // This can only be v2, which allows primitive types to bypass serializing
+        return 2;
+    }
+    if ('map' in data && 'val' in data) {
+        return 1;
+    }
+    else if ('val' in data) {
+        // If it's v1, 'val' will be the only key in the object because serialize2 adds ".version": 2 to the object to prevent confusion.
+        if (Object.keys(data).length > 1) {
             return 2;
         }
-        if ('map' in data && 'val' in data) {
-            return 1;
-        }
-        else if ('val' in data) {
-            // If it's v1, 'val' will be the only key in the object because serialize2 adds ".version": 2 to the object to prevent confusion.
-            if (Object.keys(data).length > 1) {
-                return 2;
-            }
-            return 1;
-        }
-        return 2;
-    },
-    serialize(obj) {
-        var _a;
-        // Recursively find dates and binary data
-        if (obj === null || typeof obj !== 'object' || obj instanceof Date || obj instanceof ArrayBuffer || obj instanceof path_reference_1.PathReference || obj instanceof RegExp) {
-            // Single value
-            const ser = exports.Transport.serialize({ value: obj });
-            return {
-                map: (_a = ser.map) === null || _a === void 0 ? void 0 : _a.value,
-                val: ser.val.value
-            };
-        }
-        obj = (0, utils_1.cloneObject)(obj); // Make sure we don't alter the original object
-        const process = (obj, mappings, prefix) => {
-            if (obj instanceof partial_array_1.PartialArray) {
-                mappings[prefix] = 'array';
-            }
-            Object.keys(obj).forEach(key => {
-                const val = obj[key];
-                const path = prefix.length === 0 ? key : `${prefix}/${key}`;
-                if (val instanceof Date) {
-                    // serialize date to UTC string
-                    obj[key] = val.toISOString();
-                    mappings[path] = 'date';
-                }
-                else if (val instanceof ArrayBuffer) {
-                    // Serialize binary data with ascii85
-                    obj[key] = ascii85_1.ascii85.encode(val); //ascii85.encode(Buffer.from(val)).toString();
-                    mappings[path] = 'binary';
-                }
-                else if (val instanceof path_reference_1.PathReference) {
-                    obj[key] = val.path;
-                    mappings[path] = 'reference';
-                }
-                else if (val instanceof RegExp) {
-                    // Queries using the 'matches' filter with a regular expression can now also be used on remote db's
-                    obj[key] = { pattern: val.source, flags: val.flags };
-                    mappings[path] = 'regexp';
-                }
-                else if (typeof val === 'object' && val !== null) {
-                    process(val, mappings, path);
-                }
-            });
+        return 1;
+    }
+    return 2;
+};
+exports.detectSerializeVersion = detectSerializeVersion;
+/**
+ * Original serialization method using global `map` and `val` properties
+ * @param data
+ * @returns
+ */
+const serialize = (obj) => {
+    var _a;
+    // Recursively find dates and binary data
+    if (obj === null || typeof obj !== 'object' || obj instanceof Date || obj instanceof ArrayBuffer || obj instanceof path_reference_1.PathReference || obj instanceof RegExp) {
+        // Single value
+        const ser = (0, exports.serialize)({ value: obj });
+        return {
+            map: (_a = ser.map) === null || _a === void 0 ? void 0 : _a.value,
+            val: ser.val.value
         };
-        const mappings = {};
-        process(obj, mappings, '');
-        const serialized = { val: obj };
-        if (Object.keys(mappings).length > 0) {
-            serialized.map = mappings;
+    }
+    obj = (0, utils_1.cloneObject)(obj); // Make sure we don't alter the original object
+    const process = (obj, mappings, prefix) => {
+        if (obj instanceof partial_array_1.PartialArray) {
+            mappings[prefix] = 'array';
         }
-        return serialized;
-    },
-    serialize2(obj) {
-        // Recursively find data that needs serializing
-        const getSerializedValue = (val) => {
+        Object.keys(obj).forEach(key => {
+            const val = obj[key];
+            const path = prefix.length === 0 ? key : `${prefix}/${key}`;
             if (val instanceof Date) {
                 // serialize date to UTC string
-                return {
-                    '.type': 'date',
-                    '.val': val.toISOString()
-                };
+                obj[key] = val.toISOString();
+                mappings[path] = 'date';
             }
             else if (val instanceof ArrayBuffer) {
                 // Serialize binary data with ascii85
-                return {
-                    '.type': 'binary',
-                    '.val': ascii85_1.ascii85.encode(val)
-                };
+                obj[key] = ascii85_1.ascii85.encode(val); //ascii85.encode(Buffer.from(val)).toString();
+                mappings[path] = 'binary';
             }
             else if (val instanceof path_reference_1.PathReference) {
-                return {
-                    '.type': 'reference',
-                    '.val': val.path
-                };
+                obj[key] = val.path;
+                mappings[path] = 'reference';
             }
             else if (val instanceof RegExp) {
                 // Queries using the 'matches' filter with a regular expression can now also be used on remote db's
-                return {
-                    '.type': 'regexp',
-                    '.val': `/${val.source}/${val.flags}` // new: shorter
-                    // '.val': {
-                    //     pattern: val.source,
-                    //     flags: val.flags
-                    // }
-                };
+                obj[key] = { pattern: val.source, flags: val.flags };
+                mappings[path] = 'regexp';
             }
             else if (typeof val === 'object' && val !== null) {
-                if (val instanceof Array) {
-                    const copy = [];
-                    for (let i = 0; i < val.length; i++) {
-                        copy[i] = getSerializedValue(val[i]);
-                    }
-                    return copy;
+                process(val, mappings, path);
+            }
+        });
+    };
+    const mappings = {};
+    process(obj, mappings, '');
+    const serialized = { val: obj };
+    if (Object.keys(mappings).length > 0) {
+        serialized.map = mappings;
+    }
+    return serialized;
+};
+exports.serialize = serialize;
+/**
+ * New serialization method using inline `.type` and `.val` properties
+ * @param obj
+ * @returns
+ */
+const serialize2 = (obj) => {
+    // Recursively find data that needs serializing
+    const getSerializedValue = (val) => {
+        if (val instanceof Date) {
+            // serialize date to UTC string
+            return {
+                '.type': 'date',
+                '.val': val.toISOString()
+            };
+        }
+        else if (val instanceof ArrayBuffer) {
+            // Serialize binary data with ascii85
+            return {
+                '.type': 'binary',
+                '.val': ascii85_1.ascii85.encode(val)
+            };
+        }
+        else if (val instanceof path_reference_1.PathReference) {
+            return {
+                '.type': 'reference',
+                '.val': val.path
+            };
+        }
+        else if (val instanceof RegExp) {
+            // Queries using the 'matches' filter with a regular expression can now also be used on remote db's
+            return {
+                '.type': 'regexp',
+                '.val': `/${val.source}/${val.flags}` // new: shorter
+                // '.val': {
+                //     pattern: val.source,
+                //     flags: val.flags
+                // }
+            };
+        }
+        else if (typeof val === 'object' && val !== null) {
+            if (val instanceof Array) {
+                const copy = [];
+                for (let i = 0; i < val.length; i++) {
+                    copy[i] = getSerializedValue(val[i]);
                 }
-                else {
-                    const copy = {}; //val instanceof Array ? [] : {} as SerializedValueV2;
-                    if (val instanceof partial_array_1.PartialArray) {
-                        // Mark the object as partial ("sparse") array
-                        copy['.type'] = 'array';
-                    }
-                    for (const prop in val) {
-                        copy[prop] = getSerializedValue(val[prop]);
-                    }
-                    return copy;
-                }
+                return copy;
             }
             else {
-                // Primitive value. Don't serialize
-                return val;
-            }
-        };
-        const serialized = getSerializedValue(obj);
-        if (typeof serialized === 'object' && 'val' in serialized && Object.keys(serialized).length === 1) {
-            // acebase-core v1.14.1 made the 'map' property optional.
-            // This v2 serialized object might be confused with a v1 without mappings, because it only has a "val" property
-            // To prevent this, mark the serialized object with version 2
-            serialized['.version'] = 2;
-        }
-        return serialized;
-    },
-    deserialize2(data) {
-        if (typeof data !== 'object' || data === null) {
-            // primitive value, not serialized
-            return data;
-        }
-        switch (data['.type']) {
-            case undefined: {
-                // No type given: this is a plain object or array
-                if (data instanceof Array) {
-                    // Plain array, deserialize items into a copy
-                    const copy = [];
-                    const arr = data;
-                    for (let i = 0; i < arr.length; i++) {
-                        copy.push(exports.Transport.deserialize2(arr[i]));
-                    }
-                    return copy;
+                const copy = {}; //val instanceof Array ? [] : {} as SerializedValueV2;
+                if (val instanceof partial_array_1.PartialArray) {
+                    // Mark the object as partial ("sparse") array
+                    copy['.type'] = 'array';
                 }
-                else {
-                    // Plain object, deserialize properties into a copy
-                    const copy = {};
-                    const obj = data;
-                    for (const prop in obj) {
-                        copy[prop] = exports.Transport.deserialize2(obj[prop]);
-                    }
-                    return copy;
+                for (const prop in val) {
+                    copy[prop] = getSerializedValue(val[prop]);
                 }
-            }
-            case 'array': {
-                // partial ("sparse") array, deserialize children into a copy
-                const copy = {};
-                for (const index in data) {
-                    copy[index] = exports.Transport.deserialize2(data[index]);
-                }
-                delete copy['.type'];
-                return new partial_array_1.PartialArray(copy);
-            }
-            case 'date': {
-                // Date was serialized as a string (UTC)
-                const val = data['.val'];
-                return new Date(val);
-            }
-            case 'binary': {
-                // ascii85 encoded binary data
-                const val = data['.val'];
-                return ascii85_1.ascii85.decode(val);
-            }
-            case 'reference': {
-                const val = data['.val'];
-                return new path_reference_1.PathReference(val);
-            }
-            case 'regexp': {
-                const val = data['.val'];
-                if (typeof val === 'string') {
-                    // serialized as '/(pattern)/flags'
-                    const match = /^\/(.*)\/([a-z]+)$/.exec(val);
-                    return new RegExp(match[1], match[2]);
-                }
-                // serialized as object with pattern & flags properties
-                return new RegExp(val.pattern, val.flags);
+                return copy;
             }
         }
-        throw new Error(`Unknown data type "${data['.type']}" in serialized value`);
+        else {
+            // Primitive value. Don't serialize
+            return val;
+        }
+    };
+    const serialized = getSerializedValue(obj);
+    if (typeof serialized === 'object' && 'val' in serialized && Object.keys(serialized).length === 1) {
+        // acebase-core v1.14.1 made the 'map' property optional.
+        // This v2 serialized object might be confused with a v1 without mappings, because it only has a "val" property
+        // To prevent this, mark the serialized object with version 2
+        serialized['.version'] = 2;
     }
+    return serialized;
 };
+exports.serialize2 = serialize2;
+/**
+ * New deserialization method using inline `.type` and `.val` properties
+ * @param obj
+ * @returns
+ */
+const deserialize2 = (data) => {
+    if (typeof data !== 'object' || data === null) {
+        // primitive value, not serialized
+        return data;
+    }
+    switch (data['.type']) {
+        case undefined: {
+            // No type given: this is a plain object or array
+            if (data instanceof Array) {
+                // Plain array, deserialize items into a copy
+                const copy = [];
+                const arr = data;
+                for (let i = 0; i < arr.length; i++) {
+                    copy.push((0, exports.deserialize2)(arr[i]));
+                }
+                return copy;
+            }
+            else {
+                // Plain object, deserialize properties into a copy
+                const copy = {};
+                const obj = data;
+                for (const prop in obj) {
+                    copy[prop] = (0, exports.deserialize2)(obj[prop]);
+                }
+                return copy;
+            }
+        }
+        case 'array': {
+            // partial ("sparse") array, deserialize children into a copy
+            const copy = {};
+            for (const index in data) {
+                copy[index] = (0, exports.deserialize2)(data[index]);
+            }
+            delete copy['.type'];
+            return new partial_array_1.PartialArray(copy);
+        }
+        case 'date': {
+            // Date was serialized as a string (UTC)
+            const val = data['.val'];
+            return new Date(val);
+        }
+        case 'binary': {
+            // ascii85 encoded binary data
+            const val = data['.val'];
+            return ascii85_1.ascii85.decode(val);
+        }
+        case 'reference': {
+            const val = data['.val'];
+            return new path_reference_1.PathReference(val);
+        }
+        case 'regexp': {
+            const val = data['.val'];
+            if (typeof val === 'string') {
+                // serialized as '/(pattern)/flags'
+                const match = /^\/(.*)\/([a-z]+)$/.exec(val);
+                return new RegExp(match[1], match[2]);
+            }
+            // serialized as object with pattern & flags properties
+            return new RegExp(val.pattern, val.flags);
+        }
+    }
+    throw new Error(`Unknown data type "${data['.type']}" in serialized value`);
+};
+exports.deserialize2 = deserialize2;
 
 },{"./ascii85":21,"./partial-array":33,"./path-info":34,"./path-reference":35,"./utils":44}],43:[function(require,module,exports){
 "use strict";

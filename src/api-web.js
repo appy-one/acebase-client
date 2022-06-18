@@ -1512,7 +1512,8 @@ class WebApi extends Api {
                 return value;
             }, { context: options.context });
         };
-        const rollbackCache = () => {
+        const rollbackCache = async () => {
+            await cachePromise; // Must be ready first before we can rollback to previous value
             return this._cache.db.api.set(cachePath, rollbackValue, { context: options.context });
         };
         const addPendingTransaction = async () => {
@@ -1606,10 +1607,17 @@ class WebApi extends Api {
             return cacheApi.get(cachePath, { include: properties })
             .then(result => {
                 rollbackUpdates = result.value;
+                properties.forEach(prop => {
+                    if (!(prop in rollbackUpdates) && updates[key] !== null) {
+                        // Property being updated doesn't exist in current value, set to null
+                        rollbackUpdates[prop] = null;
+                    }
+                });
                 return cacheApi.update(cachePath, updates, { context: options.context });
             });
         };
-        const rollbackCache = () => {
+        const rollbackCache = async () => {
+            await cachePromise; // Must be ready first before we can rollback to previous value
             return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
         const addPendingTransaction = async () => {

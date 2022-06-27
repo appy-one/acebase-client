@@ -1608,7 +1608,7 @@ class WebApi extends Api {
             .then(result => {
                 rollbackUpdates = result.value;
                 properties.forEach(prop => {
-                    if (!(prop in rollbackUpdates) && updates[key] !== null) {
+                    if (!(prop in rollbackUpdates) && updates[prop] !== null) {
                         // Property being updated doesn't exist in current value, set to null
                         rollbackUpdates[prop] = null;
                     }

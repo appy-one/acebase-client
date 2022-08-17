@@ -1805,10 +1805,22 @@ class WebApi extends Api {
         }
         if (useCache && typeof options.cache_cursor === 'string') {
             // Update cache with mutations from cursor, then load cached value
-            const syncResult = await this.updateCache(path, options.cache_cursor);
+            let syncResult;
+            try {
+                syncResult = await this.updateCache(path, options.cache_cursor);
+            }
+            catch (err) {
+                // Failed to update cache, we might be offline. Proceed with cache value
+            }
             const { value, context } = await getCacheValue(false); // don't throw on null value, it was updated from the server just now
-            context.acebase_cursor = syncResult.new_cursor;
-            context.acebase_origin = 'hybrid';
+            if (syncResult) {
+                context.acebase_cursor = syncResult.new_cursor;
+                context.acebase_origin = 'hybrid';
+            }
+            else {
+                context.acebase_cursor = options.cache_cursor;
+                context.acebase_origin = 'cache';
+            }
             return { value, context, cursor: context.acebase_cursor };
         }
         if (!useCache) {

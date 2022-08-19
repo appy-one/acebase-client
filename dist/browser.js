@@ -3829,7 +3829,8 @@ class WebApi extends Api {
                 return value;
             }, { context: options.context });
         };
-        const rollbackCache = () => {
+        const rollbackCache = async () => {
+            await cachePromise; // Must be ready first before we can rollback to previous value
             return this._cache.db.api.set(cachePath, rollbackValue, { context: options.context });
         };
         const addPendingTransaction = async () => {
@@ -3923,10 +3924,17 @@ class WebApi extends Api {
             return cacheApi.get(cachePath, { include: properties })
             .then(result => {
                 rollbackUpdates = result.value;
+                properties.forEach(prop => {
+                    if (!(prop in rollbackUpdates) && updates[prop] !== null) {
+                        // Property being updated doesn't exist in current value, set to null
+                        rollbackUpdates[prop] = null;
+                    }
+                });
                 return cacheApi.update(cachePath, updates, { context: options.context });
             });
         };
-        const rollbackCache = () => {
+        const rollbackCache = async () => {
+            await cachePromise; // Must be ready first before we can rollback to previous value
             return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
         };
         const addPendingTransaction = async () => {
@@ -4114,10 +4122,22 @@ class WebApi extends Api {
         }
         if (useCache && typeof options.cache_cursor === 'string') {
             // Update cache with mutations from cursor, then load cached value
-            const syncResult = await this.updateCache(path, options.cache_cursor);
+            let syncResult;
+            try {
+                syncResult = await this.updateCache(path, options.cache_cursor);
+            }
+            catch (err) {
+                // Failed to update cache, we might be offline. Proceed with cache value
+            }
             const { value, context } = await getCacheValue(false); // don't throw on null value, it was updated from the server just now
-            context.acebase_cursor = syncResult.new_cursor;
-            context.acebase_origin = 'hybrid';
+            if (syncResult) {
+                context.acebase_cursor = syncResult.new_cursor;
+                context.acebase_origin = 'hybrid';
+            }
+            else {
+                context.acebase_cursor = options.cache_cursor;
+                context.acebase_origin = 'cache';
+            }
             return { value, context, cursor: context.acebase_cursor };
         }
         if (!useCache) {
@@ -5238,7 +5258,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AceBaseBase = exports.AceBaseBaseSettings = void 0;
 /**
    ________________________________________________________________________________
-   
+
       ___          ______
      / _ \         | ___ \
     / /_\ \ ___ ___| |_/ / __ _ ___  ___
@@ -5246,13 +5266,13 @@ exports.AceBaseBase = exports.AceBaseBaseSettings = void 0;
     | | | | (_|  __/ |_/ / (_| \__ \  __/
     \_| |_/\___\___\____/ \__,_|___/\___|
                         realtime database
-                                     
+
    Copyright 2018-2022 by Ewout Stortenbeker (me@appy.one)
    Published under MIT license
 
    See docs at https://github.com/appy-one/acebase
    ________________________________________________________________________________
-  
+
 */
 const simple_event_emitter_1 = require("./simple-event-emitter");
 const data_reference_1 = require("./data-reference");
@@ -5300,7 +5320,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
         }
         // Setup type mapping functionality
         this.types = new type_mappings_1.TypeMappings(this);
-        this.once("ready", () => {
+        this.once('ready', () => {
             // console.log(`database "${dbname}" (${this.constructor.name}) is ready to use`);
             this._ready = true;
         });
@@ -5320,7 +5340,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
             // Wait for ready event
             let resolve;
             const promise = new Promise(res => resolve = res);
-            this.on("ready", () => {
+            this.on('ready', () => {
                 resolve();
                 callback && callback();
             });
@@ -5350,7 +5370,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
      * @returns {DataReference} reference to root node
      */
     get root() {
-        return this.ref("");
+        return this.ref('');
     }
     /**
      * Creates a query on the requested node
@@ -5392,7 +5412,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
              */
             delete: async (filePath) => {
                 return this.api.deleteIndex(filePath);
-            }
+            },
         };
     }
     get schema() {
@@ -5408,7 +5428,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
             },
             check: (path, value, isUpdate) => {
                 return this.api.validateSchema(path, value, isUpdate);
-            }
+            },
         };
     }
 }
@@ -5425,6 +5445,7 @@ class NotImplementedError extends Error {
  * Refactor to type/interface once acebase and acebase-client have been ported to TS
  */
 class Api {
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
     constructor(dbname, settings, readyCallback) { }
     /**
      * Provides statistics
@@ -5464,37 +5485,36 @@ exports.Api = Api;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ascii85 = void 0;
-const c = function (input, length, result) {
-    var i, j, n, b = [0, 0, 0, 0, 0];
-    for (i = 0; i < length; i += 4) {
-        n = ((input[i] * 256 + input[i + 1]) * 256 + input[i + 2]) * 256 + input[i + 3];
+function c(input, length, result) {
+    const b = [0, 0, 0, 0, 0];
+    for (let i = 0; i < length; i += 4) {
+        let n = ((input[i] * 256 + input[i + 1]) * 256 + input[i + 2]) * 256 + input[i + 3];
         if (!n) {
-            result.push("z");
+            result.push('z');
         }
         else {
-            for (j = 0; j < 5; b[j++] = n % 85 + 33, n = Math.floor(n / 85))
+            for (let j = 0; j < 5; b[j++] = n % 85 + 33, n = Math.floor(n / 85))
                 ;
         }
         result.push(String.fromCharCode(b[4], b[3], b[2], b[1], b[0]));
     }
-};
+}
 function encode(arr) {
     // summary: encodes input data in ascii85 string
     // input: ArrayLike
-    var input = arr;
-    var result = [], remainder = input.length % 4, length = input.length - remainder;
+    const input = arr, result = [], remainder = input.length % 4, length = input.length - remainder;
     c(input, length, result);
     if (remainder) {
-        var t = new Uint8Array(4);
+        const t = new Uint8Array(4);
         t.set(input.slice(length), 0);
         c(t, 4, result);
-        var x = result.pop();
-        if (x == "z") {
-            x = "!!!!!";
+        let x = result.pop();
+        if (x == 'z') {
+            x = '!!!!!';
         }
         result.push(x.substr(0, remainder + 1));
     }
-    var ret = result.join(""); // String
+    let ret = result.join(''); // String
     ret = '<~' + ret + '~>';
     return ret;
 }
@@ -5512,18 +5532,19 @@ exports.ascii85 = {
             throw new Error('Invalid input string');
         }
         input = input.substr(2, input.length - 4);
-        var n = input.length, r = [], b = [0, 0, 0, 0, 0], i, j, t, x, y, d;
-        for (i = 0; i < n; ++i) {
-            if (input.charAt(i) == "z") {
+        const n = input.length, r = [], b = [0, 0, 0, 0, 0];
+        let t, x, y, d;
+        for (let i = 0; i < n; ++i) {
+            if (input.charAt(i) == 'z') {
                 r.push(0, 0, 0, 0);
                 continue;
             }
-            for (j = 0; j < 5; ++j) {
+            for (let j = 0; j < 5; ++j) {
                 b[j] = input.charCodeAt(i + j) - 33;
             }
             d = n - i;
             if (d < 5) {
-                for (j = d; j < 4; b[++j] = 0)
+                for (let j = d; j < 4; b[++j] = 0)
                     ;
                 b[d] = 85;
             }
@@ -5533,22 +5554,23 @@ exports.ascii85 = {
             y = t & 255;
             t >>>= 8;
             r.push(t >>> 8, t & 255, y, x);
-            for (j = d; j < 5; ++j, r.pop())
+            for (let j = d; j < 5; ++j, r.pop())
                 ;
             i += 4;
         }
         const data = new Uint8Array(r);
         return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-    }
+    },
 };
 
 },{}],22:[function(require,module,exports){
 "use strict";
+var _a, _b;
 Object.defineProperty(exports, "__esModule", { value: true });
 const pad_1 = require("../pad");
-const env = typeof window === 'object' ? window : self, globalCount = Object.keys(env).length, mimeTypesLength = navigator.mimeTypes ? navigator.mimeTypes.length : 0, clientId = (0, pad_1.default)((mimeTypesLength +
-    navigator.userAgent.length).toString(36) +
-    globalCount.toString(36), 4);
+const env = typeof window === 'object' ? window : self, globalCount = Object.keys(env).length, mimeTypesLength = (_b = (_a = navigator.mimeTypes) === null || _a === void 0 ? void 0 : _a.length) !== null && _b !== void 0 ? _b : 0, clientId = (0, pad_1.default)((mimeTypesLength
+    + navigator.userAgent.length).toString(36)
+    + globalCount.toString(36), 4);
 function fingerprint() {
     return clientId;
 }
@@ -5572,7 +5594,8 @@ exports.default = fingerprint;
 Object.defineProperty(exports, "__esModule", { value: true });
 const fingerprint_1 = require("./fingerprint");
 const pad_1 = require("./pad");
-var c = 0, blockSize = 4, base = 36, discreteValues = Math.pow(base, blockSize);
+let c = 0;
+const blockSize = 4, base = 36, discreteValues = Math.pow(base, blockSize);
 function randomBlock() {
     return (0, pad_1.default)((Math.random() * discreteValues << 0).toString(base), blockSize);
 }
@@ -5584,11 +5607,11 @@ function safeCounter() {
 function cuid(timebias = 0) {
     // Starting with a lowercase letter makes
     // it HTML element ID friendly.
-    var letter = 'c', // hard-coded allows for sequential access
+    const letter = 'c', // hard-coded allows for sequential access
     // timestamp
     // warning: this exposes the exact date and time
     // that the uid was created.
-    // NOTES Ewout: 
+    // NOTES Ewout:
     // - added timebias
     // - at '2059/05/25 19:38:27.456', timestamp will become 1 character larger!
     timestamp = (new Date().getTime() + timebias).toString(base), 
@@ -5609,11 +5632,10 @@ exports.default = cuid;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 function pad(num, size) {
-    var s = '000000000' + num;
+    const s = '000000000' + num;
     return s.substr(s.length - size);
 }
 exports.default = pad;
-;
 
 },{}],25:[function(require,module,exports){
 "use strict";
@@ -5741,7 +5763,7 @@ class LiveDataProxy {
                 await reload();
             }
         });
-        // Setup updating functionality: enqueue all updates, process them at next tick in the order they were issued 
+        // Setup updating functionality: enqueue all updates, process them at next tick in the order they were issued
         let processPromise = Promise.resolve();
         const mutationQueue = [];
         const transactions = [];
@@ -5788,45 +5810,74 @@ class LiveDataProxy {
                 }
                 return mutations;
             }, [])
-                .reduce((updates, m, i, arr) => {
+                .reduce((updates, m) => {
                 // Prepare db updates
                 const target = m.target;
                 if (target.length === 0) {
                     // Overwrite this proxy's root value
-                    updates.push({ ref, value: cache, type: 'set' });
+                    updates.push({ ref, target, value: cache, type: 'set', previous: m.previous });
                 }
                 else {
                     const parentTarget = target.slice(0, -1);
                     const key = target.slice(-1)[0];
                     const parentRef = parentTarget.reduce((ref, key) => ref.child(key), ref);
                     const parentUpdate = updates.find(update => update.ref.path === parentRef.path);
-                    const cacheValue = getTargetValue(cache, target);
+                    const cacheValue = getTargetValue(cache, target); // m.value?
+                    const prevValue = m.previous;
                     if (parentUpdate) {
                         parentUpdate.value[key] = cacheValue;
+                        parentUpdate.previous[key] = prevValue;
                     }
                     else {
-                        updates.push({ ref: parentRef, value: { [key]: cacheValue }, type: 'update' });
+                        updates.push({ ref: parentRef, target: parentTarget, value: { [key]: cacheValue }, type: 'update', previous: { [key]: prevValue } });
                     }
                 }
                 return updates;
             }, [])
-                .reduce(async (promise, update, i, updates) => {
+                .reduce(async (promise, update /*, i, updates */) => {
                 // Execute db update
                 // i === 0 && console.log(`Proxy: processing ${updates.length} db updates to paths:`, updates.map(update => update.ref.path));
                 const context = {
                     acebase_proxy: {
                         id: proxyId,
                         source: update.type,
-                        // update_id: ID.generate(), 
-                        // batch_id: batchId, 
-                        // batch_updates: updates.length 
-                    }
+                        // update_id: ID.generate(),
+                        // batch_id: batchId,
+                        // batch_updates: updates.length
+                    },
                 };
                 await promise;
                 await update.ref
                     .context(context)[update.type](update.value) // .set or .update
                     .catch(err => {
                     clientEventEmitter.emit('error', { source: 'update', message: `Error processing update of "/${ref.path}"`, details: err });
+                    // console.warn(`Proxy could not update DB, should rollback (${update.type}) the proxy value of "${update.ref.path}" to: `, update.previous);
+                    const context = { acebase_proxy: { id: proxyId, source: 'update-rollback' } };
+                    const mutations = [];
+                    if (update.type === 'set') {
+                        setTargetValue(cache, update.target, update.previous);
+                        const mutationSnap = new data_snapshot_1.DataSnapshot(update.ref, update.previous, false, update.value, context);
+                        clientEventEmitter.emit('mutation', { snapshot: mutationSnap, isRemote: false });
+                        mutations.push({ target: update.target, val: update.previous, prev: update.value });
+                    }
+                    else {
+                        // update
+                        Object.keys(update.previous).forEach(key => {
+                            setTargetValue(cache, update.target.concat(key), update.previous[key]);
+                            const mutationSnap = new data_snapshot_1.DataSnapshot(update.ref.child(key), update.previous[key], false, update.value[key], context);
+                            clientEventEmitter.emit('mutation', { snapshot: mutationSnap, isRemote: false });
+                            mutations.push({ target: update.target.concat(key), val: update.previous[key], prev: update.value[key] });
+                        });
+                    }
+                    // Run onMutation callback for each node being rolled back
+                    mutations.forEach(m => {
+                        const mutationRef = m.target.reduce((ref, key) => ref.child(key), ref);
+                        const mutationSnap = new data_snapshot_1.DataSnapshot(mutationRef, m.val, false, m.prev, context);
+                        clientEventEmitter.emit('mutation', { snapshot: mutationSnap, isRemote: false });
+                    });
+                    // Notify local subscribers:
+                    const snap = new data_snapshot_1.MutationsDataSnapshot(update.ref, mutations, context);
+                    localMutationsEmitter.emit('mutations', { origin: 'local', snap });
                 });
                 if (update.ref.cursor) {
                     // Should also be available in context.acebase_cursor now
@@ -5925,7 +5976,7 @@ class LiveDataProxy {
                         keepSubscription = false !== callback(Object.freeze(newValue), Object.freeze(previousValue), !causedByOurProxy, context);
                     }
                     catch (err) {
-                        clientEventEmitter.emit('error', { source: origin === 'remote' ? 'remote_update' : 'local_update', message: `Error running subscription callback`, details: err });
+                        clientEventEmitter.emit('error', { source: origin === 'remote' ? 'remote_update' : 'local_update', message: 'Error running subscription callback', details: err });
                     }
                     if (keepSubscription === false) {
                         stop();
@@ -5951,7 +6002,7 @@ class LiveDataProxy {
                 const subscribe = subscriber => {
                     const currentValue = getTargetValue(cache, target);
                     subscriber.next(currentValue);
-                    const subscription = addOnChangeHandler(target, (value, previous, isRemote, context) => {
+                    const subscription = addOnChangeHandler(target, (value /*, previous, isRemote, context */) => {
                         subscriber.next(value);
                     });
                     return function unsubscribe() {
@@ -6029,9 +6080,9 @@ class LiveDataProxy {
                                     setTargetValue(cache, m.target, m.previous);
                                 }
                             });
-                            // Remove transaction                      
+                            // Remove transaction
                             transactions.splice(transactions.indexOf(tx), 1);
-                        }
+                        },
                     };
                     resolve(tx.transaction);
                 });
@@ -6053,21 +6104,21 @@ class LiveDataProxy {
                 acebase_proxy: {
                     id: proxyId,
                     source: 'default',
-                    // update_id: ID.generate() 
-                }
+                    // update_id: ID.generate()
+                },
             };
             await ref.context(context).set(cache);
         }
         proxy = createProxy({ root: { ref, get cache() { return cache; } }, target: [], id: proxyId, flag: handleFlag });
         const assertProxyAvailable = () => {
             if (proxy === null) {
-                throw new Error(`Proxy was destroyed`);
+                throw new Error('Proxy was destroyed');
             }
         };
         const reload = async () => {
-            // Manually reloads current value when cache is out of sync, which should only 
-            // be able to happen if an AceBaseClient is used without cache database, 
-            // and the connection to the server was lost for a while. In all other cases, 
+            // Manually reloads current value when cache is out of sync, which should only
+            // be able to happen if an AceBaseClient is used without cache database,
+            // and the connection to the server was lost for a while. In all other cases,
             // there should be no need to call this method.
             assertProxyAvailable();
             mutationQueue.splice(0); // Remove pending mutations. Will be empty in production, but might not be while debugging, leading to weird behaviour.
@@ -6098,7 +6149,7 @@ class LiveDataProxy {
                 await processPromise;
                 const promises = [
                     subscription.stop(),
-                    ...clientSubscriptions.map(cs => cs.stop())
+                    ...clientSubscriptions.map(cs => cs.stop()),
                 ];
                 await Promise.all(promises);
                 ['cursor', 'mutation', 'error'].forEach(event => clientEventEmitter.off(event));
@@ -6164,21 +6215,21 @@ class LiveDataProxy {
             },
             off(event, callback) {
                 clientEventEmitter.off(event, callback);
-            }
+            },
         };
     }
 }
 exports.LiveDataProxy = LiveDataProxy;
 function getTargetValue(obj, target) {
     let val = obj;
-    for (let key of target) {
+    for (const key of target) {
         val = typeof val === 'object' && val !== null && key in val ? val[key] : null;
     }
     return val;
 }
 function setTargetValue(obj, target, value) {
     if (target.length === 0) {
-        throw new Error(`Cannot update root target, caller must do that itself!`);
+        throw new Error('Cannot update root target, caller must do that itself!');
     }
     const targetObject = target.slice(0, -1).reduce((obj, key) => obj[key], obj);
     const prop = target.slice(-1)[0];
@@ -6241,7 +6292,7 @@ function createProxy(context) {
             }
             const proxifyChildValue = (prop) => {
                 const value = target[prop]; //
-                let childProxy = childProxies.find(child => child.prop === prop);
+                const childProxy = childProxies.find(child => child.prop === prop);
                 if (childProxy) {
                     if (childProxy.typeof === typeof value) {
                         return childProxy.value;
@@ -6261,7 +6312,7 @@ function createProxy(context) {
                     ? value.getTarget()
                     : value;
             };
-            // If the property contains a simple value, return it. 
+            // If the property contains a simple value, return it.
             if (['string', 'number', 'boolean'].includes(typeof value)
                 || value instanceof Date
                 || value instanceof path_reference_1.PathReference
@@ -6289,7 +6340,7 @@ function createProxy(context) {
                 if (prop === 'getTarget') {
                     // Get unproxied readonly (but still live) version of data.
                     return function (warn = true) {
-                        warn && console.warn(`Use getTarget with caution - any changes will not be synchronized!`);
+                        warn && console.warn('Use getTarget with caution - any changes will not be synchronized!');
                         return target;
                     };
                 }
@@ -6315,7 +6366,7 @@ function createProxy(context) {
                 if (['values', 'entries', 'keys'].includes(prop)) {
                     return function* generator() {
                         const keys = Object.keys(target);
-                        for (let key of keys) {
+                        for (const key of keys) {
                             if (prop === 'keys') {
                                 yield key;
                             }
@@ -6372,7 +6423,7 @@ function createProxy(context) {
                     // Removes target from object collection
                     return function remove() {
                         if (context.target.length === 0) {
-                            throw new Error(`Can't remove proxy root value`);
+                            throw new Error('Can\'t remove proxy root value');
                         }
                         const parent = getTargetValue(context.root.cache, context.target.slice(0, -1));
                         const key = context.target.slice(-1)[0];
@@ -6464,7 +6515,7 @@ function createProxy(context) {
                                 return callback(proxifyChildValue(i), i, proxy); // , value
                             });
                             if (prop === 'find' && value) {
-                                let index = target.indexOf(value);
+                                const index = target.indexOf(value);
                                 value = proxifyChildValue(index); //, value
                             }
                             return value;
@@ -6589,7 +6640,7 @@ function createProxy(context) {
         getPrototypeOf(target) {
             target = getTargetValue(context.root.cache, context.target);
             return Reflect.getPrototypeOf(target);
-        }
+        },
     };
     const proxy = new Proxy({}, handler);
     return proxy;
@@ -6610,7 +6661,7 @@ function removeVoidProperties(obj) {
 }
 function proxyAccess(proxiedValue) {
     if (typeof proxiedValue !== 'object' || !proxiedValue[isProxy]) {
-        throw new Error(`Given value is not proxied. Make sure you are referencing the value through the live data proxy.`);
+        throw new Error('Given value is not proxied. Make sure you are referencing the value through the live data proxy.');
     }
     return proxiedValue;
 }
@@ -6627,13 +6678,13 @@ class OrderedCollectionProxy {
         this.orderProperty = orderProperty;
         this.orderIncrement = orderIncrement;
         if (typeof collection !== 'object' || !collection[isProxy]) {
-            throw new Error(`Collection is not proxied`);
+            throw new Error('Collection is not proxied');
         }
         if (collection.valueOf() instanceof Array) {
-            throw new Error(`Collection is an array, not an object collection`);
+            throw new Error('Collection is an array, not an object collection');
         }
         if (!Object.keys(collection).every(key => typeof collection[key] === 'object')) {
-            throw new Error(`Collection has non-object children`);
+            throw new Error('Collection has non-object children');
         }
         // Check if the collection has order properties. If not, assign them now
         const ok = Object.keys(collection).every(key => typeof collection[key][orderProperty] === 'number');
@@ -6661,7 +6712,7 @@ class OrderedCollectionProxy {
     getArrayObservable() {
         const Observable = (0, optional_observable_1.getObservable)();
         return new Observable(subscriber => {
-            const subscription = this.getObservable().subscribe(value => {
+            const subscription = this.getObservable().subscribe(( /*value*/) => {
                 const newArray = this.getArray();
                 subscriber.next(newArray);
             });
@@ -6687,7 +6738,7 @@ class OrderedCollectionProxy {
         return arr;
     }
     add(item, index, from) {
-        let arr = this.getArray();
+        const arr = this.getArray();
         let minOrder = Number.POSITIVE_INFINITY, maxOrder = Number.NEGATIVE_INFINITY;
         for (let i = 0; i < arr.length; i++) {
             const order = arr[i][this.orderProperty];
@@ -6699,7 +6750,7 @@ class OrderedCollectionProxy {
             // Moving existing item
             fromKey = Object.keys(this.collection).find(key => this.collection[key] === item);
             if (!fromKey) {
-                throw new Error(`item not found in collection`);
+                throw new Error('item not found in collection');
             }
             if (from === index) {
                 return { key: fromKey, index };
@@ -6760,7 +6811,7 @@ class OrderedCollectionProxy {
         }
         const key = Object.keys(this.collection).find(key => this.collection[key] === item);
         if (!key) {
-            throw new Error(`Cannot find target object to delete`);
+            throw new Error('Cannot find target object to delete');
         }
         this.collection[key] = null; // Deletes it from db
         return { key, index };
@@ -6808,16 +6859,16 @@ class DataRetrievalOptions {
             options = {};
         }
         if (typeof options.include !== 'undefined' && !(options.include instanceof Array)) {
-            throw new TypeError(`options.include must be an array`);
+            throw new TypeError('options.include must be an array');
         }
         if (typeof options.exclude !== 'undefined' && !(options.exclude instanceof Array)) {
-            throw new TypeError(`options.exclude must be an array`);
+            throw new TypeError('options.exclude must be an array');
         }
         if (typeof options.child_objects !== 'undefined' && typeof options.child_objects !== 'boolean') {
-            throw new TypeError(`options.child_objects must be a boolean`);
+            throw new TypeError('options.child_objects must be a boolean');
         }
         if (typeof options.cache_mode === 'string' && !['allow', 'bypass', 'force'].includes(options.cache_mode)) {
-            throw new TypeError(`invalid value for options.cache_mode`);
+            throw new TypeError('invalid value for options.cache_mode');
         }
         this.include = options.include || undefined;
         this.exclude = options.exclude || undefined;
@@ -6838,25 +6889,25 @@ class QueryDataRetrievalOptions extends DataRetrievalOptions {
     constructor(options) {
         super(options);
         if (!['undefined', 'boolean'].includes(typeof options.snapshots)) {
-            throw new TypeError(`options.snapshots must be a boolean`);
+            throw new TypeError('options.snapshots must be a boolean');
         }
         this.snapshots = typeof options.snapshots === 'boolean' ? options.snapshots : true;
     }
 }
 exports.QueryDataRetrievalOptions = QueryDataRetrievalOptions;
-const _private = Symbol("private");
+const _private = Symbol('private');
 class DataReference {
     /**
      * Creates a reference to a node
      */
     constructor(db, path, vars) {
         if (!path) {
-            path = "";
+            path = '';
         }
-        path = path.replace(/^\/|\/$/g, ""); // Trim slashes
+        path = path.replace(/^\/|\/$/g, ''); // Trim slashes
         const pathInfo = path_info_1.PathInfo.get(path);
         const key = pathInfo.key; //path.length === 0 ? "" : path.substr(path.lastIndexOf("/") + 1); //path.match(/(?:^|\/)([a-z0-9_$]+)$/i)[1];
-        // const query = { 
+        // const query = {
         //     filters: [],
         //     skip: 0,
         //     take: 0,
@@ -6870,7 +6921,7 @@ class DataReference {
             vars: vars || {},
             context: {},
             pushed: false,
-            cursor: null
+            cursor: null,
         };
         this.db = db; //Object.defineProperty(this, "db", ...)
     }
@@ -6888,7 +6939,7 @@ class DataReference {
             return this;
         }
         else if (typeof context === 'undefined') {
-            console.warn(`Use snap.context() instead of snap.ref.context() to get updating context in event callbacks`);
+            console.warn('Use snap.context() instead of snap.ref.context() to get updating context in event callbacks');
             return currentContext;
         }
         else {
@@ -6919,7 +6970,7 @@ class DataReference {
      * Returns a new reference to this node's parent
      */
     get parent() {
-        let currentPath = path_info_1.PathInfo.fillVariables2(this.path, this.vars);
+        const currentPath = path_info_1.PathInfo.fillVariables2(this.path, this.vars);
         const info = path_info_1.PathInfo.get(currentPath);
         if (info.parentPath === null) {
             return null;
@@ -6939,7 +6990,7 @@ class DataReference {
      * @returns reference to the child
      */
     child(childPath) {
-        childPath = typeof childPath === 'number' ? childPath : childPath.replace(/^\/|\/$/g, "");
+        childPath = typeof childPath === 'number' ? childPath : childPath.replace(/^\/|\/$/g, '');
         const currentPath = path_info_1.PathInfo.fillVariables2(this.path, this.vars);
         const targetPath = path_info_1.PathInfo.getChildPath(currentPath, childPath);
         return new DataReference(this.db, targetPath).context(this[_private].context); //  `${this.path}/${childPath}`
@@ -6956,7 +7007,7 @@ class DataReference {
                 throw new Error(`Cannot set the value of wildcard path "/${this.path}"`);
             }
             if (this.parent === null) {
-                throw new Error(`Cannot set the root object. Use update, or set individual child properties`);
+                throw new Error('Cannot set the root object. Use update, or set individual child properties');
             }
             if (typeof value === 'undefined') {
                 throw new TypeError(`Cannot store undefined value in "/${this.path}"`);
@@ -6972,7 +7023,7 @@ class DataReference {
                     onComplete(null, this);
                 }
                 catch (err) {
-                    console.error(`Error in onComplete callback:`, err);
+                    console.error('Error in onComplete callback:', err);
                 }
             }
         }
@@ -6982,7 +7033,7 @@ class DataReference {
                     onComplete(err, this);
                 }
                 catch (err) {
-                    console.error(`Error in onComplete callback:`, err);
+                    console.error('Error in onComplete callback:', err);
                 }
             }
             else {
@@ -7006,7 +7057,7 @@ class DataReference {
             if (!this.db.isReady) {
                 await this.db.ready();
             }
-            if (typeof updates !== "object" || updates instanceof Array || updates instanceof ArrayBuffer || updates instanceof Date) {
+            if (typeof updates !== 'object' || updates instanceof Array || updates instanceof ArrayBuffer || updates instanceof Date) {
                 await this.set(updates);
             }
             else if (Object.keys(updates).length === 0) {
@@ -7022,7 +7073,7 @@ class DataReference {
                     onComplete(null, this);
                 }
                 catch (err) {
-                    console.error(`Error in onComplete callback:`, err);
+                    console.error('Error in onComplete callback:', err);
                 }
             }
         }
@@ -7032,7 +7083,7 @@ class DataReference {
                     onComplete(err, this);
                 }
                 catch (err) {
-                    console.error(`Error in onComplete callback:`, err);
+                    console.error('Error in onComplete callback:', err);
                 }
             }
             else {
@@ -7056,7 +7107,7 @@ class DataReference {
             await this.db.ready();
         }
         let throwError;
-        let cb = (currentValue) => {
+        const cb = (currentValue) => {
             currentValue = this.db.types.deserialize(this.path, currentValue);
             const snap = new data_snapshot_1.DataSnapshot(this, currentValue);
             let newValue;
@@ -7105,7 +7156,7 @@ class DataReference {
     on(event, callback, cancelCallback) {
         if (this.path === '' && ['value', 'child_changed'].includes(event)) {
             // Removed 'notify_value' and 'notify_child_changed' events from the list, they do not require additional data loading anymore.
-            console.warn(`WARNING: Listening for value and child_changed events on the root node is a bad practice. These events require loading of all data (value event), or potentially lots of data (child_changed event) each time they are fired`);
+            console.warn('WARNING: Listening for value and child_changed events on the root node is a bad practice. These events require loading of all data (value event), or potentially lots of data (child_changed event) each time they are fired');
         }
         let eventPublisher = null;
         const eventStream = new subscription_1.EventStream(publisher => { eventPublisher = publisher; });
@@ -7120,7 +7171,7 @@ class DataReference {
                     this.db.debug.error(`Error getting data for event ${event} on path "${path}"`, err);
                     return;
                 }
-                let ref = this.db.ref(path);
+                const ref = this.db.ref(path);
                 ref[_private].vars = path_info_1.PathInfo.extractVariables(this.path, path);
                 let callbackObject;
                 if (event.startsWith('notify_')) {
@@ -7130,7 +7181,7 @@ class DataReference {
                 else {
                     const values = {
                         previous: this.db.types.deserialize(path, oldValue),
-                        current: this.db.types.deserialize(path, newValue)
+                        current: this.db.types.deserialize(path, newValue),
                     };
                     if (event === 'child_removed') {
                         callbackObject = new data_snapshot_1.DataSnapshot(ref, values.previous, true, values.previous, eventContext);
@@ -7147,11 +7198,11 @@ class DataReference {
                 if (eventContext === null || eventContext === void 0 ? void 0 : eventContext.acebase_cursor) {
                     this.cursor = eventContext.acebase_cursor;
                 }
-            }
+            },
         };
         this[_private].callbacks.push(cb);
         const subscribe = () => {
-            // (NEW) Add callback to event stream 
+            // (NEW) Add callback to event stream
             // ref.on('value', callback) is now exactly the same as ref.on('value').subscribe(callback)
             if (typeof callback === 'function') {
                 eventStream.subscribe(callback, (activated, cancelReason) => {
@@ -7172,16 +7223,16 @@ class DataReference {
             const cancelSubscription = (err) => {
                 // Access denied?
                 // Cancel subscription
-                let callbacks = this[_private].callbacks;
+                const callbacks = this[_private].callbacks;
                 callbacks.splice(callbacks.indexOf(cb), 1);
                 this.db.api.unsubscribe(this.path, event, cb.ourCallback);
                 // Call cancelCallbacks
                 this.db.debug.error(`Subscription "${event}" on path "/${this.path}" canceled because of an error: ${err.message}`);
                 eventPublisher.cancel(err.message);
             };
-            let authorized = this.db.api.subscribe(this.path, event, cb.ourCallback, { newOnly: advancedOptions.newOnly, cancelCallback: cancelSubscription, syncFallback: advancedOptions.syncFallback });
+            const authorized = this.db.api.subscribe(this.path, event, cb.ourCallback, { newOnly: advancedOptions.newOnly, cancelCallback: cancelSubscription, syncFallback: advancedOptions.syncFallback });
             const allSubscriptionsStoppedCallback = () => {
-                let callbacks = this[_private].callbacks;
+                const callbacks = this[_private].callbacks;
                 callbacks.splice(callbacks.indexOf(cb), 1);
                 return this.db.api.unsubscribe(this.path, event, cb.ourCallback);
             };
@@ -7203,32 +7254,32 @@ class DataReference {
                 // it will fire events for current values right now.
                 // Otherwise, it expects the .subscribe methode to be used, which will then
                 // only be called for future events
-                if (event === "value") {
+                if (event === 'value') {
                     this.get(snap => {
                         eventPublisher.publish(snap);
                         // typeof callback === 'function' && callback(snap);
                     });
                 }
-                else if (event === "child_added") {
+                else if (event === 'child_added') {
                     this.get(snap => {
                         const val = snap.val();
-                        if (val === null || typeof val !== "object") {
+                        if (val === null || typeof val !== 'object') {
                             return;
                         }
                         Object.keys(val).forEach(key => {
-                            let childSnap = new data_snapshot_1.DataSnapshot(this.child(key), val[key]);
+                            const childSnap = new data_snapshot_1.DataSnapshot(this.child(key), val[key]);
                             eventPublisher.publish(childSnap);
                             // typeof callback === 'function' && callback(childSnap);
                         });
                     });
                 }
-                else if (event === "notify_child_added") {
-                    // Use the reflect API to get current children. 
+                else if (event === 'notify_child_added') {
+                    // Use the reflect API to get current children.
                     // NOTE: This does not work with AceBaseServer <= v0.9.7, only when signed in as admin
-                    const step = 100;
-                    let limit = step, skip = 0;
+                    const step = 100, limit = step;
+                    let skip = 0;
                     const more = () => {
-                        this.db.api.reflect(this.path, "children", { limit, skip })
+                        this.db.api.reflect(this.path, 'children', { limit, skip })
                             .then(children => {
                             children.list.forEach(child => {
                                 const childRef = this.child(child.key);
@@ -7257,6 +7308,7 @@ class DataReference {
      * Unsubscribes from a previously added event
      * @param event Name of the event
      * @param callback callback function to remove
+     * @returns returns this `DataReference` instance
      */
     off(event, callback) {
         const subscriptions = this[_private].callbacks;
@@ -7293,7 +7345,7 @@ class DataReference {
             const isNewApiResult = ('context' in result && 'value' in result);
             if (!isNewApiResult) {
                 // acebase-core version package was updated but acebase or acebase-client package was not? Warn, but don't throw an error.
-                console.warn(`AceBase api.get method returned an old response value. Update your acebase or acebase-client package`);
+                console.warn('AceBase api.get method returned an old response value. Update your acebase or acebase-client package');
                 result = { value: result, context: {} };
             }
             const value = this.db.types.deserialize(this.path, result.value);
@@ -7305,7 +7357,7 @@ class DataReference {
         });
         if (callback) {
             promise.then(callback).catch(err => {
-                console.error(`Uncaught error:`, err);
+                console.error('Uncaught error:', err);
             });
             return;
         }
@@ -7320,11 +7372,11 @@ class DataReference {
      * @returns returns promise that resolves with a snapshot of the data
      */
     once(event, options) {
-        if (event === "value" && !this.isWildcardPath) {
+        if (event === 'value' && !this.isWildcardPath) {
             // Shortcut, do not start listening for future events
             return this.get(options);
         }
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
             const callback = (snap) => {
                 this.off(event, callback); // unsubscribe directly
                 resolve(snap);
@@ -7349,7 +7401,7 @@ class DataReference {
         const ref = this.child(id);
         ref[_private].pushed = true;
         if (typeof value !== 'undefined') {
-            return ref.set(value, onComplete).then(res => ref);
+            return ref.set(value, onComplete).then(() => ref);
         }
         else {
             return ref;
@@ -7363,7 +7415,7 @@ class DataReference {
             throw new Error(`Cannot remove wildcard path "/${this.path}". Use query().remove instead`);
         }
         if (this.parent === null) {
-            throw new Error(`Cannot remove the root node`);
+            throw new Error('Cannot remove the root node');
         }
         return this.set(null);
     }
@@ -7387,7 +7439,7 @@ class DataReference {
         return new DataReferenceQuery(this);
     }
     async count() {
-        const info = await this.reflect("info", { child_count: true });
+        const info = await this.reflect('info', { child_count: true });
         return info.children.count;
     }
     async reflect(type, args) {
@@ -7420,13 +7472,13 @@ class DataReference {
     proxy(options) {
         const isOptionsArg = typeof options === 'object' && (typeof options.cursor !== 'undefined' || typeof options.defaultValue !== 'undefined');
         if (typeof options !== 'undefined' && !isOptionsArg) {
-            this.db.debug.warn(`Warning: live data proxy is being initialized with a deprecated method signature. Use ref.proxy(options) instead of ref.proxy(defaultValue)`);
+            this.db.debug.warn('Warning: live data proxy is being initialized with a deprecated method signature. Use ref.proxy(options) instead of ref.proxy(defaultValue)');
             options = { defaultValue: options };
         }
         return data_proxy_1.LiveDataProxy.create(this, options);
     }
     observe(options) {
-        // options should not be used yet - we can't prevent/filter mutation events on excluded paths atm 
+        // options should not be used yet - we can't prevent/filter mutation events on excluded paths atm
         if (options) {
             throw new Error('observe does not support data retrieval options yet');
         }
@@ -7456,7 +7508,7 @@ class DataReference {
                 while (trailKeys.length > 1) {
                     const key = trailKeys.shift();
                     if (!(key in target)) {
-                        // Happens if initial loaded data did not include / excluded this data, 
+                        // Happens if initial loaded data did not include / excluded this data,
                         // or we missed out on an event
                         target[key] = typeof trailKeys[0] === 'number' ? [] : {};
                     }
@@ -7490,14 +7542,14 @@ class DataReference {
             options = callbackOrOptions;
         }
         if (typeof callback !== 'function') {
-            throw new TypeError(`No callback function given`);
+            throw new TypeError('No callback function given');
         }
         // Get all children through reflection. This could be tweaked further using paging
         const info = await this.reflect('children', { limit: 0, skip: 0 }); // Gets ALL child keys
         const summary = {
             canceled: false,
             total: info.list.length,
-            processed: 0
+            processed: 0,
         };
         // Iterate through all children until callback returns false
         for (let i = 0; i < info.list.length; i++) {
@@ -7541,7 +7593,7 @@ class DataReferenceQuery {
             skip: 0,
             take: 0,
             order: [],
-            events: {}
+            events: {},
         };
     }
     /**
@@ -7553,22 +7605,23 @@ class DataReferenceQuery {
      * @param compare value to compare with
      */
     filter(key, op, compare) {
-        if ((op === "in" || op === "!in") && (!(compare instanceof Array) || compare.length === 0)) {
+        if ((op === 'in' || op === '!in') && (!(compare instanceof Array) || compare.length === 0)) {
             throw new Error(`${op} filter for ${key} must supply an Array compare argument containing at least 1 value`);
         }
-        if ((op === "between" || op === "!between") && (!(compare instanceof Array) || compare.length !== 2)) {
+        if ((op === 'between' || op === '!between') && (!(compare instanceof Array) || compare.length !== 2)) {
             throw new Error(`${op} filter for ${key} must supply an Array compare argument containing 2 values`);
         }
-        if ((op === "matches" || op === "!matches") && !(compare instanceof RegExp)) {
+        if ((op === 'matches' || op === '!matches') && !(compare instanceof RegExp)) {
             throw new Error(`${op} filter for ${key} must supply a RegExp compare argument`);
         }
         // DISABLED 2019/10/23 because it is not fully implemented only works locally
         // if (op === "custom" && typeof compare !== "function") {
         //     throw `${op} filter for ${key} must supply a Function compare argument`;
         // }
-        if ((op === "contains" || op === "!contains") && ((typeof compare === 'object' && !(compare instanceof Array) && !(compare instanceof Date)) || (compare instanceof Array && compare.length === 0))) {
-            throw new Error(`${op} filter for ${key} must supply a simple value or (non-zero length) array compare argument`);
-        }
+        // DISABLED 2022/08/15, implemented by query.ts in acebase
+        // if ((op === 'contains' || op === '!contains') && ((typeof compare === 'object' && !(compare instanceof Array) && !(compare instanceof Date)) || (compare instanceof Array && compare.length === 0))) {
+        //     throw new Error(`${op} filter for ${key} must supply a simple value or (non-zero length) array compare argument`);
+        // }
         this[_private].filters.push({ key, op, compare });
         return this;
     }
@@ -7597,7 +7650,7 @@ class DataReferenceQuery {
      */
     sort(key, ascending = true) {
         if (!['string', 'number'].includes(typeof key)) {
-            throw `key must be a string or number`;
+            throw 'key must be a string or number';
         }
         this[_private].order.push({ key, ascending });
         return this;
@@ -7669,12 +7722,13 @@ class DataReferenceQuery {
             throw new Error(err);
         })
             .then(res => {
-            let { results, context, stop } = res;
+            const { stop } = res;
+            let { results, context } = res;
             this.stop = async () => {
                 await stop();
             };
             if (!('results' in res && 'context' in res)) {
-                console.warn(`Query results missing context. Update your acebase and/or acebase-client packages`);
+                console.warn('Query results missing context. Update your acebase and/or acebase-client packages');
                 results = res, context = {};
             }
             if (options.snapshots) {
@@ -7800,14 +7854,14 @@ class DataReferenceQuery {
             options = callbackOrOptions;
         }
         if (typeof callback !== 'function') {
-            throw new TypeError(`No callback function given`);
+            throw new TypeError('No callback function given');
         }
         // Get all query results. This could be tweaked further using paging
         const refs = await this.getRefs();
         const summary = {
             canceled: false,
             total: refs.length,
-            processed: 0
+            processed: 0,
         };
         // Iterate through all children until callback returns false
         for (let i = 0; i < refs.length; i++) {
@@ -7876,7 +7930,7 @@ function getChildren(snapshot) {
     if (!snapshot.exists()) {
         return [];
     }
-    let value = snapshot.val();
+    const value = snapshot.val();
     if (value instanceof Array) {
         return new Array(value.length).map((v, i) => i);
     }
@@ -7901,10 +7955,7 @@ class DataSnapshot {
         };
         this.context = () => { return context || {}; };
     }
-    val() { }
-    previous() { }
     exists() { return false; }
-    context() { }
     /**
      * Creates a DataSnapshot instance (for internal AceBase usage only)
      */
@@ -7918,8 +7969,8 @@ class DataSnapshot {
      */
     child(path) {
         // Create new snapshot for child data
-        let val = getChild(this, path, false);
-        let prev = getChild(this, path, true);
+        const val = getChild(this, path, false);
+        const prev = getChild(this, path, true);
         return new DataSnapshot(this.ref.child(path), val, false, prev);
     }
     /**
@@ -7952,7 +8003,7 @@ class DataSnapshot {
     forEach(callback) {
         const value = this.val();
         const prev = this.previous();
-        return getChildren(this).every((key, i) => {
+        return getChildren(this).every((key) => {
             const snap = new DataSnapshot(this.ref.child(key), value[key], false, prev[key]);
             return callback(snap);
         });
@@ -7964,13 +8015,12 @@ class DataSnapshot {
 }
 exports.DataSnapshot = DataSnapshot;
 class MutationsDataSnapshot extends DataSnapshot {
-    val(warn = true) { return []; }
-    previous() { throw new Error('Iterate values to get previous values for each mutation'); }
     constructor(ref, mutations, context) {
         super(ref, mutations, false, undefined, context);
+        this.previous = () => { throw new Error('Iterate values to get previous values for each mutation'); };
         this.val = (warn = true) => {
             if (warn) {
-                console.warn(`Unless you know what you are doing, it is best not to use the value of a mutations snapshot directly. Use child methods and forEach to iterate the mutations instead`);
+                console.warn('Unless you know what you are doing, it is best not to use the value of a mutations snapshot directly. Use child methods and forEach to iterate the mutations instead');
             }
             return mutations;
         };
@@ -7995,7 +8045,7 @@ class MutationsDataSnapshot extends DataSnapshot {
      */
     child(index) {
         if (typeof index !== 'number') {
-            throw new Error(`child index must be a number`);
+            throw new Error('child index must be a number');
         }
         const mutation = this.val()[index];
         const ref = mutation.target.reduce((ref, key) => ref.child(key), this.ref);
@@ -8009,18 +8059,20 @@ exports.MutationsDataSnapshot = MutationsDataSnapshot;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DebugLogger = void 0;
 const process_1 = require("./process");
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+const noop = () => { };
 class DebugLogger {
-    constructor(level = "log", prefix = '') {
+    constructor(level = 'log', prefix = '') {
         this.prefix = prefix;
         this.setLevel(level);
     }
     setLevel(level) {
         const prefix = this.prefix ? this.prefix + ' %s' : '';
         this.level = level;
-        this.verbose = ["verbose"].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : () => { };
-        this.log = ["verbose", "log"].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : () => { };
-        this.warn = ["verbose", "log", "warn"].includes(level) ? prefix ? console.warn.bind(console, prefix) : console.warn.bind(console) : () => { };
-        this.error = ["verbose", "log", "warn", "error"].includes(level) ? prefix ? console.error.bind(console, prefix) : console.error.bind(console) : () => { };
+        this.verbose = ['verbose'].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : noop;
+        this.log = ['verbose', 'log'].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : noop;
+        this.warn = ['verbose', 'log', 'warn'].includes(level) ? prefix ? console.warn.bind(console, prefix) : console.warn.bind(console) : noop;
+        this.error = ['verbose', 'log', 'warn', 'error'].includes(level) ? prefix ? console.error.bind(console, prefix) : console.error.bind(console) : noop;
         this.write = (text) => {
             const isRunKit = typeof process_1.default !== 'undefined' && process_1.default.env && typeof process_1.default.env.RUNKIT_ENDPOINT_PATH === 'string';
             if (text && isRunKit) {
@@ -8139,6 +8191,7 @@ function getObservable() {
         return _observable;
     }
     try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const { Observable } = require('rxjs'); // fails in ESM module, need an elegant way to handle this. Can't use dynamic import() because it 1) requires Node 12+ and 2) causes Webpack build to fail if rxjs is not installed
         if (!Observable) {
             throw new Error('not loaded');
@@ -8147,13 +8200,13 @@ function getObservable() {
         return Observable;
     }
     catch (err) {
-        throw new Error(`RxJS Observable could not be loaded. If you are using a browser build, add it to AceBase using db.setObservable. For node.js builds, add it to your project with: npm i rxjs`);
+        throw new Error('RxJS Observable could not be loaded. If you are using a browser build, add it to AceBase using db.setObservable. For node.js builds, add it to your project with: npm i rxjs');
     }
 }
 exports.getObservable = getObservable;
 function setObservable(Observable) {
     if (Observable === 'shim') {
-        console.warn(`Using AceBase's simple Observable shim. Only use this if you know what you're doing.`);
+        console.warn('Using AceBase\'s simple Observable shim. Only use this if you know what you\'re doing.');
         Observable = ObservableShim;
     }
     _observable = Observable;
@@ -8179,7 +8232,7 @@ class ObservableShim {
                         s(value);
                     }
                     catch (err) {
-                        console.error(`Error in subscriber callback:`, err);
+                        console.error('Error in subscriber callback:', err);
                     }
                 });
             };
@@ -8196,7 +8249,7 @@ class ObservableShim {
             }
         };
         const subscription = {
-            unsubscribe
+            unsubscribe,
         };
         return subscription;
     }
@@ -8235,7 +8288,7 @@ function getPathKeys(path) {
     if (path.length === 0) {
         return [];
     }
-    let keys = path.split('/');
+    const keys = path.split('/');
     return keys.map(key => {
         return key.startsWith('[') ? parseInt(key.slice(1, -1)) : key;
     });
@@ -8243,7 +8296,6 @@ function getPathKeys(path) {
 class PathInfo {
     constructor(path) {
         if (typeof path === 'string') {
-            // this.path = path.replace(/^\/+/, '').replace(/\/+$/, '');
             this.keys = getPathKeys(path);
         }
         else if (path instanceof Array) {
@@ -8262,7 +8314,7 @@ class PathInfo {
         return getPathKeys(path);
     }
     get key() {
-        return this.keys.length === 0 ? null : this.keys.slice(-1)[0]; // getPathInfo(this.path).key;
+        return this.keys.length === 0 ? null : this.keys.slice(-1)[0];
     }
     get parent() {
         if (this.keys.length == 0) {
@@ -8272,7 +8324,7 @@ class PathInfo {
         return new PathInfo(parentKeys);
     }
     get parentPath() {
-        return this.keys.length === 0 ? null : this.parent.path; //getPathInfo(this.path).parent;
+        return this.keys.length === 0 ? null : this.parent.path;
     }
     child(childKey) {
         if (typeof childKey === 'string') {
@@ -8284,7 +8336,7 @@ class PathInfo {
         return this.child(childKey).path;
     }
     get pathKeys() {
-        return this.keys; //getPathKeys(this.path);
+        return this.keys;
     }
     /**
      * If varPath contains variables or wildcards, it will return them with the values found in fullPath
@@ -8325,7 +8377,7 @@ class PathInfo {
         const pathKeys = getPathKeys(fullPath);
         let count = 0;
         const variables = {
-            get length() { return count; }
+            get length() { return count; },
         };
         keys.forEach((key, index) => {
             const pathKey = pathKeys[index];
@@ -8356,7 +8408,7 @@ class PathInfo {
         }
         const keys = getPathKeys(varPath);
         const pathKeys = getPathKeys(fullPath);
-        let merged = keys.map((key, index) => {
+        const merged = keys.map((key, index) => {
             if (key === pathKeys[index] || index >= pathKeys.length) {
                 return key;
             }
@@ -8390,7 +8442,7 @@ class PathInfo {
         if (typeof vars !== 'object' || Object.keys(vars).length === 0) {
             return varPath; // Nothing to fill
         }
-        let pathKeys = getPathKeys(varPath);
+        const pathKeys = getPathKeys(varPath);
         let n = 0;
         const targetPath = pathKeys.reduce((path, key) => {
             if (typeof key === 'string' && (key === '*' || key.startsWith('$'))) {
@@ -8416,8 +8468,8 @@ class PathInfo {
         return this.keys.every((key, index) => {
             const otherKey = other.keys[index];
             return otherKey === key
-                || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
-                || (typeof key === 'string' && (key === "*" || key[0] === '$'));
+                || (typeof otherKey === 'string' && (otherKey === '*' || otherKey[0] === '$'))
+                || (typeof key === 'string' && (key === '*' || key[0] === '$'));
         });
     }
     /**
@@ -8437,8 +8489,8 @@ class PathInfo {
         return this.keys.every((key, index) => {
             const otherKey = descendant.keys[index];
             return otherKey === key
-                || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
-                || (typeof key === 'string' && (key === "*" || key[0] === '$'));
+                || (typeof otherKey === 'string' && (otherKey === '*' || otherKey[0] === '$'))
+                || (typeof key === 'string' && (key === '*' || key[0] === '$'));
         });
     }
     /**
@@ -8458,8 +8510,8 @@ class PathInfo {
         return ancestor.keys.every((key, index) => {
             const otherKey = this.keys[index];
             return otherKey === key
-                || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
-                || (typeof key === 'string' && (key === "*" || key[0] === '$'));
+                || (typeof otherKey === 'string' && (otherKey === '*' || otherKey[0] === '$'))
+                || (typeof key === 'string' && (key === '*' || key[0] === '$'));
         });
     }
     /**
@@ -8480,8 +8532,8 @@ class PathInfo {
             }
             const otherKey = other.keys[index];
             return otherKey === key
-                || (typeof otherKey === 'string' && (otherKey === "*" || otherKey[0] === '$'))
-                || (typeof key === 'string' && (key === "*" || key[0] === '$'));
+                || (typeof otherKey === 'string' && (otherKey === '*' || otherKey[0] === '$'))
+                || (typeof key === 'string' && (key === '*' || key[0] === '$'));
         });
     }
     /**
@@ -8526,16 +8578,17 @@ exports.PathReference = PathReference;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = {
+    // eslint-disable-next-line @typescript-eslint/ban-types
     nextTick(fn) {
         setTimeout(fn, 0);
-    }
+    },
 };
 
 },{}],37:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SchemaDefinition = void 0;
-// parses a typestring, creates checker functions 
+// parses a typestring, creates checker functions
 function parse(definition) {
     // tokenize
     let pos = 0;
@@ -8553,7 +8606,8 @@ function parse(definition) {
     }
     function readProperty() {
         consumeSpaces();
-        let prop = { name: '', optional: false, wildcard: false }, c;
+        const prop = { name: '', optional: false, wildcard: false };
+        let c;
         while (c = definition[pos], c === '_' || c === '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (prop.name.length > 0 && c >= '0' && c <= '9') || (prop.name.length === 0 && c === '*')) {
             prop.name += c;
             pos++;
@@ -8588,7 +8642,7 @@ function parse(definition) {
                 consumeCharacter('*');
                 type.typeOf = 'any';
             }
-            else if ([`'`, `"`, '`'].includes(definition[pos])) {
+            else if (['\'', '"', '`'].includes(definition[pos])) {
                 // Read string value
                 type.typeOf = 'string';
                 type.value = '';
@@ -8611,7 +8665,7 @@ function parse(definition) {
                 type.value = nr.includes('.') ? parseFloat(nr) : parseInt(nr);
             }
             else if (definition[pos] === '{') {
-                // Read object (interface) definition 
+                // Read object (interface) definition
                 consumeCharacter('{');
                 type.typeOf = 'object';
                 type.instanceOf = Object;
@@ -8756,7 +8810,7 @@ function checkType(path, type, value, partial, trailKeys) {
         return ok;
     }
     if (trailKeys instanceof Array && trailKeys.length > 0) {
-        // The value to check resides in a descendant path of given type definition. 
+        // The value to check resides in a descendant path of given type definition.
         // Recursivly check child type definitions to find a match
         if (type.typeOf !== 'object') {
             return { ok: false, reason: `path "${path}" must be typeof ${type.typeOf}` }; // given value resides in a child path, but parent is not allowed be an object.
@@ -8809,13 +8863,14 @@ function checkType(path, type, value, partial, trailKeys) {
     }
     return ok;
 }
+// eslint-disable-next-line @typescript-eslint/ban-types
 function getConstructorType(val) {
     switch (val) {
         case String: return 'string';
         case Number: return 'number';
         case Boolean: return 'boolean';
         case Date: return 'Date';
-        case Array: throw new Error(`Schema error: Array cannot be used without a type. Use string[] or Array<string> instead`);
+        case Array: throw new Error('Schema error: Array cannot be used without a type. Use string[] or Array<string> instead');
         default: throw new Error(`Schema error: unknown type used: ${val.name}`);
     }
 }
@@ -8863,7 +8918,7 @@ class SchemaDefinition {
             this.text = definition;
         }
         else {
-            throw new Error(`Type definiton must be a string or an object`);
+            throw new Error('Type definiton must be a string or an object');
         }
         this.type = parse(this.text);
     }
@@ -8893,7 +8948,7 @@ class SimpleCache {
         }
         options.cloneValues = options.cloneValues !== false;
         if (typeof options.expirySeconds !== 'number' && typeof options.maxEntries !== 'number') {
-            throw new Error(`Either expirySeconds or maxEntries must be specified`);
+            throw new Error('Either expirySeconds or maxEntries must be specified');
         }
         this.options = options;
         this.cache = new Map();
@@ -8926,7 +8981,7 @@ class SimpleCache {
             // Remove an expired item or the one that was accessed longest ago
             let oldest = null;
             const now = Date.now();
-            for (let [key, entry] of this.cache.entries()) {
+            for (const [key, entry] of this.cache.entries()) {
                 if (entry.expires <= now) {
                     // Found an expired item. Remove it now and stop
                     this.cache.delete(key);
@@ -8970,7 +9025,7 @@ const FontCode = {
     underline: 4,
     inverse: 7,
     hidden: 8,
-    strikethrough: 94
+    strikethrough: 94,
 };
 const ColorCode = {
     black: 30,
@@ -9009,7 +9064,7 @@ const ResetCode = {
     underline: 24,
     inverse: 27,
     hidden: 28,
-    strikethrough: 29
+    strikethrough: 29,
 };
 var ColorStyle;
 (function (ColorStyle) {
@@ -9120,7 +9175,7 @@ function runCallback(callback, data) {
         callback(data);
     }
     catch (err) {
-        console.error(`Error in subscription callback`, err);
+        console.error('Error in subscription callback', err);
     }
 }
 class SimpleEventEmitter {
@@ -9141,7 +9196,7 @@ class SimpleEventEmitter {
     }
     once(event, callback) {
         let resolve;
-        let promise = new Promise(rs => {
+        const promise = new Promise(rs => {
             if (!callback) {
                 // No callback used, promise only
                 resolve = rs;
@@ -9175,7 +9230,7 @@ class SimpleEventEmitter {
                 s.callback(data);
             }
             catch (err) {
-                console.error(`Error in subscription callback`, err);
+                console.error('Error in subscription callback', err);
             }
             if (s.once) {
                 this._subscriptions.splice(i, 1);
@@ -9210,7 +9265,7 @@ class EventSubscription {
         this.stop = stop;
         this._internal = {
             state: 'init',
-            activatePromises: []
+            activatePromises: [],
         };
     }
     /**
@@ -9229,7 +9284,7 @@ class EventSubscription {
             }
         }
         // Changed behaviour: now also returns a Promise when the callback is used.
-        // This allows for 1 activated call to both handle: first activation result, 
+        // This allows for 1 activated call to both handle: first activation result,
         // and any future events using the callback
         return new Promise((resolve, reject) => {
             if (this._internal.state === 'active') {
@@ -9238,9 +9293,11 @@ class EventSubscription {
             else if (this._internal.state === 'canceled' && !callback) {
                 return reject(new Error(this._internal.cancelReason));
             }
+            // eslint-disable-next-line @typescript-eslint/no-empty-function
+            const noop = () => { };
             this._internal.activatePromises.push({
                 resolve,
-                reject: callback ? () => { } : reject // Don't reject when callback is used: let callback handle this (prevents UnhandledPromiseRejection if only callback is used)
+                reject: callback ? noop : reject, // Don't reject when callback is used: let callback handle this (prevents UnhandledPromiseRejection if only callback is used)
             });
         });
     }
@@ -9286,11 +9343,11 @@ class EventStream {
         let activationState;
         const _stoppedState = 'stopped (no more subscribers)';
         this.subscribe = (callback, activationCallback) => {
-            if (typeof callback !== "function") {
-                throw new TypeError("callback must be a function");
+            if (typeof callback !== 'function') {
+                throw new TypeError('callback must be a function');
             }
             else if (activationState === _stoppedState) {
-                throw new Error("stream can't be used anymore because all subscribers were stopped");
+                throw new Error('stream can\'t be used anymore because all subscribers were stopped');
             }
             const sub = {
                 callback,
@@ -9301,7 +9358,7 @@ class EventStream {
                 subscription: new EventSubscription(function stop() {
                     subscribers.splice(subscribers.indexOf(this), 1);
                     return checkActiveSubscribers();
-                })
+                }),
             };
             subscribers.push(sub);
             if (typeof activationState !== 'undefined') {
@@ -9395,7 +9452,7 @@ const path_info_1 = require("./path-info");
 const partial_array_1 = require("./partial-array");
 /*
     There are now 2 different serialization methods for transporting values.
- 
+
     v1:
     The original version (v1) created an object with "map" and "val" properties.
     The "map" property was made optional in v1.14.1 so they won't be present for values needing no serializing
@@ -9414,7 +9471,7 @@ const partial_array_1 = require("./partial-array");
     v1 serialized: { "map": "date", "val": "2022-04-22T07:49:23Z" }
     v2 serialized: { ".type": "date", ".val": "2022-04-22T07:49:23Z" }
     comment: top level value that need serializing is wrapped in an object with ".type" and ".val". v1 is smaller in this case
-    
+
     original: 'some string'
     v1 serialized: { "map": {}, "val": "some string" }
     v2 serialized: "some string"
@@ -9432,7 +9489,7 @@ const partial_array_1 = require("./partial-array");
 const deserialize = (data) => {
     if (data.map === null || typeof data.map === 'undefined') {
         if (typeof data.val === 'undefined') {
-            throw new Error(`serialized value must have a val property`);
+            throw new Error('serialized value must have a val property');
         }
         return data.val;
     }
@@ -9453,6 +9510,9 @@ const deserialize = (data) => {
         }
         else if (type === 'array') {
             return new partial_array_1.PartialArray(val);
+        }
+        else if (type === 'bigint') {
+            return BigInt(val);
         }
         return val;
     };
@@ -9512,7 +9572,7 @@ const serialize = (obj) => {
         const ser = (0, exports.serialize)({ value: obj });
         return {
             map: (_a = ser.map) === null || _a === void 0 ? void 0 : _a.value,
-            val: ser.val.value
+            val: ser.val.value,
         };
     }
     obj = (0, utils_1.cloneObject)(obj); // Make sure we don't alter the original object
@@ -9523,7 +9583,11 @@ const serialize = (obj) => {
         Object.keys(obj).forEach(key => {
             const val = obj[key];
             const path = prefix.length === 0 ? key : `${prefix}/${key}`;
-            if (val instanceof Date) {
+            if (typeof val === 'bigint') {
+                obj[key] = val.toString();
+                mappings[path] = 'bigint';
+            }
+            else if (val instanceof Date) {
                 // serialize date to UTC string
                 obj[key] = val.toISOString();
                 mappings[path] = 'date';
@@ -9564,31 +9628,38 @@ exports.serialize = serialize;
 const serialize2 = (obj) => {
     // Recursively find data that needs serializing
     const getSerializedValue = (val) => {
+        if (typeof val === 'bigint') {
+            // serialize bigint to string
+            return {
+                '.type': 'bigint',
+                '.val': val.toString(),
+            };
+        }
         if (val instanceof Date) {
             // serialize date to UTC string
             return {
                 '.type': 'date',
-                '.val': val.toISOString()
+                '.val': val.toISOString(),
             };
         }
         else if (val instanceof ArrayBuffer) {
             // Serialize binary data with ascii85
             return {
                 '.type': 'binary',
-                '.val': ascii85_1.ascii85.encode(val)
+                '.val': ascii85_1.ascii85.encode(val),
             };
         }
         else if (val instanceof path_reference_1.PathReference) {
             return {
                 '.type': 'reference',
-                '.val': val.path
+                '.val': val.path,
             };
         }
         else if (val instanceof RegExp) {
             // Queries using the 'matches' filter with a regular expression can now also be used on remote db's
             return {
                 '.type': 'regexp',
-                '.val': `/${val.source}/${val.flags}` // new: shorter
+                '.val': `/${val.source}/${val.flags}`, // new: shorter
                 // '.val': {
                 //     pattern: val.source,
                 //     flags: val.flags
@@ -9661,6 +9732,10 @@ const deserialize2 = (data) => {
                 }
                 return copy;
             }
+        }
+        case 'bigint': {
+            const val = data['.val'];
+            return BigInt(val);
         }
         case 'array': {
             // partial ("sparse") array, deserialize children into a copy
@@ -9868,7 +9943,7 @@ function process(db, mappings, path, obj, action) {
         };
         process(path, obj, mTrailKeys);
     });
-    if (action === "serialize") {
+    if (action === 'serialize') {
         // Clone this serialized object so any types that remained
         // will become plain objects without functions, and we can restore
         // the original object's values if any mappings were processed.
@@ -9883,7 +9958,7 @@ function process(db, mappings, path, obj, action) {
     }
     return obj;
 }
-const _mappings = Symbol("mappings");
+const _mappings = Symbol('mappings');
 class TypeMappings {
     /**
      *
@@ -9912,11 +9987,11 @@ class TypeMappings {
     bind(path, type, options = {}) {
         // Maps objects that are stored in a specific path to a constructor method,
         // so they are automatically deserialized
-        if (typeof path !== "string") {
-            throw new TypeError("path must be a string");
+        if (typeof path !== 'string') {
+            throw new TypeError('path must be a string');
         }
-        if (typeof type !== "function") {
-            throw new TypeError("constructor must be a function");
+        if (typeof type !== 'function') {
+            throw new TypeError('constructor must be a function');
         }
         if (typeof options.serializer === 'undefined') {
             // if (typeof type.prototype.serialize === 'function') {
@@ -9953,7 +10028,7 @@ class TypeMappings {
         else if (typeof options.creator !== 'function') {
             throw new TypeError(`creator for class ${type.name} must be a function, or the name of a static method`);
         }
-        path = path.replace(/^\/|\/$/g, ""); // trim slashes
+        path = path.replace(/^\/|\/$/g, ''); // trim slashes
         this[_mappings][path] = {
             db: this.db,
             type,
@@ -9978,7 +10053,7 @@ class TypeMappings {
                     obj = obj.serialize(ref, obj);
                 }
                 return obj;
-            }
+            },
         };
     }
     /**
@@ -9987,7 +10062,7 @@ class TypeMappings {
      * @param {object} obj | object to serialize
      */
     serialize(path, obj) {
-        return process(this.db, this[_mappings], path, obj, "serialize");
+        return process(this.db, this[_mappings], path, obj, 'serialize');
     }
     /**
      * Deserialzes any child in given object that has a type mapping
@@ -9995,7 +10070,7 @@ class TypeMappings {
      * @param {object} obj | object to deserialize
      */
     deserialize(path, obj) {
-        return process(this.db, this[_mappings], path, obj, "deserialize");
+        return process(this.db, this[_mappings], path, obj, 'deserialize');
     }
 }
 exports.TypeMappings = TypeMappings;
@@ -10004,7 +10079,7 @@ exports.TypeMappings = TypeMappings;
 (function (Buffer){(function (){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.defer = exports.getChildValues = exports.getMutations = exports.compareValues = exports.ObjectDifferences = exports.valuesAreEqual = exports.cloneObject = exports.concatTypedArrays = exports.decodeString = exports.encodeString = exports.bytesToNumber = exports.numberToBytes = void 0;
+exports.defer = exports.getChildValues = exports.getMutations = exports.compareValues = exports.ObjectDifferences = exports.valuesAreEqual = exports.cloneObject = exports.concatTypedArrays = exports.decodeString = exports.encodeString = exports.bytesToBigint = exports.bigintToBytes = exports.bytesToNumber = exports.numberToBytes = void 0;
 const path_reference_1 = require("./path-reference");
 const process_1 = require("./process");
 const partial_array_1 = require("./partial-array");
@@ -10016,13 +10091,8 @@ function numberToBytes(number) {
 }
 exports.numberToBytes = numberToBytes;
 function bytesToNumber(bytes) {
-    //if (bytes.length !== 8) { throw "passed value must contain 8 bytes"; }
-    if (bytes.length < 8) {
-        throw new TypeError("must be 8 bytes");
-        // // Pad with zeroes
-        // let padding = new Uint8Array(8 - bytes.length);
-        // for(let i = 0; i < padding.length; i++) { padding[i] = 0; }
-        // bytes = concatTypedArrays(bytes, padding);
+    if (bytes.length !== 8) {
+        throw new TypeError('must be 8 bytes');
     }
     const bin = new Uint8Array(bytes);
     const view = new DataView(bin.buffer);
@@ -10030,6 +10100,44 @@ function bytesToNumber(bytes) {
     return nr;
 }
 exports.bytesToNumber = bytesToNumber;
+const big = {
+    zero: BigInt(0),
+    one: BigInt(1),
+    two: BigInt(2),
+    eight: BigInt(8),
+    ff: BigInt(0xff),
+};
+function bigintToBytes(number) {
+    if (typeof number !== 'bigint') {
+        throw new Error('number must be a bigint');
+    }
+    const bytes = [];
+    const negative = number < big.zero;
+    while (number !== (negative ? -big.one : big.zero)) {
+        const byte = Number(number & big.ff);
+        bytes.push(byte);
+        number = number >> big.eight;
+    }
+    return bytes.reverse();
+}
+exports.bigintToBytes = bigintToBytes;
+function bytesToBigint(bytes) {
+    const negative = bytes[0] >= 128;
+    let number = big.zero;
+    if (negative) {
+        bytes[0] -= 128;
+    }
+    for (const b of bytes) {
+        number = (number << big.eight) + BigInt(b);
+    }
+    if (negative) {
+        // Invert the bits
+        const bits = (BigInt(bytes.length) * big.eight) - big.one;
+        number = -(big.two ** bits) + number;
+    }
+    return number;
+}
+exports.bytesToBigint = bytesToBigint;
 /**
  * Converts a string to a utf-8 encoded Uint8Array
  */
@@ -10046,7 +10154,7 @@ function encodeString(str) {
     }
     else {
         // Older browsers. Manually encode
-        let arr = [];
+        const arr = [];
         for (let i = 0; i < str.length; i++) {
             let code = str.charCodeAt(i);
             if (code > 128) {
@@ -10119,7 +10227,7 @@ function decodeString(buffer) {
             buffer = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength); // Convert typed array to node.js Buffer
         }
         if (!(buffer instanceof Buffer)) {
-            throw new Error(`Unsupported buffer argument`);
+            throw new Error('Unsupported buffer argument');
         }
         return buffer.toString('utf-8');
     }
@@ -10154,7 +10262,7 @@ function decodeString(buffer) {
                         i++;
                     }
                     else {
-                        throw new Error(`invalid utf-8 data`);
+                        throw new Error('invalid utf-8 data');
                     }
                 }
                 if (code >= 65536) {
@@ -10172,7 +10280,7 @@ function decodeString(buffer) {
             return str;
         }
         else {
-            throw new Error(`Unsupported buffer argument`);
+            throw new Error('Unsupported buffer argument');
         }
     }
 }
@@ -10200,18 +10308,18 @@ function cloneObject(original, stack) {
         return obj;
     };
     original = checkAndFixTypedArray(original);
-    if (typeof original !== "object" || original === null || original instanceof Date || original instanceof ArrayBuffer || original instanceof path_reference_1.PathReference || original instanceof RegExp) {
+    if (typeof original !== 'object' || original === null || original instanceof Date || original instanceof ArrayBuffer || original instanceof path_reference_1.PathReference || original instanceof RegExp) {
         return original;
     }
     const cloneValue = (val) => {
         if (stack.indexOf(val) >= 0) {
-            throw new ReferenceError(`object contains a circular reference`);
+            throw new ReferenceError('object contains a circular reference');
         }
         val = checkAndFixTypedArray(val);
         if (val === null || val instanceof Date || val instanceof ArrayBuffer || val instanceof path_reference_1.PathReference || val instanceof RegExp) { // || val instanceof ID
             return val;
         }
-        else if (typeof val === "object") {
+        else if (typeof val === 'object') {
             stack.push(val);
             val = cloneObject(val, stack);
             stack.pop();
@@ -10221,13 +10329,13 @@ function cloneObject(original, stack) {
             return val; // Anything other can just be copied
         }
     };
-    if (typeof stack === "undefined") {
+    if (typeof stack === 'undefined') {
         stack = [original];
     }
     const clone = original instanceof Array ? [] : original instanceof partial_array_1.PartialArray ? new partial_array_1.PartialArray() : {};
     Object.keys(original).forEach(key => {
-        let val = original[key];
-        if (typeof val === "function") {
+        const val = original[key];
+        if (typeof val === 'function') {
             return; // skip functions
         }
         clone[key] = cloneValue(val);
@@ -10236,6 +10344,7 @@ function cloneObject(original, stack) {
 }
 exports.cloneObject = cloneObject;
 const isTypedArray = val => typeof val === 'object' && ['ArrayBuffer', 'Buffer', 'Uint8Array', 'Uint16Array', 'Uint32Array', 'Int8Array', 'Int16Array', 'Int32Array'].includes(val.constructor.name);
+// CONSIDER: updating isTypedArray to: const isTypedArray = val => typeof val === 'object' && 'buffer' in val && 'byteOffset' in val && 'byteLength' in val;
 function valuesAreEqual(val1, val2) {
     if (val1 === val2) {
         return true;
@@ -10277,47 +10386,47 @@ class ObjectDifferences {
     }
     forChild(key) {
         if (this.added.includes(key)) {
-            return "added";
+            return 'added';
         }
         if (this.removed.includes(key)) {
-            return "removed";
+            return 'removed';
         }
         const changed = this.changed.find(ch => ch.key === key);
-        return changed ? changed.change : "identical";
+        return changed ? changed.change : 'identical';
     }
 }
 exports.ObjectDifferences = ObjectDifferences;
 function compareValues(oldVal, newVal, sortedResults = false) {
     const voids = [undefined, null];
     if (oldVal === newVal) {
-        return "identical";
+        return 'identical';
     }
     else if (voids.indexOf(oldVal) >= 0 && voids.indexOf(newVal) < 0) {
-        return "added";
+        return 'added';
     }
     else if (voids.indexOf(oldVal) < 0 && voids.indexOf(newVal) >= 0) {
-        return "removed";
+        return 'removed';
     }
     else if (typeof oldVal !== typeof newVal) {
-        return "changed";
+        return 'changed';
     }
     else if (isTypedArray(oldVal) || isTypedArray(newVal)) {
         // One or both values are typed arrays.
         if (!isTypedArray(oldVal) || !isTypedArray(newVal)) {
-            return "changed";
+            return 'changed';
         }
         // Both are typed. Compare lengths and byte content of typed arrays
         const typed1 = oldVal instanceof Uint8Array ? oldVal : oldVal instanceof ArrayBuffer ? new Uint8Array(oldVal) : new Uint8Array(oldVal.buffer, oldVal.byteOffset, oldVal.byteLength);
         const typed2 = newVal instanceof Uint8Array ? newVal : newVal instanceof ArrayBuffer ? new Uint8Array(newVal) : new Uint8Array(newVal.buffer, newVal.byteOffset, newVal.byteLength);
-        return typed1.byteLength === typed2.byteLength && typed1.every((val, i) => typed2[i] === val) ? "identical" : "changed";
+        return typed1.byteLength === typed2.byteLength && typed1.every((val, i) => typed2[i] === val) ? 'identical' : 'changed';
     }
     else if (oldVal instanceof Date || newVal instanceof Date) {
-        return oldVal instanceof Date && newVal instanceof Date && oldVal.getTime() === newVal.getTime() ? "identical" : "changed";
+        return oldVal instanceof Date && newVal instanceof Date && oldVal.getTime() === newVal.getTime() ? 'identical' : 'changed';
     }
     else if (oldVal instanceof path_reference_1.PathReference || newVal instanceof path_reference_1.PathReference) {
-        return oldVal instanceof path_reference_1.PathReference && newVal instanceof path_reference_1.PathReference && oldVal.path === newVal.path ? "identical" : "changed";
+        return oldVal instanceof path_reference_1.PathReference && newVal instanceof path_reference_1.PathReference && oldVal.path === newVal.path ? 'identical' : 'changed';
     }
-    else if (typeof oldVal === "object") {
+    else if (typeof oldVal === 'object') {
         // Do key-by-key comparison of objects
         const isArray = oldVal instanceof Array;
         const getKeys = obj => {
@@ -10336,20 +10445,20 @@ function compareValues(oldVal, newVal, sortedResults = false) {
                 const val1 = oldVal[key];
                 const val2 = newVal[key];
                 const c = compareValues(val1, val2);
-                if (c !== "identical") {
+                if (c !== 'identical') {
                     changed.push({ key, change: c });
                 }
             }
             return changed;
         }, []);
         if (addedKeys.length === 0 && removedKeys.length === 0 && changedKeys.length === 0) {
-            return "identical";
+            return 'identical';
         }
         else {
             return new ObjectDifferences(addedKeys, removedKeys, sortedResults ? changedKeys.sort((a, b) => a.key < b.key ? -1 : 1) : changedKeys);
         }
     }
-    return "changed";
+    return 'changed';
 }
 exports.compareValues = compareValues;
 function getMutations(oldVal, newVal, sortedResults = false) {

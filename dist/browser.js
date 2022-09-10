@@ -5495,8 +5495,8 @@ function c(input, length, result) {
         else {
             for (let j = 0; j < 5; b[j++] = n % 85 + 33, n = Math.floor(n / 85))
                 ;
+            result.push(String.fromCharCode(b[4], b[3], b[2], b[1], b[0]));
         }
-        result.push(String.fromCharCode(b[4], b[3], b[2], b[1], b[0]));
     }
 }
 function encode(arr) {
@@ -9195,27 +9195,18 @@ class SimpleEventEmitter {
         return this;
     }
     once(event, callback) {
-        let resolve;
-        const promise = new Promise(rs => {
-            if (!callback) {
-                // No callback used, promise only
-                resolve = rs;
+        return new Promise(resolve => {
+            const ourCallback = (data) => {
+                resolve(data);
+                callback === null || callback === void 0 ? void 0 : callback(data);
+            };
+            if (this._oneTimeEvents.has(event)) {
+                runCallback(ourCallback, this._oneTimeEvents.get(event));
             }
             else {
-                // Callback used, maybe also returned promise
-                resolve = (data) => {
-                    rs(data); // resolve promise
-                    callback(data); // trigger callback
-                };
+                this._subscriptions.push({ event, callback: ourCallback, once: true });
             }
         });
-        if (this._oneTimeEvents.has(event)) {
-            runCallback(resolve, this._oneTimeEvents.get(event));
-        }
-        else {
-            this._subscriptions.push({ event, callback: resolve, once: true });
-        }
-        return promise;
     }
     emit(event, data) {
         if (this._oneTimeEvents.has(event)) {
@@ -9226,12 +9217,7 @@ class SimpleEventEmitter {
             if (s.event !== event) {
                 continue;
             }
-            try {
-                s.callback(data);
-            }
-            catch (err) {
-                console.error('Error in subscription callback', err);
-            }
+            runCallback(s.callback, data);
             if (s.once) {
                 this._subscriptions.splice(i, 1);
                 i--;
@@ -9635,7 +9621,7 @@ const serialize2 = (obj) => {
                 '.val': val.toString(),
             };
         }
-        if (val instanceof Date) {
+        else if (val instanceof Date) {
             // serialize date to UTC string
             return {
                 '.type': 'date',
@@ -9692,7 +9678,7 @@ const serialize2 = (obj) => {
         }
     };
     const serialized = getSerializedValue(obj);
-    if (typeof serialized === 'object' && 'val' in serialized && Object.keys(serialized).length === 1) {
+    if (serialized !== null && typeof serialized === 'object' && 'val' in serialized && Object.keys(serialized).length === 1) {
         // acebase-core v1.14.1 made the 'map' property optional.
         // This v2 serialized object might be confused with a v1 without mappings, because it only has a "val" property
         // To prevent this, mark the serialized object with version 2

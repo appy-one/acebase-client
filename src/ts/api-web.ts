@@ -357,7 +357,7 @@ export class WebApi extends Api {
                 transports, // Override default setting of ['polling', 'websocket']
             });
 
-            socket.on('connect_error', err => {
+            socket.on('connect_error', (err: any) => {
                 // New connection failed to establish. Attempts will be made to reconnect, but fail for now
                 this.debug.error(`Websocket connection error: ${err}`);
                 this.eventCallback('connect_error', err);
@@ -442,7 +442,7 @@ export class WebApi extends Api {
                 resolve(); // Resolve the .connect() promise
             });
 
-            socket.on('disconnect', reason => {
+            socket.on('disconnect', (reason: string) => {
                 this.debug.warn(`Websocket disconnected: ${reason}`);
                 // Existing connection was broken, by us or network
                 if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
@@ -465,7 +465,7 @@ export class WebApi extends Api {
                 this.eventCallback('disconnect');
             });
 
-            socket.on('data-event', data => {
+            socket.on('data-event', (data: { event: string; path: string; subscr_path: string; val: any; context: any; }) => {
                 const val = Transport.deserialize(data.val);
                 const context = data.context || {};
                 context.acebase_event_source = 'server';
@@ -586,7 +586,7 @@ export class WebApi extends Api {
                 });
             });
 
-            socket.on('query-event', data => {
+            socket.on('query-event', (data: any) => {
                 data = Transport.deserialize(data);
                 const query = this._realtimeQueries[data.query_id];
                 let keepMonitoring = true;

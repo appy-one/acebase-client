@@ -17,7 +17,7 @@
     "lint:fix": "eslint . --fix",
     "build": "npm run build:clean && tsc && npm run browserify",
     "build:clean": "rm -fr dist/*",
-    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js",
+    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js && cp src/browser.html dist",
     "test": "echo \"Error: no test specified\" && exit 1",
     "npmfix": "npm i --package-lock-only"
   },

@@ -4,17 +4,20 @@
   "description": "Client to connect to an AceBase realtime database server",
   "main": "./dist/cjs/index.js",
   "browser": {
-    "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
-    "./src/request/index.js": "./src/request/browser.js",
-    "./src/performance/index.js": "./src/performance/browser.js",
-    "./src/base64/index.js": "./src/base64/browser.js"
+    "socket.io-client": "socket.io-client/dist/socket.io.min.js",
+    "./dist/cjs/request/index.js": "./dist/cjs/request/browser.js",
+    "./dist/cjs/performance/index.js": "./dist/cjs/performance/browser.js",
+    "./dist/cjs/base64/index.js": "./dist/cjs/base64/browser.js"
   },
   "types": "./index.d.ts",
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {
-    "build": "tsc && npm run browserify",
-    "browserify": "browserify src/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "build": "npm run build:clean && tsc && npm run browserify",
+    "build:clean": "rm -fr dist/*",
+    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "npmfix": "npm i --package-lock-only"
   },

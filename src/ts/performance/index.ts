@@ -1,2 +1,2 @@
-const { performance } = require('perf_hooks');
-module.exports = performance;
+import { performance } from 'perf_hooks';
+export default performance;

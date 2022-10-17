@@ -1,12 +1,12 @@
-const { ID } = require('acebase-core');
-const performance = require('./performance');
+import { ID } from 'acebase-core';
+import performance from './performance';
 
-let time = {
+const time = {
     serverBias: 0,
     localBias: 0,
     lastTime: Date.now(),
     lastPerf: performance.now(),
-    get bias() { return this.serverBias + this.localBias; }
+    get bias() { return this.serverBias + this.localBias; },
 };
 
 function biasChanged() {
@@ -39,7 +39,7 @@ function scheduleLocalTimeCheck() {
 }
 scheduleLocalTimeCheck();
 
-function setServerBias(bias) {
+export function setServerBias(bias: number) {
     if (typeof bias === 'number') {
         time.serverBias = bias;
         time.localBias = 0;
@@ -47,11 +47,9 @@ function setServerBias(bias) {
     }
 }
 
-class ServerDate extends Date {
+export class ServerDate extends Date {
     constructor() {
         const biasedTime = Date.now() + time.bias;
         super(biasedTime);
     }
 }
-
-module.exports = { ServerDate, setServerBias };

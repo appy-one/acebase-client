@@ -1,1 +1,1 @@
-module.exports = performance;
+export default performance;

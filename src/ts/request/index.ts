@@ -1,14 +1,24 @@
-const http = require('http');
-const https = require('https');
-const URL = require('url').URL;
-const { AceBaseRequestError } = require('./error');
+import * as http from 'http';
+import * as https from 'https';
+import { URL } from 'url';
+import { AceBaseRequestError } from './error';
 
 /**
- * @returns {Promise<{ context: any, data: any }>} returns a promise that resolves with an object containing data and an optionally returned context
+ * @returns returns a promise that resolves with an object containing data and an optionally returned context
  */
-function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, dataRequestCallback: null, context: null }) {
-    return new Promise(async (resolve, reject) => {
-        let endpoint = new URL(url); // URL.parse(url);
+export default function request(
+    method: 'GET'|'POST'|'PUT'|'DELETE',
+    url: string,
+    options: {
+        accessToken?: string | null;
+        data?: any;
+        dataReceivedCallback?: ((chunk: any) => void) | null;
+        dataRequestCallback?: ((bytes: number) => Promise<any> | any) | null;
+        context?: any;
+    } = { accessToken: null, data: null, dataReceivedCallback: null, dataRequestCallback: null, context: null },
+) {
+    return new Promise<{ context: any, data: any }>(async (resolve, reject) => {
+        const endpoint = new URL(url); // URL.parse(url);
 
         let postData = options.data;
         if (typeof postData === 'undefined' || postData === null) {
@@ -24,8 +34,9 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
             port: endpoint.port,
             path: endpoint.pathname + endpoint.search, //endpoint.path,
             headers: {
-                'AceBase-Context': JSON.stringify(options.context || null)
-            }
+                'AceBase-Context': JSON.stringify(options.context || null),
+            } as Record<string, string | number>,
+            body: undefined as any,
         };
         if (method !== 'GET') {
             if (typeof options.dataRequestCallback !== 'function') {
@@ -38,7 +49,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
         }
         const client = request.protocol === 'https:' ? https : http;
         const req = client.request(request, res => {
-            res.setEncoding("utf8");
+            res.setEncoding('utf8');
             let data = '';
             if (typeof options.dataReceivedCallback === 'function') {
                 res.on('data', options.dataReceivedCallback);
@@ -49,8 +60,9 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
             res.on('end', () => {
                 const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
                 if (res.statusCode === 200) {
-                    let context = res.headers['acebase-context']; // lowercase header names only
-                    if (context && context[0] === '{') { context = JSON.parse(context); }
+                    const contextHeader = res.headers['acebase-context'] as string; // lowercase header names only
+                    let context: Record<string, any>;
+                    if (contextHeader && contextHeader[0] === '{') { context = JSON.parse(contextHeader); }
                     else { context = {}; }
                     if (isJSON) { data = JSON.parse(data); }
                     resolve({ context, data });
@@ -61,11 +73,11 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
                         statusCode: res.statusCode,
                         statusMessage: res.statusMessage,
                         headers: res.headers,
-                        body: data
+                        body: data,
                     };
                     let code = res.statusCode, message = res.statusMessage;
                     if (isJSON) {
-                        let err = JSON.parse(data);
+                        const err = JSON.parse(data);
                         if (err.code) { code = err.code; }
                         if (err.message) { message = err.message; }
                     }
@@ -75,7 +87,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
         });
 
         req.on('error', (err) => {
-            reject(new AceBaseRequestError(request, null, err.code || err.name, err.message));
+            reject(new AceBaseRequestError(request, null, (err as any).code || err.name, err.message));
         });
 
         if (typeof options.dataRequestCallback === 'function') {
@@ -83,7 +95,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
             const chunkSize = req.writableHighWaterMark || 1024 * 16;
             let chunk;
             while (![null,''].includes(chunk = await options.dataRequestCallback(chunkSize))) {
-                let ok = req.write(chunk);
+                const ok = req.write(chunk);
                 if (!ok) { await new Promise(resolve => req.once('drain', resolve)); }
             }
         }
@@ -92,6 +104,4 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
         }
         req.end();
     });
-};
-
-module.exports = request;
+}

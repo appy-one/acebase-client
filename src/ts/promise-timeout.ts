@@ -1,13 +1,11 @@
-class PromiseTimeoutError extends Error {}
-function promiseTimeout(promise, ms, comment) {
-    return new Promise((resolve, reject) => {
-        let timeout;
-        function success(result) {
+export class PromiseTimeoutError extends Error {}
+export function promiseTimeout<T = any>(promise: Promise<T>, ms: number, comment?: string) {
+    return new Promise<T>((resolve, reject) => {
+        const timeout: NodeJS.Timeout = setTimeout(() => reject(new PromiseTimeoutError(`Promise ${comment ? `"${comment}" ` : ''}timed out after ${ms}ms`)), ms);
+        function success(result: T) {
             clearTimeout(timeout);
             resolve(result);
         }
         promise.then(success).catch(reject);
-        timeout = setTimeout(() => reject(new PromiseTimeoutError(`Promise ${comment ? `"${comment}" ` : ''}timed out after ${ms}ms`)), ms);
     });
 }
-module.exports = { PromiseTimeoutError, promiseTimeout };

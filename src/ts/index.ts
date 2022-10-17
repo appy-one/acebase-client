@@ -1,20 +1,4 @@
-const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection, PartialArray, Transport } = require('acebase-core');
-const { AceBaseClient } = require('./acebase-client');
-const { ServerDate } = require('./server-date');
-const { CachedValueUnavailableError } = require('./errors');
-
-module.exports = {
-    AceBaseClient,
-    DataReference, 
-    DataSnapshot, 
-    EventSubscription, 
-    PathReference, 
-    TypeMappings,
-    ID,
-    proxyAccess,
-    ServerDate,
-    ObjectCollection,
-    CachedValueUnavailableError,
-    PartialArray,
-    Transport
-};
+export { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection, PartialArray, Transport } from 'acebase-core';
+export { AceBaseClient } from './acebase-client';
+export { ServerDate } from './server-date';
+export { CachedValueUnavailableError } from './errors';

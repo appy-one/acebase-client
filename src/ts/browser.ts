@@ -12,8 +12,9 @@
     </script>
 */
 
-const acebaseclient = require('./index');
+import * as acebaseclient from './index';
 
-window.acebaseclient = acebaseclient;
-window.AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
-module.exports = acebaseclient;
+(window as any).acebaseclient = acebaseclient;
+(window as any).AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
+
+export * from './index';

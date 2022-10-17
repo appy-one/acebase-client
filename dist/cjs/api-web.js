@@ -289,7 +289,7 @@ class WebApi extends acebase_core_1.Api {
                 randomizationFactor: 0.5,
                 transports, // Override default setting of ['polling', 'websocket']
             });
-            socket.on('connect_error', err => {
+            socket.on('connect_error', (err) => {
                 // New connection failed to establish. Attempts will be made to reconnect, but fail for now
                 this.debug.error(`Websocket connection error: ${err}`);
                 this.eventCallback('connect_error', err);
@@ -369,7 +369,7 @@ class WebApi extends acebase_core_1.Api {
                 this.eventCallback('connect'); // Safe to let client know we're connected
                 resolve(); // Resolve the .connect() promise
             }));
-            socket.on('disconnect', reason => {
+            socket.on('disconnect', (reason) => {
                 this.debug.warn(`Websocket disconnected: ${reason}`);
                 // Existing connection was broken, by us or network
                 if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
@@ -391,7 +391,7 @@ class WebApi extends acebase_core_1.Api {
                 }
                 this.eventCallback('disconnect');
             });
-            socket.on('data-event', data => {
+            socket.on('data-event', (data) => {
                 var _a;
                 const val = acebase_core_1.Transport.deserialize(data.val);
                 const context = data.context || {};
@@ -504,7 +504,7 @@ class WebApi extends acebase_core_1.Api {
                     subscr.callback(null, data.path, val.current, val.previous, context);
                 });
             });
-            socket.on('query-event', data => {
+            socket.on('query-event', (data) => {
                 data = acebase_core_1.Transport.deserialize(data);
                 const query = this._realtimeQueries[data.query_id];
                 let keepMonitoring = true;

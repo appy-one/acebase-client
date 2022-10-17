@@ -49,7 +49,7 @@ class AceBaseClientConnectionSettings {
         this.sponsor = typeof settings.sponsor === 'boolean' ? settings.sponsor : false;
         // Set cache settings
         this.cache = {
-            enabled: typeof ((_a = settings.cache) === null || _a === void 0 ? void 0 : _a.db) === 'object' && typeof ((_b = settings.cache) === null || _b === void 0 ? void 0 : _b.enabled) === 'boolean' ? settings.cache.enabled : false,
+            enabled: typeof ((_a = settings.cache) === null || _a === void 0 ? void 0 : _a.db) !== 'object' ? false : typeof ((_b = settings.cache) === null || _b === void 0 ? void 0 : _b.enabled) === 'boolean' ? settings.cache.enabled : true,
             db: typeof ((_c = settings.cache) === null || _c === void 0 ? void 0 : _c.db) === 'object' ? settings.cache.db : null,
             priority: typeof ((_d = settings.cache) === null || _d === void 0 ? void 0 : _d.priority) === 'string' && ['server', 'cache'].includes(settings.cache.priority) ? settings.cache.priority : 'server',
         };

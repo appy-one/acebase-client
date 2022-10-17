@@ -125,7 +125,7 @@ export class AceBaseClientConnectionSettings {
 
         // Set cache settings
         this.cache = {
-            enabled: typeof settings.cache?.db === 'object' && typeof settings.cache?.enabled === 'boolean' ? settings.cache.enabled : false,
+            enabled: typeof settings.cache?.db !== 'object' ? false : typeof settings.cache?.enabled === 'boolean' ? settings.cache.enabled : true,
             db: typeof settings.cache?.db === 'object' ? settings.cache.db : null,
             priority: typeof settings.cache?.priority === 'string' && ['server','cache'].includes(settings.cache.priority) ? settings.cache.priority : 'server',
         };

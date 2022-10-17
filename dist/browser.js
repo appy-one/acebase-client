@@ -1,4 +1,3254 @@
 (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.acebaseclient = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+"use strict";
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AceBaseClient = exports.AceBaseClientConnectionSettings = void 0;
+const acebase_core_1 = require("acebase-core");
+const api_web_1 = require("./api-web");
+const auth_1 = require("./auth");
+const server_date_1 = require("./server-date");
+/**
+ * Settings to connect to a remote AceBase server
+ */
+class AceBaseClientConnectionSettings {
+    constructor(settings) {
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
+        /**
+         * Use SSL (https) to access the server or not. Default: `true`
+         * @default true
+         */
+        this.https = true;
+        /**
+         * Automatically connect to the server, or wait until `db.connect()` is called
+         * @default true
+         */
+        this.autoConnect = true;
+        /**
+         * Delay in ms before auto connecting. Useful for testing scenarios where both server and client start at the same time, and server needs to come online first.
+         * @default 0
+         */
+        this.autoConnectDelay = 0;
+        /**
+         * debug logging level
+         */
+        this.logLevel = 'log';
+        this.dbname = settings.dbname;
+        this.host = settings.host;
+        this.port = settings.port;
+        this.https = typeof settings.https === 'boolean' ? settings.https : true;
+        this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
+        this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
+        this.sponsor = typeof settings.sponsor === 'boolean' ? settings.sponsor : false;
+        // Set cache settings
+        this.cache = {
+            enabled: typeof ((_a = settings.cache) === null || _a === void 0 ? void 0 : _a.db) === 'object' && typeof ((_b = settings.cache) === null || _b === void 0 ? void 0 : _b.enabled) === 'boolean' ? settings.cache.enabled : false,
+            db: typeof ((_c = settings.cache) === null || _c === void 0 ? void 0 : _c.db) === 'object' ? settings.cache.db : null,
+            priority: typeof ((_d = settings.cache) === null || _d === void 0 ? void 0 : _d.priority) === 'string' && ['server', 'cache'].includes(settings.cache.priority) ? settings.cache.priority : 'server',
+        };
+        // Set sync settings
+        this.sync = {
+            timing: typeof ((_e = settings.sync) === null || _e === void 0 ? void 0 : _e.timing) === 'string' && ['connect', 'signin', 'auto', 'manual'].includes(settings.sync.timing) ? settings.sync.timing : 'auto',
+            useCursor: typeof ((_f = settings.sync) === null || _f === void 0 ? void 0 : _f.useCursor) === 'boolean' ? settings.sync.useCursor : true,
+        };
+        // Set network settings
+        const realtime = typeof ((_g = settings.network) === null || _g === void 0 ? void 0 : _g.realtime) === 'boolean' ? settings.network.realtime : true;
+        this.network = {
+            transports: ((_h = settings.network) === null || _h === void 0 ? void 0 : _h.transports) instanceof Array ? settings.network.transports : ['websocket'],
+            realtime,
+            monitor: typeof ((_j = settings.network) === null || _j === void 0 ? void 0 : _j.monitor) === 'boolean' ? settings.network.monitor : !realtime,
+            interval: typeof ((_k = settings.network) === null || _k === void 0 ? void 0 : _k.interval) === 'number' ? settings.network.interval : 60,
+        };
+    }
+}
+exports.AceBaseClientConnectionSettings = AceBaseClientConnectionSettings;
+/**
+ * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
+ */
+class AceBaseClient extends acebase_core_1.AceBaseBase {
+    /**
+     * Create a client to access an AceBase server
+     */
+    constructor(init) {
+        var _a;
+        if (typeof init !== 'object') {
+            // Use old constructor signature: host, port, dbname, https = true
+            // eslint-disable-next-line prefer-rest-params
+            const [host, port, dbname, https] = arguments;
+            init = { host, port, dbname, https };
+        }
+        const settings = init instanceof AceBaseClientConnectionSettings ? init : new AceBaseClientConnectionSettings(init);
+        super(settings.dbname, { info: 'realtime database client', sponsor: settings.sponsor });
+        /*
+            TODO: improve init flow with await/async (requires Node 7.6+)
+        */
+        const cacheDb = (_a = settings.cache) === null || _a === void 0 ? void 0 : _a.db;
+        const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
+        let ready = false;
+        this.on('ready', () => { ready = true; });
+        this.debug = new acebase_core_1.DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(acebase_core_1.ColorStyle.blue)); // `[ ${settings.dbname} ]`
+        const synchronizeClocks = () => __awaiter(this, void 0, void 0, function* () {
+            // Synchronize date/time
+            // const start = Date.now(); // performance.now();
+            const info = yield this.api.getServerInfo();
+            const now = Date.now(), 
+            // roundtrip = now - start, //performance.now() - start,
+            // expectedTime = now - Math.floor(roundtrip / 2),
+            // bias = info.time - expectedTime;
+            bias = info.time - now;
+            (0, server_date_1.setServerBias)(bias);
+        });
+        this.on('connect', () => {
+            // Disable cache db's ipc events, we are already notified of data changes by the server (prevents double event callbacks)
+            if (cacheDb && 'settings' in cacheDb) {
+                cacheDb.settings.ipcEvents = false;
+            }
+            synchronizeClocks();
+        });
+        this.on('disconnect', () => {
+            // Enable cache db's ipc events, so we get event notifications of changes by other ipc peers while offline
+            if (cacheDb && 'settings' in cacheDb) {
+                cacheDb.settings.ipcEvents = true;
+            }
+        });
+        this.sync = () => __awaiter(this, void 0, void 0, function* () {
+            const result = yield syncPendingChanges(true);
+            return result;
+        });
+        let syncRunning = false, firstSync = true;
+        const syncPendingChanges = (throwErrors = false) => __awaiter(this, void 0, void 0, function* () {
+            if (syncRunning) {
+                // Already syncing
+                if (throwErrors) {
+                    throw new Error('sync already running');
+                }
+                return;
+            }
+            if (!this.api.isConnected) {
+                // We'll retry once connected
+                // // Do set firstSync to false, this fixes the issue of the first sync firing after
+                // // an initial succesful connection, but quick disconnect (sync does not run)
+                // // and later reconnect --> Fresh data needs to be loaded
+                // firstSync = false;
+                if (throwErrors) {
+                    throw new Error('not connected');
+                }
+                return;
+            }
+            syncRunning = true;
+            try {
+                yield cacheReadyPromise;
+                return yield this.api.sync({
+                    firstSync,
+                    fetchFreshData: !firstSync,
+                    eventCallback: (eventName, args) => {
+                        this.debug.log(eventName, args || '');
+                        this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
+                    },
+                });
+            }
+            catch (err) {
+                // Sync failed for some reason
+                if (throwErrors) {
+                    throw err;
+                }
+                else {
+                    console.error(`Failed to synchronize:`, err);
+                }
+            }
+            finally {
+                syncRunning = false;
+                firstSync = false;
+            }
+        });
+        let syncTimeout;
+        this.on('connect', () => {
+            if (settings.sync.timing === 'connect' || (settings.sync.timing === 'signin' && this.auth.accessToken)) {
+                syncPendingChanges();
+            }
+            else if (settings.sync.timing === 'auto') {
+                syncTimeout && clearTimeout(syncTimeout);
+                syncTimeout = setTimeout(syncPendingChanges, 2500); // Start sync with a short delay to allow client to sign in first
+            }
+        });
+        this.on('signin', () => {
+            if (settings.sync.timing === 'auto') {
+                syncTimeout && clearTimeout(syncTimeout);
+            }
+            if (['auto', 'signin'].includes(settings.sync.timing)) {
+                syncPendingChanges();
+            }
+        });
+        const emitClientReady = () => __awaiter(this, void 0, void 0, function* () {
+            if (cacheDb) {
+                yield cacheDb.ready();
+            }
+            this.emit('ready');
+        });
+        this.api = new api_web_1.WebApi(settings.dbname, {
+            network: settings.network,
+            sync: settings.sync,
+            logLevel: settings.logLevel,
+            autoConnect: settings.autoConnect,
+            autoConnectDelay: settings.autoConnectDelay,
+            cache: settings.cache,
+            debug: this.debug,
+            url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`,
+        }, (evt, data) => {
+            if (evt === 'connect') {
+                this.emit('connect');
+                if (!ready) {
+                    emitClientReady();
+                }
+            }
+            else if (evt === 'connect_error') {
+                this.emit('connect_error', data);
+                if (!ready && cacheDb) { // If cache db is used, we can work without connection
+                    emitClientReady();
+                }
+            }
+            else if (evt === 'disconnect') {
+                this.emit('disconnect');
+            }
+        });
+        this.auth = new auth_1.AceBaseClientAuth(this, (event, arg) => {
+            this.emit(event, arg);
+        });
+    }
+    sync() {
+        return __awaiter(this, void 0, void 0, function* () {
+            throw new Error('Must be set by constructor');
+        });
+    }
+    get connected() {
+        return this.api.isConnected;
+    }
+    get connectionState() {
+        return this.api.connectionState;
+    }
+    connect() {
+        return this.api.connect();
+    }
+    disconnect() {
+        this.api.disconnect();
+    }
+    close() {
+        this.disconnect();
+    }
+    callExtension(method, path, data) {
+        return this.api.callExtension(method, path, data);
+    }
+    /**
+     * Gets the current sync cursor
+     */
+    getCursor() {
+        return this.api.getSyncCursor();
+    }
+    /**
+     * Sets the sync cursor to use
+     */
+    setCursor(cursor) {
+        this.api.setSyncCursor(cursor);
+    }
+    get cache() {
+        /**
+         * Clears the entire cache, or a specific path without raising any events
+         */
+        const clear = (path = '') => __awaiter(this, void 0, void 0, function* () {
+            yield this.api.clearCache(path);
+        });
+        /**
+         * Updates the local cache with remote changes by retrieving all changes to `path` since given `cursor` and applying them to the local cache database.
+         * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
+         * @param path Path to update. The root path will be used if not given, synchronizing the entire database.
+         * @param cursor A previously achieved cursor to update with. Path's entire value will be loaded from the server if not given.
+         */
+        const update = (path = '', cursor) => {
+            return this.api.updateCache(path, cursor);
+        };
+        /**
+         * Loads a value from cache database.If a cursor is provided, the cache will be updated with remote changes
+         * first. If the value is not available in cache, it will be loaded from the server and stored in cache.
+         * This method is a shortcut for common cache logic provided by `db.ref(path).get` with the `cache_mode`
+         * and `cache_cursor` options.
+         * @param path target path to load
+         * @param cursor A previously acquired cursor
+         * @returns Returns a Promise that resolves with a snapshot of the value
+         */
+        const get = (path, cursor) => __awaiter(this, void 0, void 0, function* () {
+            // Update the cache with provided cursor
+            const options = Object.freeze(cursor ? { cache_mode: 'allow', cache_cursor: cursor } : { cache_mode: 'force' });
+            const snap = yield this.ref(path).get(options);
+            return snap;
+        });
+        return { clear, update, get };
+    }
+}
+exports.AceBaseClient = AceBaseClient;
+
+},{"./api-web":2,"./auth":3,"./server-date":12,"acebase-core":30}],2:[function(require,module,exports){
+"use strict";
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.WebApi = void 0;
+const acebase_core_1 = require("acebase-core");
+const socket_io_client_1 = require("socket.io-client");
+const Base64 = require("./base64");
+const error_1 = require("./request/error");
+const errors_1 = require("./errors");
+const promise_timeout_1 = require("./promise-timeout");
+const request_1 = require("./request");
+const _websocketRequest = (socket, event, data, accessToken) => {
+    if (!socket) {
+        throw new Error(`Cannot send request because websocket connection is not open`);
+    }
+    const requestId = acebase_core_1.ID.generate();
+    // const request = data;
+    // request.req_id = requestId;
+    // request.access_token = accessToken;
+    const request = Object.assign(Object.assign({}, data), { req_id: requestId, access_token: accessToken });
+    return new Promise((resolve, reject) => {
+        if (!socket) {
+            return reject(new error_1.AceBaseRequestError(request, null, 'websocket', 'No open websocket connection'));
+        }
+        let timeout;
+        const send = (retry = 0) => {
+            socket.emit(event, request);
+            timeout = setTimeout(() => {
+                if (retry < 2) {
+                    return send(retry + 1);
+                }
+                socket.off('result', handle);
+                const err = new error_1.AceBaseRequestError(request, null, 'timeout', `Server did not respond to "${event}" request after ${retry + 1} tries`);
+                reject(err);
+            }, 1000);
+        };
+        const handle = (response) => {
+            if (response.req_id === requestId) {
+                clearTimeout(timeout);
+                socket.off('result', handle);
+                if (response.success) {
+                    return resolve(response);
+                }
+                // Access denied?
+                const code = typeof response.reason === 'object' ? response.reason.code : response.reason;
+                const message = typeof response.reason === 'object' ? response.reason.message : `request failed: ${code}`;
+                const err = new error_1.AceBaseRequestError(request, response, code, message);
+                reject(err);
+            }
+        };
+        socket.on('result', handle);
+        send();
+    });
+};
+/**
+ * TODO: Find out if we can use acebase-core's EventSubscription, extended with some properties
+ */
+class EventSubscription {
+    constructor(path, event, callback, settings) {
+        this.path = path;
+        this.event = event;
+        this.callback = callback;
+        this.settings = settings;
+        this.state = 'requested';
+        this.added = Date.now();
+        this.activated = 0;
+        this.lastEvent = 0;
+        this.lastSynced = 0;
+        this.cursor = null;
+        this.cacheCallback = null;
+    }
+    activate() {
+        this.state = 'active';
+        if (this.activated === 0) {
+            this.activated = Date.now();
+        }
+    }
+    cancel(reason) {
+        this.state = 'canceled';
+        this.settings.cancelCallback(reason);
+    }
+}
+const CONNECTION_STATE_DISCONNECTED = 'disconnected';
+const CONNECTION_STATE_CONNECTING = 'connecting';
+const CONNECTION_STATE_CONNECTED = 'connected';
+const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+const NOOP = () => { };
+/**
+ * Api to connect to a remote AceBase server over http(s)
+ */
+class WebApi extends acebase_core_1.Api {
+    constructor(dbname = 'default', settings, callback) {
+        // operations are done through http calls,
+        // events are triggered through a websocket
+        super();
+        this.dbname = dbname;
+        this.settings = settings;
+        this._id = acebase_core_1.ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
+        this.socket = null;
+        this._serverVersion = 'unknown';
+        this._cursor = {
+            /** Last cursor received by the server */
+            current: null,
+            /** Last cursor received before client went offline, will be used for sync. */
+            sync: null,
+        };
+        this._eventTimeline = { init: Date.now(), connect: 0, signIn: 0, sync: 0, disconnect: 0 };
+        this._subscriptions = {};
+        this._realtimeQueries = {};
+        this.accessToken = null;
+        this.manualConnectionMonitor = new acebase_core_1.SimpleEventEmitter();
+        this._id = acebase_core_1.ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
+        this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
+        this._autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
+        this._connectionState = CONNECTION_STATE_DISCONNECTED;
+        if (settings.cache.enabled !== false) {
+            this._cache = {
+                db: settings.cache.db,
+                priority: settings.cache.priority,
+            };
+        }
+        if (settings.network.monitor) {
+            // Mobile devices might go offline while the app is suspended (running in the backgound)
+            // no events will fire and when the app resumes, it might assume it is still connected while
+            // it is not. We'll manually poll the server to check the connection
+            const interval = setInterval(() => this.checkConnection(), settings.network.interval * 1000); // ping every x seconds
+            interval.unref && interval.unref();
+        }
+        this.debug = settings.debug;
+        this.eventCallback = (event, ...args) => {
+            if (event === 'disconnect') {
+                this._cursor.sync = this._cursor.current;
+            }
+            callback && callback(event, ...args);
+        };
+        if (this._autoConnect) {
+            if (this._autoConnectDelay) {
+                setTimeout(() => this.connect().catch(NOOP), this._autoConnectDelay);
+            }
+            else {
+                this.connect().catch(NOOP);
+            }
+        }
+    }
+    /**
+     * Allow cursor used for synchronization to be changed. Should only be done while not connected.
+     */
+    setSyncCursor(cursor) {
+        this._cursor.sync = cursor;
+    }
+    getSyncCursor() {
+        return this._cursor.sync;
+    }
+    get url() { return this.settings.url; }
+    _updateCursor(cursor) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!cursor || (this._cursor.current && cursor < this._cursor.current)) {
+                return; // Just in case this ever happens, ignore events with earlier cursors.
+            }
+            this._cursor.current = cursor;
+        });
+    }
+    get hasCache() { return !!this._cache; }
+    get cache() {
+        if (!this._cache) {
+            throw new Error('DEV ERROR: no cache db is used');
+        }
+        return this._cache;
+    }
+    checkConnection() {
+        var _a, _b;
+        return __awaiter(this, void 0, void 0, function* () {
+            // Websocket connection is used
+            if (((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime) && !this.isConnected) {
+                // socket.io handles reconnects, we don't have to monitor
+                return;
+            }
+            if (!((_b = this.settings.network) === null || _b === void 0 ? void 0 : _b.realtime) && ![CONNECTION_STATE_CONNECTING, CONNECTION_STATE_CONNECTED].includes(this._connectionState)) {
+                // No websocket connection. Do not check if we're not connecting or connected
+                return;
+            }
+            const wasConnected = this.isConnected;
+            try {
+                // Websocket is connected (or realtime is not used), check connectivity to server by sending http/s ping
+                yield this._request({ url: this.serverPingUrl, ignoreConnectionState: true });
+                if (!wasConnected) {
+                    this.manualConnectionMonitor.emit('connect');
+                }
+            }
+            catch (err) {
+                // No need to handle error here, _request will have handled the disconnect by calling this._handleDetectedDisconnect
+            }
+        });
+    }
+    _handleDetectedDisconnect(err) {
+        var _a;
+        if ((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime) {
+            // Launch reconnect flow by recycling the websocket
+            this._connectionState === CONNECTION_STATE_DISCONNECTED;
+            this.connect().catch(NOOP);
+            // console.assert(this._connectionState === CONNECTION_STATE_CONNECTING, 'wrong connection state');
+        }
+        else {
+            if (this._connectionState === CONNECTION_STATE_CONNECTING) {
+                this.manualConnectionMonitor.emit('connect_error', err);
+            }
+            else if (this._connectionState === CONNECTION_STATE_CONNECTED) {
+                this.manualConnectionMonitor.emit('disconnect');
+            }
+        }
+    }
+    connect() {
+        var _a;
+        if (this.socket !== null && typeof this.socket === 'object') {
+            this.disconnect();
+        }
+        this._connectionState = CONNECTION_STATE_CONNECTING;
+        this.debug.log(`Connecting to AceBase server "${this.url}"`);
+        if (!this.url.startsWith('https')) {
+            this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(acebase_core_1.ColorStyle.red));
+        }
+        // Change default socket.io (engine.io) transports setting of ['polling', 'websocket']
+        // We should only use websocket (it's almost 2022!), because if an AceBaseServer is running in a cluster,
+        // polling should be disabled entirely because the server is not stateless: the client might reach
+        // a different node on a next long-poll connection.
+        // For backward compatibility the transports setting is allowed to be overriden with a setting:
+        const transports = ((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.transports) instanceof Array
+            ? this.settings.network.transports
+            : ['websocket'];
+        this.debug.log(`Using ${transports.join(',')} transport${transports.length > 1 ? 's' : ''} for socket.io`);
+        return new Promise((resolve, reject) => {
+            var _a;
+            if (!((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime)) {
+                // New option: not using websocket connection. Check if we can reach the server.
+                // Make sure any previously attached events are removed
+                this.manualConnectionMonitor.off('connect');
+                this.manualConnectionMonitor.off('connect_error');
+                this.manualConnectionMonitor.off('disconnect');
+                this.manualConnectionMonitor.on('connect', () => {
+                    this._connectionState = CONNECTION_STATE_CONNECTED;
+                    this._eventTimeline.connect = Date.now();
+                    this.manualConnectionMonitor.off('connect_error'); // prevent connect_error to fire after a successful connect
+                    this.eventCallback('connect');
+                    resolve();
+                });
+                this.manualConnectionMonitor.on('connect_error', (err) => {
+                    // New connection failed to establish. Attempts will be made to reconnect, but fail for now
+                    this.debug.error(`API connection error: ${err.message || err}`);
+                    this.eventCallback('connect_error', err);
+                    reject(err);
+                });
+                this.manualConnectionMonitor.on('disconnect', () => {
+                    // Existing connection was broken, by us or network
+                    if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
+                        // Disconnect was requested by us: reason === 'client namespace disconnect'
+                        this._connectionState = CONNECTION_STATE_DISCONNECTED;
+                        // Remove event listeners
+                        this.manualConnectionMonitor.off('connect');
+                        this.manualConnectionMonitor.off('disconnect');
+                        this.manualConnectionMonitor.off('connect_error');
+                    }
+                    else {
+                        // Disconnect was not requested.
+                        this._connectionState = CONNECTION_STATE_CONNECTING;
+                        this._eventTimeline.disconnect = Date.now();
+                    }
+                    this.eventCallback('disconnect');
+                });
+                this._connectionState = CONNECTION_STATE_CONNECTING;
+                return setTimeout(() => this.checkConnection(), 0);
+            }
+            const socket = this.socket = (0, socket_io_client_1.connect)(this.url, {
+                // Use default socket.io connection settings:
+                autoConnect: true,
+                reconnection: true,
+                reconnectionAttempts: Infinity,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 20000,
+                randomizationFactor: 0.5,
+                transports, // Override default setting of ['polling', 'websocket']
+            });
+            socket.on('connect_error', err => {
+                // New connection failed to establish. Attempts will be made to reconnect, but fail for now
+                this.debug.error(`Websocket connection error: ${err}`);
+                this.eventCallback('connect_error', err);
+                reject(err);
+            });
+            socket.on('connect', () => __awaiter(this, void 0, void 0, function* () {
+                this._connectionState = CONNECTION_STATE_CONNECTED;
+                this._eventTimeline.connect = Date.now();
+                if (this.accessToken) {
+                    // User must be signed in again (NOTE: this does not emit the "signin" event if the user was signed in before)
+                    const isFirstSignIn = this._eventTimeline.signIn === 0;
+                    try {
+                        yield this.signInWithToken(this.accessToken, isFirstSignIn);
+                    }
+                    catch (err) {
+                        this.debug.error(`Could not automatically sign in user with access token upon reconnect: ${err.code || err.message}`);
+                    }
+                }
+                const subscribeTo = (sub) => __awaiter(this, void 0, void 0, function* () {
+                    // Function is called for each unique path/event combination
+                    // We must activate or cancel all subscriptions with this combination
+                    const subs = this._subscriptions[sub.path].filter(s => s.event === sub.event);
+                    try {
+                        const result = yield _websocketRequest(this.socket, 'subscribe', { path: sub.path, event: sub.event }, this.accessToken);
+                        subs.forEach(s => s.activate());
+                    }
+                    catch (err) {
+                        if (err.code === 'access_denied' && !this.accessToken) {
+                            this.debug.error(`Could not subscribe to event "${sub.event}" on path "${sub.path}" because you are not signed in. If you added this event while offline and have a user access token, you can prevent this by using client.auth.setAccessToken(token) to automatically try signing in after connecting`);
+                        }
+                        else {
+                            this.debug.error(err);
+                        }
+                        subs.forEach(s => s.cancel(err));
+                    }
+                });
+                // (re)subscribe to any active subscriptions
+                const subscribePromises = [];
+                Object.keys(this._subscriptions).forEach(path => {
+                    const events = [];
+                    this._subscriptions[path].forEach(sub => {
+                        if (sub.event === 'mutated') {
+                            return;
+                        } // Skip mutated events for now
+                        const serverAlreadyNotifying = events.includes(sub.event);
+                        if (!serverAlreadyNotifying) {
+                            events.push(sub.event);
+                            const promise = subscribeTo(sub);
+                            subscribePromises.push(promise);
+                        }
+                    });
+                });
+                // Now, subscribe to all top path mutated events
+                const subscribeToMutatedEvents = () => __awaiter(this, void 0, void 0, function* () {
+                    let retry = false;
+                    const promises = Object.keys(this._subscriptions)
+                        .filter(path => this._subscriptions[path].some(sub => sub.event === 'mutated' && sub.state !== 'canceled'))
+                        .filter((path, i, arr) => !arr.some(otherPath => acebase_core_1.PathInfo.get(otherPath).isAncestorOf(path)))
+                        .reduce((topPaths, path) => (topPaths.includes(path) || topPaths.push(path)) && topPaths, [])
+                        .map(topEventPath => {
+                        const sub = this._subscriptions[topEventPath].find(s => s.event === 'mutated');
+                        const promise = subscribeTo(sub).then(() => {
+                            if (sub.state === 'canceled') {
+                                // Oops, could not subscribe to 'mutated' event on topEventPath, other event(s) at child path(s) should now take over
+                                retry = true;
+                            }
+                        });
+                        return promise;
+                    });
+                    yield Promise.all(promises);
+                    if (retry) {
+                        yield subscribeToMutatedEvents();
+                    }
+                });
+                subscribePromises.push(subscribeToMutatedEvents());
+                yield Promise.all(subscribePromises);
+                this.eventCallback('connect'); // Safe to let client know we're connected
+                resolve(); // Resolve the .connect() promise
+            }));
+            socket.on('disconnect', reason => {
+                this.debug.warn(`Websocket disconnected: ${reason}`);
+                // Existing connection was broken, by us or network
+                if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
+                    // disconnect was requested by us: reason === 'client namespace disconnect'
+                    this._connectionState = CONNECTION_STATE_DISCONNECTED;
+                }
+                else {
+                    // Automatic reconnect should be done by socket.io
+                    this._connectionState = CONNECTION_STATE_CONNECTING;
+                    this._eventTimeline.disconnect = Date.now();
+                    if (reason === 'io server disconnect') {
+                        // if the server has shut down and disconnected all clients, we have to reconnect manually
+                        this.socket = null;
+                        this.connect().catch(err => {
+                            // Immediate reconnect failed, which is ok.
+                            // socket.io will retry now
+                        });
+                    }
+                }
+                this.eventCallback('disconnect');
+            });
+            socket.on('data-event', data => {
+                var _a;
+                const val = acebase_core_1.Transport.deserialize(data.val);
+                const context = data.context || {};
+                context.acebase_event_source = 'server';
+                this._updateCursor(context.acebase_cursor); // If the server passes a cursor, it supports transaction logging. Save it for sync later on
+                /*
+                    Using the new context, we can determine how we should handle this data event.
+                    From client v0.9.29 on, the set and update API methods add an acebase_mutation object
+                    to the context with the following info:
+
+                    client_id: which client initiated the mutation (web api instance, also different per browser tab)
+                    id: a unique id of the mutation
+                    op: operation used: 'set' or 'update'
+                    path: the path the operation was executed on
+                    flow: the flow used:
+                        - 'server': app was connected, cache was not used.
+                        - 'cache': app was offline while mutating, now syncs its change
+                        - 'parallel': app was connected, cache was used and updated
+
+                    To determine how to handle this data event, we have to know what events may have already
+                    been fired.
+
+                    [Mutation initiated:]
+                        - Cache database used?
+                            - No -> 'server' flow
+                            - Yes -> Client was online/connected?
+                                - No -> 'cache' flow (saved to cache db, sycing once connected)
+                                - Yes -> 'parallel' flow
+
+                    During 'cache' and 'parallel' flow, any change events will have fired on the cache database
+                    already. If we are receiving this data event on the same client, that means we don't have to
+                    fire those events again. If we receive this event on a different client, we only have to fire
+                    events if they change cached data.
+
+                    [Change event received:]
+                        - Is mutation done by us?
+                            - No -> Are we using cache?
+                                - No -> Fire events
+                                - Yes -> Update cache with events disabled*, fire events
+                            - Yes -> Are we using cache?
+                                - No -> Fire events ourself
+                                - Yes -> Skip cache update, don't fire events (both done already)
+
+                    * Different browser tabs use the same cache database. If we would let the cache database fire data change
+                    events, they would only fire in 1 browser tab - the first one to update the cache, the others will see
+                    no changes because the data will have been updated already.
+
+                    NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
+                    because they rely on change notifications from the server - to tackle this problem,
+                    cross-tab communication has been implemented. (TODO: let cache db's use the same client
+                    ID for server communications)
+                */
+                const causedByUs = ((_a = context.acebase_mutation) === null || _a === void 0 ? void 0 : _a.client_id) === this._id;
+                const cacheEnabled = this.hasCache; //!!this._cache?.db;
+                const fireThisEvent = !causedByUs || !cacheEnabled;
+                const updateCache = !causedByUs && cacheEnabled;
+                const fireCacheEvents = false; // See above flow documentation
+                // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
+                // console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
+                const pathSubs = this._subscriptions[data.subscr_path];
+                if (!pathSubs && data.event !== 'mutated') {
+                    // NOTE: 'mutated' events fire on the mutated path itself. 'mutations' events fire on subscription path
+                    // We are not subscribed on this path. Happens when an event fires while a server unsubscribe
+                    // has been requested, but not processed yet: the local subscription will be gone already.
+                    // This can be confusing when using cache, an unsubscribe may have been requested after a cache
+                    // event fired - the server event will follow but we're not listening anymore!
+                    // this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.subscr_path}"`);
+                    return;
+                }
+                if (updateCache) {
+                    if (data.path.startsWith('__')) {
+                        // Don't cache private data. This happens when the admin user is signed in
+                        // and has an event subscription on the root, or private path.
+                        // NOTE: fireThisEvent === true, because it is impossible that this mutation was caused by us (well, it should be!)
+                    }
+                    else if (data.event === 'mutations') {
+                        // Apply all mutations
+                        const mutations = val.current;
+                        mutations.forEach(m => {
+                            const path = m.target.reduce((path, key) => acebase_core_1.PathInfo.getChildPath(path, key), acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, data.path));
+                            this.cache.db.api.set(path, m.val, { suppress_events: !fireCacheEvents, context });
+                        });
+                    }
+                    else if (data.event === 'notify_child_removed') {
+                        this.cache.db.api.set(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
+                    }
+                    else if (!data.event.startsWith('notify_')) {
+                        this.cache.db.api.set(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
+                    }
+                }
+                if (!fireThisEvent) {
+                    return;
+                }
+                // The cache db will not have fired any events (const fireCacheEvents = false), so we can fire them here now.
+                const targetSubs = data.event === 'mutated'
+                    ? Object.keys(this._subscriptions)
+                        .filter(path => {
+                        const pathInfo = acebase_core_1.PathInfo.get(path);
+                        return path === data.path || pathInfo.equals(data.subscr_path) || pathInfo.isAncestorOf(data.path);
+                    })
+                        .reduce((subs, path) => {
+                        const add = this._subscriptions[path].filter(sub => sub.event === 'mutated');
+                        subs.push(...add);
+                        return subs;
+                    }, [])
+                    : pathSubs.filter(sub => sub.event === data.event);
+                targetSubs.forEach(subscr => {
+                    subscr.lastEvent = Date.now();
+                    subscr.cursor = context.acebase_cursor;
+                    subscr.callback(null, data.path, val.current, val.previous, context);
+                });
+            });
+            socket.on('query-event', data => {
+                data = acebase_core_1.Transport.deserialize(data);
+                const query = this._realtimeQueries[data.query_id];
+                let keepMonitoring = true;
+                try {
+                    keepMonitoring = query.options.eventHandler(data);
+                }
+                catch (err) {
+                    keepMonitoring = false;
+                }
+                if (keepMonitoring === false) {
+                    delete this._realtimeQueries[data.query_id];
+                    socket.emit('query-unsubscribe', { query_id: data.query_id });
+                }
+            });
+        });
+    }
+    disconnect() {
+        var _a;
+        if (!((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime)) {
+            // No websocket connectino is used
+            this._connectionState = CONNECTION_STATE_DISCONNECTING;
+            this._eventTimeline.disconnect = Date.now();
+            this.manualConnectionMonitor.emit('disconnect');
+        }
+        else if (this.socket !== null && typeof this.socket === 'object') {
+            this._connectionState = CONNECTION_STATE_DISCONNECTING;
+            this._eventTimeline.disconnect = Date.now();
+            this.socket.disconnect();
+            this.socket = null;
+        }
+    }
+    subscribe(path, event, callback, settings) {
+        var _a;
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime)) {
+                throw new Error(`Cannot subscribe to realtime events because it has been disabled in the network settings`);
+            }
+            let pathSubs = this._subscriptions[path];
+            if (!pathSubs) {
+                pathSubs = this._subscriptions[path] = [];
+            }
+            const serverAlreadyNotifying = pathSubs.some(sub => sub.event === event)
+                || (event === 'mutated' && Object.keys(this._subscriptions).some(otherPath => acebase_core_1.PathInfo.get(otherPath).isAncestorOf(path) && this._subscriptions[otherPath].some(sub => sub.event === event && sub.state === 'active')));
+            const subscr = new EventSubscription(path, event, callback, settings);
+            // { path, event, callback, settings, added: Date.now(), activate() { this.activated = Date.now() }, activated: null, lastEvent: null, cursor: null };
+            pathSubs.push(subscr);
+            if (this.hasCache) {
+                // Events are also handled by cache db
+                subscr.cacheCallback = (err, path, newValue, oldValue, context) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue, context);
+                this.cache.db.api.subscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
+            }
+            if (serverAlreadyNotifying || !this.isConnected) {
+                // If we're offline, the event will be subscribed once connected
+                return;
+            }
+            if (event === 'mutated') {
+                // Unsubscribe from 'mutated' events set on descendant paths of current path
+                Object.keys(this._subscriptions)
+                    .filter(otherPath => acebase_core_1.PathInfo.get(otherPath).isDescendantOf(path)
+                    && this._subscriptions[otherPath].some(sub => sub.event === 'mutated'))
+                    .map(path => _websocketRequest(this.socket, 'unsubscribe', { path, event: 'mutated' }, this.accessToken))
+                    .map(promise => promise.catch(err => console.error(err)));
+            }
+            const result = yield _websocketRequest(this.socket, 'subscribe', { path, event }, this.accessToken);
+            subscr.activate();
+        });
+    }
+    unsubscribe(path, event, callback) {
+        var _a;
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime)) {
+                throw new Error(`Cannot unsubscribe from realtime events because it has been disabled in the network settings`);
+            }
+            const pathSubs = this._subscriptions[path];
+            if (!pathSubs) {
+                return Promise.resolve();
+            }
+            const unsubscribeFrom = (subscriptions) => {
+                subscriptions.forEach(subscr => {
+                    pathSubs.splice(pathSubs.indexOf(subscr), 1);
+                    if (this.hasCache) {
+                        // Events are also handled by cache db, also remove those
+                        if (typeof subscr.cacheCallback !== 'undefined') {
+                            throw new Error('DEV ERROR: When subscription was added, cacheCallback must have been set');
+                        }
+                        this.cache.db.api.unsubscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);
+                    }
+                });
+            };
+            const hadMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
+            if (!event) {
+                // Unsubscribe from all events on path
+                unsubscribeFrom(pathSubs);
+            }
+            else if (!callback) {
+                // Unsubscribe from specific event on path
+                const subscriptions = pathSubs.filter(subscr => subscr.event === event);
+                unsubscribeFrom(subscriptions);
+            }
+            else {
+                // Unsubscribe from a specific callback on path event
+                const subscriptions = pathSubs.filter(subscr => subscr.event === event && subscr.callback === callback);
+                unsubscribeFrom(subscriptions);
+            }
+            const hasMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
+            let promise = Promise.resolve();
+            if (pathSubs.length === 0) {
+                // Unsubscribed from all events on path
+                delete this._subscriptions[path];
+                if (this.isConnected) {
+                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: this.accessToken }, this.accessToken)
+                        .catch(err => this.debug.error(`Failed to unsubscribe from event(s) on "${path}": ${err.message}`));
+                }
+            }
+            else if (this.isConnected && !pathSubs.some(subscr => subscr.event === event)) {
+                // No callbacks left for specific event
+                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: this.accessToken }, this.accessToken)
+                    .catch(err => this.debug.error(`Failed to unsubscribe from event "${event}" on "${path}": ${err.message}`));
+            }
+            if (this.isConnected && hadMutatedEvents && !hasMutatedEvents) {
+                // If any descendant paths have mutated events, resubscribe those
+                const promises = Object.keys(this._subscriptions)
+                    .filter(otherPath => acebase_core_1.PathInfo.get(otherPath).isDescendantOf(path) && this._subscriptions[otherPath].some(sub => sub.event === 'mutated'))
+                    .map(path => _websocketRequest(this.socket, 'subscribe', { path: path, event: 'mutated' }, this.accessToken))
+                    .map(promise => promise.catch(err => this.debug.error(`Failed to subscribe to event "${event}" on path "${path}": ${err.message}`)));
+                promise = Promise.all([promise, ...promises]);
+            }
+            yield promise;
+        });
+    }
+    transaction(path, callback, options = { context: {} }) {
+        const id = acebase_core_1.ID.generate();
+        options.context = options.context || {};
+        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
+        options.context.acebase_mutation = {
+            client_id: this._id,
+            id,
+            op: 'transaction',
+            path,
+            flow: 'server',
+        };
+        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        return new Promise((resolve, reject) => __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            let cacheUpdateVal;
+            const handleSuccess = (context) => __awaiter(this, void 0, void 0, function* () {
+                if (this.hasCache && typeof cacheUpdateVal !== 'undefined') {
+                    // Update cache db value
+                    yield this.cache.db.api.set(cachePath, cacheUpdateVal);
+                }
+                resolve({ cursor: context === null || context === void 0 ? void 0 : context.acebase_cursor });
+            });
+            if (this.isConnected && ((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime)) {
+                // Use websocket connection
+                const socket = this.socket;
+                const startedCallback = (data) => __awaiter(this, void 0, void 0, function* () {
+                    if (data.id === id) {
+                        socket.off('tx_started', startedCallback);
+                        const currentValue = acebase_core_1.Transport.deserialize(data.value);
+                        let newValue = callback(currentValue);
+                        if (newValue instanceof Promise) {
+                            newValue = yield newValue;
+                        }
+                        socket.emit('transaction', { action: 'finish', id: id, path, value: acebase_core_1.Transport.serialize(newValue), access_token: this.accessToken });
+                        if (this.hasCache) {
+                            cacheUpdateVal = newValue;
+                        }
+                    }
+                });
+                const completedCallback = (data) => {
+                    if (data.id === id) {
+                        socket.off('tx_completed', completedCallback);
+                        socket.off('tx_error', errorCallback);
+                        handleSuccess(data.context);
+                    }
+                };
+                const errorCallback = (data) => {
+                    if (data.id === id) {
+                        socket.off('tx_started', startedCallback);
+                        socket.off('tx_completed', completedCallback);
+                        socket.off('tx_error', errorCallback);
+                        reject(new Error(data.reason));
+                    }
+                };
+                socket.on('tx_started', startedCallback);
+                socket.on('tx_completed', completedCallback);
+                socket.on('tx_error', errorCallback);
+                // TODO: socket.on('disconnect', disconnectedCallback);
+                socket.emit('transaction', { action: 'start', id, path, access_token: this.accessToken, context: options.context });
+            }
+            else {
+                // Websocket not connected. Try http call instead
+                const startData = JSON.stringify({ path });
+                try {
+                    const tx = yield this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/start`, data: startData, context: options.context });
+                    const id = tx.id;
+                    const currentValue = acebase_core_1.Transport.deserialize(tx.value);
+                    let newValue = callback(currentValue);
+                    if (newValue instanceof Promise) {
+                        newValue = yield newValue;
+                    }
+                    if (this.hasCache) {
+                        cacheUpdateVal = newValue;
+                    }
+                    const finishData = JSON.stringify({ id, value: acebase_core_1.Transport.serialize(newValue) });
+                    const { context } = yield this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data: finishData, context: options.context, includeContext: true });
+                    yield handleSuccess(context);
+                }
+                catch (err) {
+                    if (['ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'fetch_failed'].includes(err.code)) {
+                        err.message = error_1.NOT_CONNECTED_ERROR_MESSAGE;
+                    }
+                    reject(err);
+                }
+            }
+        }));
+    }
+    /**
+     * @returns returns a promise that resolves with the returned data, or (when options.includeContext === true) an object containing data and returned context
+     */
+    _request(options) {
+        var _a;
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.isConnected || options.ignoreConnectionState === true) {
+                const result = yield (() => __awaiter(this, void 0, void 0, function* () {
+                    try {
+                        return yield (0, request_1.default)(options.method || 'GET', options.url, { data: options.data, accessToken: this.accessToken, dataReceivedCallback: options.dataReceivedCallback, dataRequestCallback: options.dataRequestCallback, context: options.context });
+                    }
+                    catch (err) {
+                        if (this.isConnected && err.isNetworkError) {
+                            // This is a network error, but the websocket thinks we are still connected.
+                            this.debug.warn(`A network error occurred loading ${options.url}`);
+                            // Start reconnection flow
+                            this._handleDetectedDisconnect(err);
+                        }
+                        // Rethrow the error
+                        throw err;
+                    }
+                }))();
+                if (result.context && result.context.acebase_cursor) {
+                    this._updateCursor(result.context.acebase_cursor);
+                }
+                if (options.includeContext === true) {
+                    if (!result.context) {
+                        result.context = {};
+                    }
+                    return result;
+                }
+                else {
+                    return result.data;
+                }
+            }
+            else {
+                // We're not connected. We can wait for the connection to be established,
+                // or fail the request now. Because we have now implemented caching, live requests
+                // are only executed if they are not allowed to use cached responses. Wait for a
+                // connection to be established (max 1s), then retry or fail
+                if (!this.isConnecting || !((_a = this.settings.network) === null || _a === void 0 ? void 0 : _a.realtime)) {
+                    // We're currently not trying to connect, or not using websocket connection (normal connection logic is still used).
+                    // Fail now
+                    throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+                }
+                const connectPromise = new Promise(resolve => { var _a; return (_a = this.socket) === null || _a === void 0 ? void 0 : _a.once('connect', resolve); });
+                yield (0, promise_timeout_1.promiseTimeout)(connectPromise, 1000, 'Waiting for connection').catch(err => {
+                    throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+                });
+                return this._request(options); // Retry
+            }
+        });
+    }
+    handleSignInResult(result, emitEvent = true) {
+        var _a;
+        this._eventTimeline.signIn = Date.now();
+        const details = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
+        this.accessToken = details.accessToken;
+        (_a = this.socket) === null || _a === void 0 ? void 0 : _a.emit('signin', details.accessToken); // Make sure the connected websocket server knows who we are as well.
+        emitEvent && this.eventCallback('signin', details);
+        return details;
+    }
+    signIn(username, password) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket && this.socket.id } });
+            return this.handleSignInResult(result);
+        });
+    }
+    signInWithEmail(email, password) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket && this.socket.id } });
+            return this.handleSignInResult(result);
+        });
+    }
+    signInWithToken(token, emitEvent = true) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error('Cannot sign in because client is not connected to the server. If you want to automatically sign in the user with this access token once a connection is established, use client.auth.setAccessToken(token)');
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket && this.socket.id } });
+            return this.handleSignInResult(result, emitEvent);
+        });
+    }
+    setAccessToken(token) {
+        this.accessToken = token;
+    }
+    startAuthProviderSignIn(providerName, callbackUrl, options) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const optionParams = typeof options === 'object'
+                ? '&' + Object.keys(options).map(key => `option_${key}=${encodeURIComponent(options[key])}`).join('&')
+                : '';
+            const result = yield this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}${optionParams}` });
+            return { redirectUrl: result.redirectUrl };
+        });
+    }
+    finishAuthProviderSignIn(callbackResult) {
+        return __awaiter(this, void 0, void 0, function* () {
+            let result;
+            try {
+                result = JSON.parse(Base64.decode(callbackResult));
+            }
+            catch (err) {
+                throw new Error(`Invalid result`);
+            }
+            if (!result.user) {
+                // AceBaseServer 1.9.0+ does not include user details in the redirect.
+                // We must get (and validate) auth state with received access token
+                this.accessToken = result.access_token;
+                const authState = yield this._request({ url: `${this.url}/auth/${this.dbname}/state` });
+                if (!authState.signed_in) {
+                    this.accessToken = null;
+                    throw new Error(`Invalid access token received: not signed in`);
+                }
+                result.user = authState.user;
+            }
+            return this.handleSignInResult(result);
+        });
+    }
+    refreshAuthProviderToken(providerName, refreshToken) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ url: `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}` });
+            return result;
+        });
+    }
+    signOut(options = {
+        everywhere: false,
+        clearCache: false,
+    }) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (typeof options === 'boolean') {
+                // Old signature signOut(everywhere:boolean = false)
+                options = { everywhere: options };
+            }
+            else if (typeof options !== 'object') {
+                throw new TypeError('options must be an object');
+            }
+            if (typeof options.everywhere !== 'boolean') {
+                options.everywhere = false;
+            }
+            if (typeof options.clearCache !== 'boolean') {
+                options.clearCache = false;
+            }
+            if (!this.accessToken) {
+                return;
+            }
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket && this.socket.id, everywhere: options.everywhere } });
+            this.socket && this.socket.emit('signout', this.accessToken); // Make sure the connected websocket server knows we signed out as well.
+            this.accessToken = null;
+            if (this.hasCache && options.clearCache) {
+                // Clear cache, but don't wait for it to finish
+                this.clearCache().catch(err => {
+                    console.error(`Could not clear cache:`, err);
+                });
+            }
+            this.eventCallback('signout');
+        });
+    }
+    changePassword(uid, currentPassword, newPassword) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.accessToken) {
+                throw new Error(`not_signed_in`);
+            }
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } });
+            this.accessToken = result.access_token;
+            return { accessToken: this.accessToken };
+        });
+    }
+    forgotPassword(email) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/forgot_password`, data: { email } });
+            return result;
+        });
+    }
+    verifyEmailAddress(verificationCode) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/verify_email`, data: { code: verificationCode } });
+            return result;
+        });
+    }
+    resetPassword(resetCode, newPassword) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/reset_password`, data: { code: resetCode, password: newPassword } });
+            return result;
+        });
+    }
+    signUp(details, signIn = true) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signup`, data: details });
+            if (signIn) {
+                return this.handleSignInResult(result);
+            }
+            return { user: result.user, accessToken: this.accessToken };
+        });
+    }
+    updateUserDetails(details) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/update`, data: details });
+            return { user: result.user };
+        });
+    }
+    deleteAccount(uid, signOut = true) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            const result = yield this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } });
+            if (signOut) {
+                this.socket && this.socket.emit('signout', this.accessToken);
+                this.accessToken = null;
+                this.eventCallback('signout');
+            }
+            return true;
+        });
+    }
+    get isConnected() {
+        return this._connectionState === CONNECTION_STATE_CONNECTED;
+    }
+    get isConnecting() {
+        return this._connectionState === CONNECTION_STATE_CONNECTING;
+    }
+    get connectionState() {
+        return this._connectionState;
+    }
+    stats(options = undefined) {
+        return this._request({ url: `${this.url}/stats/${this.dbname}` });
+    }
+    sync(options = {
+        firstSync: false,
+        fetchFreshData: true,
+        eventCallback: null,
+    }) {
+        var _a, _b, _c;
+        return __awaiter(this, void 0, void 0, function* () {
+            // Sync cache
+            if (!this.isConnected) {
+                throw new Error(error_1.NOT_CONNECTED_ERROR_MESSAGE);
+            }
+            if (this.hasCache && !this.cache.db.isReady) {
+                throw new Error(`cache database is not ready yet`);
+            }
+            this._eventTimeline.sync = Date.now();
+            (_a = options.eventCallback) === null || _a === void 0 ? void 0 : _a.call(options, 'sync_start');
+            const handleStatsUpdateError = (err) => {
+                this.debug.error(`Failed to update cache db stats:`, err);
+            };
+            try {
+                let totalPendingChanges = 0;
+                const useCursor = ((_b = this.settings.sync) === null || _b === void 0 ? void 0 : _b.useCursor) !== false;
+                const cursor = useCursor ? this._cursor.sync : null;
+                if (this.hasCache) {
+                    // Part 1: PUSH local changes
+                    const cacheApi = this.cache.db.api;
+                    const { value, context } = yield cacheApi.get(`${this.dbname}/pending`);
+                    const pendingChanges = value;
+                    cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
+                    try {
+                        const ids = Object.keys(pendingChanges || {}).sort(); // sort a-z, process oldest mutation first
+                        const compatibilityMode = ids.map(id => pendingChanges[id]).some(m => m.type === 'update');
+                        const mutations = compatibilityMode
+                            ? ids.map(id => {
+                                // If any "update" mutations are in the db, these are old mutations. Process them unaltered. This is for backward compatibility only, can be removed later. (if code was able to update, mutations could have already been synced too, right?)
+                                const mutation = pendingChanges[id];
+                                mutation.ids = [id];
+                                return mutation;
+                            })
+                            : ids.reduce((mutations, id) => {
+                                const change = pendingChanges[id];
+                                console.assert(['set', 'remove'].includes(change.type), 'Only "set" and "remove" mutations should be present');
+                                if (change.path === '') {
+                                    // 'set' on the root path - can't turn this into an update on the parent.
+                                    // With new approach, there should be no previous 'set' or 'remove' mutation on any node because they
+                                    // have been removed by _addCacheSetMutation. But... if there are old mutations in the db
+                                    // without 'update' mutations (because then we'd have been in compatibilityMode above) - we'll filter
+                                    // them out here. In the future we could just add this change without checking, but code below doesn't
+                                    // harm the process, so it's ok to stay.
+                                    const rootUpdate = mutations.find(u => u.path === '');
+                                    if (rootUpdate) {
+                                        rootUpdate.data = change.data;
+                                    }
+                                    else {
+                                        change.ids = [id];
+                                        mutations.push(change);
+                                    }
+                                }
+                                else {
+                                    const pathInfo = acebase_core_1.PathInfo.get(change.path);
+                                    const parentPath = pathInfo.parentPath;
+                                    const parentUpdate = mutations.find(u => u.path === parentPath);
+                                    const value = change.type === 'remove' || change.data === null || typeof change.data === 'undefined' ? null : change.data;
+                                    if (!parentUpdate) {
+                                        // Create new parent update
+                                        // change.context.acebase_sync = { }; // TODO: Think about what context we could add to let receivers know why this merged update happens
+                                        mutations.push({ ids: [id], type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
+                                    }
+                                    else {
+                                        // Add this change to parent update
+                                        parentUpdate.data[pathInfo.key] = value;
+                                        parentUpdate.ids.push(id);
+                                    }
+                                }
+                                return mutations;
+                            }, []);
+                        for (const m of mutations) {
+                            const ids = m.ids;
+                            this.debug.verbose(`SYNC pushing mutations ${ids.join(',')}: `, m);
+                            totalPendingChanges++;
+                            try {
+                                if (m.type === 'update') {
+                                    yield this.update(m.path, m.data, { allow_cache: false, context: m.context });
+                                }
+                                else if (m.type === 'set') {
+                                    if (!m.data) {
+                                        m.data = null;
+                                    } // Before type 'remove' was implemented
+                                    yield this.set(m.path, m.data, { allow_cache: false, context: m.context });
+                                }
+                                else if (m.type === 'remove') {
+                                    yield this.set(m.path, null, { allow_cache: false, context: m.context });
+                                }
+                                else {
+                                    throw new Error(`unsupported mutation type "${m.type}"`);
+                                }
+                                this.debug.verbose(`SYNC mutation ${ids.join(',')} processed ok`);
+                                const updates = ids.reduce((updates, id) => (updates[id] = null, updates), {});
+                                cacheApi.update(`${this.dbname}/pending`, updates); // delete from cache db
+                            }
+                            catch (err) {
+                                // Updating remote db failed
+                                this.debug.error(`SYNC mutations ${ids.join(',')} failed: ${err.message}`);
+                                if (!this.isConnected) {
+                                    // Connection was broken, should retry later
+                                    throw err;
+                                }
+                                // We are connected, so the mutation is not allowed or otherwise denied.
+                                if (typeof err === 'string') {
+                                    err = { code: 'unknown', message: err, stack: 'n/a' };
+                                }
+                                // Store error report
+                                const errorReport = { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack };
+                                ids.forEach(id => {
+                                    cacheApi.transaction(`${this.dbname}/pending/${id}`, m => {
+                                        if (!m.error) {
+                                            m.error = {
+                                                first: errorReport,
+                                                last: errorReport,
+                                                retries: 0,
+                                            };
+                                        }
+                                        else {
+                                            m.error.last = errorReport;
+                                            m.error.retries++;
+                                        }
+                                        if (m.error.retries === 3) {
+                                            // After 3 failed retries, move to /dbname/failed/id
+                                            cacheApi.set(`${this.dbname}/failed/${id}`, m);
+                                            return null; // remove pending
+                                        }
+                                        return m;
+                                    });
+                                });
+                                cacheApi.set(`${this.dbname}/stats/last_sync_error`, errorReport).catch(handleStatsUpdateError);
+                                // TODO: Send error report to server?
+                                // this.reportError({ code: 'sync-mutation', report: errorReport });
+                                (_c = options.eventCallback) === null || _c === void 0 ? void 0 : _c.call(options, 'sync_change_error', { error: err, change: m });
+                            }
+                        }
+                        this.debug.verbose(`SYNC push done`);
+                        // Update stats
+                        cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
+                    }
+                    catch (err) {
+                        // 1 or more pending changes could not be processed.
+                        this.debug.error(`SYNC push error: ${err.message}`);
+                        if (typeof err === 'string') {
+                            err = { code: 'unknown', message: err, stack: 'n/a' };
+                        }
+                        cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
+                        throw err;
+                    }
+                }
+                // We've pushed our changes, now get fresh data for all paths with active subscriptions
+                // Using a cursor we can get changes since disconnect
+                // - If we have a cursor, we were connected before.
+                // - A cursor can only be used for events added while connected, not for events added while offline
+                // - A cursor can currently only be used if a cache db is used.
+                // - If there is no cursor because there were no events fired during a previous connection, use disconnected logic for all events
+                //
+                //  -------------------------------------------------------------
+                // |                 |           event subscribe time           |
+                // |     event       |  pre-connect | connected | disconnected  |
+                // |------------------------------------------------------------|
+                // | value           |     get      |   cursor  |     get       |
+                // | child_added     |     get*     |   cursor  |     get*      |
+                // | child_removed   |     warn     |   cursor  |     warn      |
+                // | child_changed   |     warn     |   cursor  |     warn      |
+                // | mutated         |     warn     |   cursor  |     warn      |
+                // | mutations       |     warn     |   cursor  |     warn      |
+                // | notify_*        |     warn     |   warn    |     warn      |
+                // --------------------------------------------------------------
+                // * only if sub.newOnly === false, warn otherwise
+                // --------------------------------------------------------------
+                let totalRemoteChanges = 0, usedSyncMethod = 'reload';
+                const subscriptionPaths = Object.keys(this._subscriptions);
+                const subscriptions = subscriptionPaths.reduce((subs, path) => {
+                    this._subscriptions[path].forEach(sub => subs.push(sub));
+                    return subs;
+                }, []);
+                const subscriptionsFor = (path) => subscriptions.filter(sub => sub.path === path);
+                if (this.hasCache) { //  && options.fetchFreshData
+                    // Part 2: PULL remote changes / fresh data
+                    const cacheApi = this.cache.db.api;
+                    // Attach temp events to cache db so they will fire for data changes (just for counting)
+                    subscriptions.forEach(sub => {
+                        sub.tempCallback = () => {
+                            totalRemoteChanges++;
+                        };
+                        cacheApi.subscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                    });
+                    const strategy = {
+                        /** Data paths to reload */
+                        reload: [],
+                        /** Event targets to fetch changes with cursor */
+                        cursor: [],
+                        /** Subscriptions that have custom sync fallback logic, used when there is no automated way to synchronize */
+                        fallback: [],
+                        /** Event targets to warn about */
+                        warn: [],
+                        /** Subscriptions that require no action because they were added after last connect event */
+                        noop: [],
+                    };
+                    // const wasAddedOffline = sub => {
+                    //     return sub.lastSynced === 0 && sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
+                    // };
+                    const hasStaleValue = (sub) => {
+                        // --------------------------------
+                        // | cursor |   added   | stale   |
+                        // -------------------------------|
+                        // |   no   |  online   |  no     |
+                        // |   no   |  offline  |  yes    |
+                        // |   no   |  b/disct  |  yes    |
+                        // |   yes  |  online   |  no     |
+                        // |   yes  |  offline  |  yes    |
+                        // |   yes  |  b/disct  |  no     |
+                        // --------------------------------
+                        const addedWhileOffline = sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
+                        const addedBeforeDisconnection = sub.added < this._eventTimeline.disconnect;
+                        if (addedWhileOffline) {
+                            return true;
+                        }
+                        if (addedBeforeDisconnection) {
+                            return cursor ? false : true;
+                        }
+                        return false;
+                    };
+                    strategy.reload = subscriptionPaths
+                        .filter(path => {
+                        if (path.includes('*') || path.includes('$')) {
+                            return false;
+                        } // Can't load wildcard paths
+                        return subscriptionsFor(path).some(sub => {
+                            if (hasStaleValue(sub)) {
+                                if (typeof sub.settings.syncFallback === 'function') {
+                                    return false;
+                                }
+                                if (sub.settings.syncFallback === 'reload') {
+                                    return true;
+                                }
+                                if (sub.event === 'value') {
+                                    return true;
+                                }
+                                if (sub.event === 'child_added' && !sub.settings.newOnly) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        });
+                    })
+                        .reduce((reloadPaths, path) => {
+                        !reloadPaths.some(p => p === path || acebase_core_1.PathInfo.get(p).isAncestorOf(path)) && reloadPaths.push(path);
+                        return reloadPaths;
+                    }, []);
+                    strategy.fallback = subscriptionPaths
+                        .filter(path => !strategy.reload.some(p => p === path || acebase_core_1.PathInfo.get(p).isAncestorOf(path)))
+                        .reduce((fallbackItems, path) => {
+                        subscriptionsFor(path).forEach(sub => {
+                            if (hasStaleValue(sub) && typeof sub.settings.syncFallback === 'function') {
+                                fallbackItems.push(sub);
+                            }
+                        });
+                        return fallbackItems;
+                    }, []);
+                    strategy.cursor = !cursor ? [] : subscriptionPaths
+                        .filter(path => !strategy.reload.some(p => p === path || acebase_core_1.PathInfo.get(p).isAncestorOf(path)))
+                        .reduce((cursorItems, path) => {
+                        const subs = subscriptionsFor(path);
+                        const events = subs.filter(sub => !hasStaleValue(sub) && !strategy.fallback.includes(sub))
+                            .reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
+                        events.length > 0 && cursorItems.push({ path, events });
+                        return cursorItems;
+                    }, []);
+                    strategy.warn = subscriptionPaths
+                        .filter(path => !strategy.reload.some(p => p === path || acebase_core_1.PathInfo.get(p).isAncestorOf(path)))
+                        .reduce((warnItems, path) => {
+                        const subs = subscriptionsFor(path).filter(sub => !strategy.fallback.includes(sub));
+                        subs.forEach(sub => {
+                            if (typeof sub.settings.syncFallback === 'function' || sub.added > this._eventTimeline.connect) {
+                                strategy.noop.push(sub);
+                            }
+                            else if (!strategy.cursor.some(item => item.path === sub.path && item.events.includes(sub.event))) {
+                                const item = warnItems.find(item => item.path === sub.path);
+                                if (!item) {
+                                    warnItems.push({ path: sub.path, events: [sub.event] });
+                                }
+                                else if (!item.events.includes(sub.event)) {
+                                    item.events.push(sub.event);
+                                }
+                            }
+                        });
+                        return warnItems;
+                    }, []);
+                    console.log(`SYNC strategy`, strategy);
+                    const syncPromises = [];
+                    if (strategy.cursor.length > 0) {
+                        this.debug.log(`SYNC using cursor "${cursor}" for event(s) ${strategy.cursor.map(item => `${item.events.join(', ')} on "/${item.path}"`).join(', ')}`);
+                        const cursorPromise = (() => __awaiter(this, void 0, void 0, function* () {
+                            let remoteMutations;
+                            try {
+                                const result = yield this.getChanges({ for: strategy.cursor, cursor });
+                                remoteMutations = result.changes;
+                                this._updateCursor(result.new_cursor);
+                            }
+                            catch (err) {
+                                this.debug.error(`SYNC: Could not load remote changes`, err);
+                                options.eventCallback && options.eventCallback('sync_cursor_error', err);
+                                if (err.code === 'no_transaction_logging') {
+                                    // Apparently the server did support transaction logging before, but is now disabled.
+                                    // Remove cursor so it won't be used again.
+                                    this._updateCursor(null);
+                                }
+                                // Check which subscriptions we'll be able to reload, and which we'll have to issue warnings for
+                                strategy.cursor.forEach(item => {
+                                    if (item.events.includes('value')) {
+                                        strategy.reload.push(item.path);
+                                    }
+                                    else {
+                                        strategy.warn.push(item);
+                                    }
+                                });
+                            }
+                            if (remoteMutations) {
+                                usedSyncMethod = 'cursor';
+                                this.debug.log(`SYNC: Got ${remoteMutations.length} remote mutations`, remoteMutations);
+                                const promises = remoteMutations.map(m => {
+                                    const cachePath = `${this.dbname}/cache/${m.path}`;
+                                    if (m.type === 'update') {
+                                        return cacheApi.update(cachePath, m.value, { context: m.context });
+                                    }
+                                    else if (m.type === 'set') {
+                                        return cacheApi.set(cachePath, m.value, { context: m.context });
+                                    }
+                                });
+                                yield Promise.all(promises);
+                            }
+                        }))();
+                        syncPromises.push(cursorPromise);
+                    }
+                    if (strategy.reload.length > 0) {
+                        this.debug.log(`SYNC reloading data for event paths ${strategy.reload.map(path => `"/${path}"`).join(', ')}`);
+                        const reloadPromise = (() => __awaiter(this, void 0, void 0, function* () {
+                            const promises = strategy.reload.map(path => {
+                                this.debug.verbose(`SYNC: load "/${path}"`);
+                                return this.get(path, { cache_mode: 'bypass' }) // allow_cache: false
+                                    .catch(err => {
+                                    this.debug.error(`SYNC: could not load "/${path}"`, err);
+                                    options.eventCallback && options.eventCallback('sync_pull_error', err);
+                                });
+                            });
+                            yield Promise.all(promises);
+                        }))();
+                        syncPromises.push(reloadPromise);
+                    }
+                    if (strategy.fallback.length > 0) {
+                        this.debug.log(`SYNC using fallback functions for event(s) ${strategy.fallback.map(sub => `${sub.event} on "/${sub.path}"`).join(', ')}`);
+                        const fallbackPromise = (() => __awaiter(this, void 0, void 0, function* () {
+                            const promises = strategy.fallback.map((sub) => __awaiter(this, void 0, void 0, function* () {
+                                this.debug.verbose(`SYNC: running fallback for event ${sub.event} on "/${sub.path}"`);
+                                try {
+                                    if (sub.settings.syncFallback === 'reload') {
+                                        throw new Error(`DEV ERROR: Not expecting "reload" as fallback`);
+                                    }
+                                    yield sub.settings.syncFallback();
+                                }
+                                catch (err) {
+                                    this.debug.error(`SYNC: error running fallback function for ${sub.event} on "/${sub.path}"`, err);
+                                    options.eventCallback && options.eventCallback('sync_fallback_error', err);
+                                }
+                            }));
+                            yield Promise.all(promises);
+                        }))();
+                        syncPromises.push(fallbackPromise);
+                    }
+                    if (strategy.warn.length > 0) {
+                        this.debug.warn(`SYNC warning: unable to sync event(s) ${strategy.warn.map(item => `${item.events.map(event => `"${event}"`).join(', ')} on "/${item.path}"`).join(', ')}. To resolve this, provide syncFallback functions for these events`);
+                    }
+                    // Wait until they're all done
+                    yield Promise.all(syncPromises);
+                    // Wait shortly to allow any pending temp cache events to fire
+                    yield new Promise(resolve => setTimeout(resolve, 10));
+                    // Unsubscribe temp cache subscriptions
+                    subscriptions.forEach(sub => {
+                        if (typeof sub.tempCallback !== 'function') {
+                            throw new Error('DEV ERROR: tempCallback must be a function');
+                        }
+                        cacheApi.unsubscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                        delete sub.tempCallback;
+                    });
+                }
+                else if (!this._cache) {
+                    // Not using cache
+                    const syncPromises = [];
+                    // No cache database used
+                    // Until acebase-server supports getting missed events with a cursor (in addition to getting mutations),
+                    // there is no way for the client to determine exact data changes at this moment - we have no previous values.
+                    // We can only fetch fresh data for 'value' events, run syncFallback functions and warn about all other events
+                    subscriptionPaths.forEach(path => {
+                        const subs = subscriptionsFor(path);
+                        const warnEvents = [];
+                        subs.filter(sub => sub.event !== 'value').forEach(sub => {
+                            if (typeof sub.settings.syncFallback === 'function') {
+                                syncPromises.push(sub.settings.syncFallback());
+                            }
+                            else {
+                                !warnEvents.includes(sub.event) && warnEvents.push(sub.event);
+                            }
+                        });
+                        if (warnEvents.length > 0) {
+                            this.debug.warn(`Subscriptions ${warnEvents.join(', ')} on path "${path}" might have missed events while offline. Data should be reloaded!`);
+                        }
+                        const valueSubscriptions = subs.filter(sub => sub.event === 'value');
+                        if (valueSubscriptions.length > 0) {
+                            const p = this.get(path, { allow_cache: false }).then(value => {
+                                valueSubscriptions.forEach(subscr => subscr.callback(null, path, value)); // No previous value!
+                            });
+                            syncPromises.push(p);
+                        }
+                    });
+                    yield Promise.all(syncPromises);
+                }
+                // Update subscription sync stats
+                subscriptions.forEach(sub => sub.lastSynced = Date.now());
+                this.debug.verbose(`SYNC done`);
+                const info = { local: totalPendingChanges, remote: totalRemoteChanges, method: usedSyncMethod, cursor };
+                options.eventCallback && options.eventCallback('sync_done', info);
+                return info;
+            }
+            catch (err) {
+                this.debug.error(`SYNC error`, err);
+                options.eventCallback && options.eventCallback('sync_error', err);
+                throw err;
+            }
+        });
+    }
+    /**
+     * Gets all relevant mutations for specific events on a path and since specified cursor
+     */
+    getMutations(filter) {
+        var _a;
+        return __awaiter(this, void 0, void 0, function* () {
+            if (typeof filter !== 'object') {
+                throw new Error('No filter specified');
+            }
+            if (typeof filter.cursor !== 'string' && typeof filter.timestamp !== 'number') {
+                throw new Error('No cursor or timestamp given');
+            }
+            const query = Object.keys(filter)
+                .map(key => {
+                let val = filter[key];
+                if (key === 'for') {
+                    val = encodeURIComponent(JSON.stringify(val));
+                }
+                return typeof val !== 'undefined' ? `${key}=${val}` : null;
+            })
+                .filter(p => p != null)
+                .join('&');
+            const { data, context } = yield this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
+            const mutations = acebase_core_1.Transport.deserialize2(data);
+            return { used_cursor: (_a = filter.cursor) !== null && _a !== void 0 ? _a : null, new_cursor: context.acebase_cursor, mutations };
+        });
+    }
+    /**
+     * Gets all relevant effective changes for specific events on a path and since specified cursor
+     */
+    getChanges(filter) {
+        var _a;
+        return __awaiter(this, void 0, void 0, function* () {
+            if (typeof filter !== 'object') {
+                throw new Error('No filter specified');
+            }
+            if (typeof filter.cursor !== 'string' && typeof filter.timestamp !== 'number') {
+                throw new Error('No cursor or timestamp given');
+            }
+            const query = Object.keys(filter)
+                .map(key => {
+                let val = filter[key];
+                if (key === 'for') {
+                    val = encodeURIComponent(JSON.stringify(val));
+                }
+                return typeof val !== 'undefined' ? `${key}=${val}` : null;
+            })
+                .filter(p => p != null)
+                .join('&');
+            const { data, context } = yield this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
+            const changes = acebase_core_1.Transport.deserialize2(data);
+            return { used_cursor: (_a = filter.cursor) !== null && _a !== void 0 ? _a : null, new_cursor: context.acebase_cursor, changes };
+        });
+    }
+    _addCacheSetMutation(path, value, context) {
+        var _a, _b;
+        return __awaiter(this, void 0, void 0, function* () {
+            // Remove all previous mutations on this exact path, and descendants
+            const escapedPath = path.replace(/([.*+?\\$^\(\)\[\]\{\}])/g, '\\$1'); // Replace any character that could cripple the regex. NOTE: nobody should use these characters in their data paths in the first place.
+            const re = new RegExp(`^${escapedPath}(?:\\[|/|$)`); // matches path, path/child, path[0], path[0]/etc, path/child/etc/etc
+            yield ((_a = this._cache) === null || _a === void 0 ? void 0 : _a.db.query(`${this.dbname}/pending`).filter('path', 'matches', re).remove());
+            // Add new mutation
+            return (_b = this._cache) === null || _b === void 0 ? void 0 : _b.db.api.set(`${this.dbname}/pending/${acebase_core_1.ID.generate()}`, { type: value !== null ? 'set' : 'remove', path, data: value, context });
+        });
+    }
+    set(path, value, options = {
+        allow_cache: true,
+        context: {},
+    }) {
+        var _a;
+        // TODO: refactor allow_cache to cache_mode
+        if (!options.context) {
+            options.context = {};
+        }
+        const useCache = this._cache && options.allow_cache !== false;
+        const useServer = this.isConnected;
+        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
+        options.context.acebase_mutation = options.context.acebase_mutation || {
+            client_id: this._id,
+            id: acebase_core_1.ID.generate(),
+            op: 'set',
+            path,
+            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server',
+        };
+        const updateServer = () => __awaiter(this, void 0, void 0, function* () {
+            const data = JSON.stringify(acebase_core_1.Transport.serialize(value));
+            const { context } = yield this._request({ method: 'PUT', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
+            Object.assign(options.context, context); // Add to request context
+            const cursor = context === null || context === void 0 ? void 0 : context.acebase_cursor;
+            return { cursor }; // And return the cursor
+        });
+        if (!useCache) {
+            return updateServer();
+        }
+        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        let rollbackValue;
+        const updateCache = () => {
+            return this.cache.db.api.transaction(cachePath, (currentValue) => {
+                rollbackValue = currentValue;
+                return value;
+            }, { context: options.context });
+        };
+        const rollbackCache = () => __awaiter(this, void 0, void 0, function* () {
+            yield cachePromise; // Must be ready first before we can rollback to previous value
+            return this.cache.db.api.set(cachePath, rollbackValue, { context: options.context });
+        });
+        const addPendingTransaction = () => __awaiter(this, void 0, void 0, function* () {
+            yield this._addCacheSetMutation(path, value, options.context);
+        });
+        const cachePromise = updateCache();
+        const tryCachePromise = cachePromise
+            .then(() => ({ success: true, error: null }))
+            .catch(err => ({ success: false, error: err }));
+        const serverPromise = !useServer ? null : updateServer();
+        const tryServerPromise = !useServer ? null : serverPromise
+            .then(() => ({ success: true, error: null }))
+            .catch(err => ({ success: false, error: err }));
+        Promise.all([tryCachePromise, tryServerPromise])
+            .then(([cacheResult, serverResult]) => {
+            var _a;
+            const networkError = serverPromise && !(serverResult === null || serverResult === void 0 ? void 0 : serverResult.success) && ((_a = serverResult === null || serverResult === void 0 ? void 0 : serverResult.error) === null || _a === void 0 ? void 0 : _a.isNetworkError) === true;
+            if (serverPromise && !networkError) {
+                // Server update succeeded, or failed with a non-network related reason
+                if (serverResult === null || serverResult === void 0 ? void 0 : serverResult.success) {
+                    // Server update success
+                    if (!cacheResult.success) {
+                        // Cache update failed for some reason?
+                        this.debug.error(`Failed to set cache for "${path}". Error: `, cacheResult.error);
+                    }
+                }
+                else {
+                    // Server update failed (with a non-network related reason)
+                    if (cacheResult.success) {
+                        // Cache update did succeed, rollback to previous value
+                        this.debug.error(`Failed to set server value for "${path}", rolling back cache to previous value. Error:`, serverResult === null || serverResult === void 0 ? void 0 : serverResult.error);
+                        rollbackCache().catch(err => {
+                            this.debug.error(`Failed to roll back cache? Error:`, err);
+                        });
+                    }
+                }
+            }
+            else if (cacheResult.success) {
+                // Server was not updated (because we're offline, or a network error occurred), cache update was successful.
+                // Add pending sync action
+                addPendingTransaction().catch(err => {
+                    this.debug.error(`Failed to add pending sync action for "${path}", rolling back cache to previous value. Error:`, err);
+                    rollbackCache().catch(err => {
+                        this.debug.error(`Failed to roll back cache? Error:`, err);
+                    });
+                });
+            }
+        });
+        if (!useServer) {
+            // Fixes issue #7
+            return cachePromise;
+        }
+        // return server promise by default, so caller can handle potential authorization issues
+        return ((_a = this._cache) === null || _a === void 0 ? void 0 : _a.priority) === 'cache' ? cachePromise : serverPromise;
+    }
+    update(path, updates, options = {
+        allow_cache: true,
+        context: {},
+    }) {
+        var _a, _b;
+        // TODO: refactor allow_cache to cache_mode
+        const useCache = this._cache && options && options.allow_cache !== false;
+        const useServer = this.isConnected;
+        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
+        options.context.acebase_mutation = options.context.acebase_mutation || {
+            client_id: this._id,
+            id: acebase_core_1.ID.generate(),
+            op: 'update',
+            path,
+            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server',
+        };
+        const updateServer = () => __awaiter(this, void 0, void 0, function* () {
+            const data = JSON.stringify(acebase_core_1.Transport.serialize(updates));
+            const { context } = yield this._request({ method: 'POST', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
+            Object.assign(options.context, context); // Add to request context
+            const cursor = context.acebase_cursor;
+            return { cursor }; // And return the cursor
+        });
+        if (!useCache) {
+            return updateServer();
+        }
+        const cacheApi = (_a = this._cache) === null || _a === void 0 ? void 0 : _a.db.api;
+        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        let rollbackUpdates;
+        const updateCache = () => __awaiter(this, void 0, void 0, function* () {
+            const properties = Object.keys(updates);
+            const result = yield cacheApi.get(cachePath, { include: properties });
+            rollbackUpdates = result.value;
+            properties.forEach(prop => {
+                if (!(prop in rollbackUpdates) && updates[prop] !== null) {
+                    // Property being updated doesn't exist in current value, set to null
+                    rollbackUpdates[prop] = null;
+                }
+            });
+            return cacheApi.update(cachePath, updates, { context: options.context });
+        });
+        const rollbackCache = () => __awaiter(this, void 0, void 0, function* () {
+            yield cachePromise; // Must be ready first before we can rollback to previous value
+            return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
+        });
+        const addPendingTransaction = () => __awaiter(this, void 0, void 0, function* () {
+            /*
+
+            In the old method, making multiple changes to the same data would store AND SYNC each
+            mutation separately. To only store net changes to the db, having mixed 'update' and 'set' mutations
+            make this hard. Consider the following mutations:
+
+                1. update 'users/ewout': { name: 'Ewout', surname: 'Stortenbeker' }
+                2. update 'users/ewout/address': { street: 'Main street', nr: 3 }
+                3. update 'users/ewout': { name: 'E', address: null }
+                4. update 'users/ewout': { name: 'E', address: { street: '2nd Ave', nr: 48 } }
+                5. set 'users/ewout/address/street': 'Main street'
+                6. set 'users/ewout/address/nr': 3
+                7. set 'users/ewout/name': 'Ewout'
+
+            If all updated properties are saved as 'set' operations, things become easier:
+
+                1a. set 'users/ewout/name': 'Ewout'
+                1b. set 'users/ewout/surname': 'Stortenbeker'
+                2a. set 'users/ewout/address/street': 'Main street'
+                2b. set 'users/ewout/address/nr': 3
+                3a. set 'users/ewout/name': 'E'
+                3b. set 'users/ewout/address': null
+                4a. set 'users/ewout/name': 'E'
+                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
+                5.  set 'users/ewout/address/street': 'Main street'
+                6.  set 'users/ewout/address/nr': 3
+                7.  set 'users/ewout/name': 'Ewout'
+
+            Now it's easy to remove obsolete mutations, only keeping the last ones:
+
+                1b. set 'users/ewout/surname': 'Stortenbeker'
+                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
+                5.  set 'users/ewout/address/street': 'Main street'
+                6.  set 'users/ewout/address/nr': 3
+                7.  set 'users/ewout/name': 'Ewout'
+
+            */
+            // Create 'set' mutations for all of this 'update's properties
+            const pathInfo = acebase_core_1.PathInfo.get(path);
+            const mutations = Object.keys(updates).map((prop) => {
+                if (updates instanceof Array) {
+                    prop = parseInt(prop);
+                }
+                return {
+                    path: pathInfo.childPath(prop),
+                    value: updates[prop],
+                };
+            });
+            // Store new pending 'set' operations (null values will be stored as 'remove')
+            const promises = mutations.map(m => this._addCacheSetMutation(m.path, m.value, options.context));
+            yield Promise.all(promises);
+        });
+        const cachePromise = updateCache();
+        const tryCachePromise = cachePromise
+            .then(() => ({ success: true, error: null }))
+            .catch(err => ({ success: false, error: err }));
+        const serverPromise = !useServer ? null : updateServer();
+        const tryServerPromise = !useServer ? { executed: false, success: false, error: null } : serverPromise
+            .then(() => ({ executed: true, success: true, error: null }))
+            .catch(err => ({ executed: true, success: false, error: err }));
+        Promise.all([tryCachePromise, tryServerPromise])
+            .then(([cacheResult, serverResult]) => {
+            const networkError = serverResult.executed && !serverResult.success && serverResult.error.isNetworkError === true;
+            if (serverResult.executed && !networkError) {
+                // Server update succeeded, or failed with a non-network related reason
+                if (serverResult.success) {
+                    // Server update success
+                    if (!cacheResult.success) {
+                        // Cache update failed for some reason?
+                        this.debug.error(`Failed to update cache for "${path}". Error: `, cacheResult.error);
+                    }
+                }
+                else {
+                    // Server update failed
+                    if (cacheResult.success) {
+                        // Cache update did succeed, rollback to previous value
+                        this.debug.error(`Failed to update server value for "${path}", rolling back cache to previous value. Error:`, serverResult.error);
+                        rollbackCache().catch(err => {
+                            this.debug.error(`Failed to roll back cache? Error:`, err);
+                        });
+                    }
+                }
+            }
+            else if (cacheResult.success) {
+                // Server was not updated, cache update was successful.
+                // Add pending sync action
+                addPendingTransaction().catch(err => {
+                    this.debug.error(`Failed to add pending sync action for "${path}", rolling back cache to previous value. Error:`, err);
+                    rollbackCache().catch(err => {
+                        this.debug.error(`Failed to roll back cache? Error:`, err);
+                    });
+                });
+            }
+        });
+        if (!useServer) {
+            // Fixes issue #7
+            return cachePromise;
+        }
+        // return server promise by default, so caller can handle potential authorization issues
+        return ((_b = this._cache) === null || _b === void 0 ? void 0 : _b.priority) === 'cache' ? cachePromise : serverPromise;
+    }
+    /**
+     * @returns Returns a promise that resolves with the value, context and optionally a server cursor
+     */
+    get(path, options = {
+        cache_mode: 'allow',
+    }) {
+        var _a, _b;
+        return __awaiter(this, void 0, void 0, function* () {
+            if (typeof options.cache_mode !== 'string') {
+                options.cache_mode = 'allow';
+            }
+            const useCache = this._cache && options.cache_mode !== 'bypass';
+            const getServerValue = () => __awaiter(this, void 0, void 0, function* () {
+                // Get from server
+                let url = `${this.url}/data/${this.dbname}/${path}`;
+                let filtered = false;
+                if (options) {
+                    const query = [];
+                    if (options.exclude instanceof Array) {
+                        query.push(`exclude=${options.exclude.join(',')}`);
+                    }
+                    if (options.include instanceof Array) {
+                        query.push(`include=${options.include.join(',')}`);
+                    }
+                    if (typeof options.child_objects === 'boolean') {
+                        query.push(`child_objects=${options.child_objects}`);
+                    }
+                    if (query.length > 0) {
+                        filtered = true;
+                        url += `?${query.join('&')}`;
+                    }
+                }
+                const result = yield this._request({ url, includeContext: true });
+                const context = result.context;
+                const cursor = context && context.acebase_cursor;
+                const value = acebase_core_1.Transport.deserialize(result.data);
+                if (this._cache) {
+                    // Update cache without waiting
+                    // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
+                    // if (filtered) {
+                    //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
+                    // }
+                    if (!filtered) {
+                        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+                        this._cache.db.api.set(cachePath, value, { context: { acebase_operation: 'update_cache', acebase_server_context: context } })
+                            .catch(err => {
+                            this.debug.error(`Error caching data for "/${path}"`, err);
+                        });
+                    }
+                }
+                return { value, context, cursor };
+            });
+            const getCacheValue = (throwOnNull = false) => __awaiter(this, void 0, void 0, function* () {
+                if (!this._cache) {
+                    throw new Error(`DEV ERROR: cannot get cached value if no cache is used!`);
+                }
+                const result = yield this._cache.db.api.get(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
+                let { value, context } = result;
+                if (!('value' in result && 'context' in result)) {
+                    console.warn(`Missing context from cache results. Update your acebase package`);
+                    value = result, context = {};
+                }
+                if (value === null && throwOnNull) {
+                    throw new errors_1.CachedValueUnavailableError(path);
+                }
+                delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
+                return { value, context };
+            });
+            if (options.cache_mode === 'force') {
+                // Only load cached value
+                const { value, context } = yield getCacheValue(false); // Do not throw on null with cache_mode: 'force'
+                context.acebase_origin = 'cache';
+                return { value, context };
+            }
+            if (useCache && typeof options.cache_cursor === 'string') {
+                // Update cache with mutations from cursor, then load cached value
+                let syncResult;
+                try {
+                    syncResult = yield this.updateCache(path, options.cache_cursor);
+                }
+                catch (err) {
+                    // Failed to update cache, we might be offline. Proceed with cache value
+                }
+                const { value, context } = yield getCacheValue(false); // don't throw on null value, it was updated from the server just now
+                if (syncResult) {
+                    context.acebase_cursor = syncResult.new_cursor;
+                    context.acebase_origin = 'hybrid';
+                }
+                else {
+                    context.acebase_cursor = options.cache_cursor;
+                    context.acebase_origin = 'cache';
+                }
+                return { value, context, cursor: context.acebase_cursor };
+            }
+            if (!useCache) {
+                // Cache not available or allowed to be used, get server value
+                const { value, context, cursor } = yield getServerValue();
+                context.acebase_origin = 'server';
+                return { value, context, cursor };
+            }
+            if (!this.isConnected || ((_a = this._cache) === null || _a === void 0 ? void 0 : _a.priority) === 'cache') {
+                // Server not connected, or priority is set to 'cache'. Get cached value
+                const throwOnNull = ((_b = this._cache) === null || _b === void 0 ? void 0 : _b.priority) !== 'cache';
+                const { value, context } = yield getCacheValue(throwOnNull);
+                context.acebase_origin = 'cache';
+                return { value, context };
+            }
+            // Get both, use cached value if available and server version takes too long
+            return new Promise((resolve, reject) => {
+                let wait = true, done = false;
+                const gotValue = (source, val) => {
+                    var _a;
+                    this.debug.verbose(`Got ${source} value of "${path}":`, val);
+                    if (done) {
+                        return;
+                    }
+                    const { value, context, cursor } = val;
+                    if (source === 'server') {
+                        done = true;
+                        this.debug.verbose(`Using server value for "${path}"`);
+                        context.acebase_origin = 'server';
+                        resolve({ value, context, cursor });
+                    }
+                    else if (value === null) {
+                        // Cached value is not available
+                        if (!wait) {
+                            const serverError = (_a = errors.find(e => e.source === 'server')) === null || _a === void 0 ? void 0 : _a.error;
+                            if (serverError.isNetworkError) {
+                                // On network related errors, we thought we were connected but apparently weren't.
+                                // If we had known this up-front, getCachedValue(true) would have been executed and
+                                // thrown a CachedValueUnavailableError with default message. Let's do that now
+                                return reject(new errors_1.CachedValueUnavailableError(path));
+                            }
+                            // Could not get server value because of a non-network related issue - possibly unauthorized access
+                            const error = new errors_1.CachedValueUnavailableError(path, `Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
+                            error.serverError = serverError;
+                            return reject(error);
+                        }
+                    }
+                    else if (!wait) {
+                        // Cached results, don't wait for server value
+                        done = true;
+                        this.debug.verbose(`Using cache value for "${path}"`);
+                        context.acebase_origin = 'cache';
+                        resolve({ value, context });
+                    }
+                    else {
+                        // Cached results, wait 1s before resolving with this value, server value might follow soon
+                        setTimeout(() => {
+                            if (done) {
+                                return;
+                            }
+                            this.debug.verbose(`Using (delayed) cache value for "${path}"`);
+                            done = true;
+                            context.acebase_origin = 'cache';
+                            resolve({ value, context });
+                        }, 1000);
+                    }
+                };
+                const errors = [];
+                const gotError = (source, error) => {
+                    var _a;
+                    errors.push({ source, error });
+                    if (errors.length === 2) {
+                        // Both failed, reject with server error
+                        reject((_a = errors.find(e => e.source === 'server')) === null || _a === void 0 ? void 0 : _a.error);
+                    }
+                };
+                getServerValue()
+                    .then(val => gotValue('server', val))
+                    .catch(err => (wait = false, gotError('server', err)));
+                getCacheValue(false)
+                    .then(val => gotValue('cache', val))
+                    .catch(err => gotError('cache', err));
+            });
+        });
+    }
+    exists(path, options = {
+        allow_cache: true,
+    }) {
+        // TODO: refactor allow_cache to cache_mode
+        // TODO: refactor to include context in return value: acebase_origin: 'cache' or 'server'
+        const useCache = this._cache && options.allow_cache !== false;
+        const getCacheExists = () => {
+            if (!this._cache) {
+                throw new Error('DEV ERROR: no cache db available to check exists');
+            }
+            return this._cache.db.api.exists(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path));
+        };
+        const getServerExists = () => {
+            return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
+                .then(res => res.exists)
+                .catch(err => {
+                throw err;
+            });
+        };
+        if (!useCache) {
+            return getServerExists();
+        }
+        else if (!this.isConnected) {
+            return getCacheExists();
+        }
+        else {
+            // Check both
+            return new Promise((resolve, reject) => {
+                let wait = true, done = false;
+                const gotExists = (source, exists) => {
+                    if (done) {
+                        return;
+                    }
+                    if (source === 'server') {
+                        done = true;
+                        resolve(exists);
+                    }
+                    else if (!wait) {
+                        // Cached results, don't wait for server value
+                        done = true;
+                        resolve(exists);
+                    }
+                    else {
+                        // Cached results, wait 1s before resolving with this value, server value might follow soon
+                        setTimeout(() => {
+                            if (done) {
+                                return;
+                            }
+                            done = true;
+                            resolve(exists);
+                        }, 1000);
+                    }
+                };
+                const errors = [];
+                const gotError = (source, error) => {
+                    errors.push({ source, error });
+                    if (errors.length === 2) {
+                        // Both failed, reject with server error
+                        reject(errors.find(e => e.source === 'server'));
+                    }
+                };
+                getServerExists()
+                    .then(exists => gotExists('server', exists))
+                    .catch(err => (wait = false, gotError('server', err)));
+                getCacheExists()
+                    .then(exists => gotExists('cache', exists))
+                    .catch(err => gotError('cache', err));
+            });
+        }
+    }
+    callExtension(method, path, data) {
+        method = method.toUpperCase();
+        const postData = ['PUT', 'POST'].includes(method) ? data : null;
+        let url = `${this.url}/ext/${this.dbname}/${path}`;
+        if (data && !['PUT', 'POST'].includes(method)) {
+            // Add to query string
+            if (typeof data === 'object') {
+                // Convert object to querystring
+                data = Object.keys(data)
+                    .filter(key => typeof data[key] !== 'undefined')
+                    .map(key => key + '=' + encodeURIComponent(JSON.stringify(data[key])))
+                    .join('&');
+            }
+            else if (typeof data !== 'string' || !data.includes('=')) {
+                throw new Error('data must be an object, or a string with query parameters, like "index=3&name=Something"');
+            }
+            url += `?` + data;
+        }
+        return this._request({ method, url, data: postData, ignoreConnectionState: true });
+    }
+    /**
+     * Clears the entire cache, or a specific path without raising any events
+     */
+    clearCache(path = '') {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this._cache) {
+                const value = path === '' ? {} : null;
+                const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+                return this._cache.db.api.set(cachePath, value, { suppress_events: true });
+            }
+        });
+    }
+    /**
+     * Updates the local cache with remote changes by retrieving all mutations to `path` since given `cursor` and applying them to the local cache database.
+     * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
+     */
+    updateCache(
+    /**
+     * Path to update. The root path will be used if not given, synchronizing the entire database.
+     */
+    path = '', 
+    /**
+     * A previously acquired cursor to update the cache with. If not specified, `path`'s entire value will be loaded from the server
+     */
+    cursor) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this._cache) {
+                throw new Error(`No cache database used`);
+            }
+            const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+            const cacheApi = this._cache.db.api;
+            const loadValue = cursor === null || typeof cursor === 'undefined' || !(yield cacheApi.exists(cachePath));
+            if (loadValue) {
+                // Load from server, store in cache (.get takes care of that)
+                const { value, context } = yield this.get(path, { cache_mode: 'bypass' });
+                return { path, used_cursor: cursor, new_cursor: context.acebase_cursor, loaded_value: true, changes: [] };
+            }
+            // Get effective changes from server
+            const { changes, new_cursor } = yield this.getChanges({ path, cursor });
+            for (const ch of changes) {
+                // Apply to local cache
+                const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, ch.path);
+                const options = { context: ch.context, suppress_events: false };
+                if (ch.type === 'update') {
+                    yield cacheApi.update(cachePath, ch.value, options);
+                }
+                else if (ch.type === 'set') {
+                    yield cacheApi.set(cachePath, ch.value, options);
+                }
+            }
+            return { path, used_cursor: cursor, new_cursor, loaded_value: false, changes };
+        });
+    }
+    /**
+     * @returns returns a promise that resolves with matching data or paths in `results`
+     */
+    query(path, query, options = { snapshots: false, cache_mode: 'allow', monitor: { add: false, change: false, remove: false } }) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const useCache = this.hasCache && (options.cache_mode === 'force' || (options.cache_mode === 'allow' && !this.isConnected));
+            if (useCache) {
+                // Not connected, or "force" cache_mode: query cache db
+                const data = yield this.cache.db.api.query(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
+                let { results, context } = data;
+                const { stop } = data;
+                if (!('results' in data && 'context' in data)) {
+                    // OLD api did not return context
+                    console.warn(`Missing context from local query results. Update your acebase package`);
+                    results = data;
+                    context = {};
+                }
+                context.acebase_origin = 'cache';
+                delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
+                return { results, context, stop };
+            }
+            const request = {
+                query,
+                options,
+            };
+            if (options.monitor === true || (typeof options.monitor === 'object' && (options.monitor.add || options.monitor.change || options.monitor.remove))) {
+                console.assert(typeof options.eventHandler === 'function', `no eventHandler specified to handle realtime changes`);
+                if (!this.socket) {
+                    throw new Error(`Cannot create realtime query because websocket is not connected. Check your AceBaseClient network.realtime setting`);
+                }
+                request.query_id = acebase_core_1.ID.generate();
+                request.client_id = this.socket.id;
+                this._realtimeQueries[request.query_id] = { query, options };
+            }
+            const reqData = JSON.stringify(acebase_core_1.Transport.serialize(request));
+            try {
+                const { data, context } = yield this._request({ method: 'POST', url: `${this.url}/query/${this.dbname}/${path}`, data: reqData, includeContext: true });
+                const results = acebase_core_1.Transport.deserialize(data);
+                context.acebase_origin = 'server';
+                const stop = () => __awaiter(this, void 0, void 0, function* () {
+                    // Stops subscription of realtime query results. Requires acebase-server v1.10.0+
+                    delete this._realtimeQueries[request.query_id];
+                    yield _websocketRequest(this.socket, 'query-unsubscribe', { query_id: request.query_id }, this.accessToken);
+                });
+                return { results: results.list, context, stop };
+            }
+            catch (err) {
+                throw err;
+            }
+        });
+    }
+    createIndex(path, key, options) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (options && options.config && Object.values(options.config).find(val => typeof val === 'function')) {
+                throw new Error(`Cannot create an index with callback functions through a client. Move your code serverside`);
+            }
+            const version = this._serverVersion.split('.');
+            if (version.length === 3 && +version[0] >= 1 && +version[1] >= 10) {
+                // acebase-server v1.10+ has a new dedicated endpoint at /index/dbname/create
+                const data = JSON.stringify({ path, key, options });
+                return yield this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}/create`, data });
+            }
+            else {
+                const data = JSON.stringify({ action: 'create', path, key, options });
+                return yield this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}`, data });
+            }
+        });
+    }
+    getIndexes() {
+        return this._request({ url: `${this.url}/index/${this.dbname}` });
+    }
+    deleteIndex(fileName) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Requires acebase-server v1.10+
+            const version = this._serverVersion.split('.');
+            if (version.length === 3 && +version[0] >= 1 && +version[1] >= 10) {
+                const data = JSON.stringify({ fileName });
+                return this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}/delete`, data });
+            }
+            else {
+                throw new Error(`not supported, requires acebase-server 1.10 or higher`);
+            }
+        });
+    }
+    reflect(path, type, args) {
+        let url = `${this.url}/reflect/${this.dbname}/${path}?type=${type}`;
+        if (typeof args === 'object') {
+            const query = Object.keys(args).map(key => {
+                return `${key}=${args[key]}`;
+            });
+            if (query.length > 0) {
+                url += `&${query.join('&')}`;
+            }
+        }
+        return this._request({ url });
+    }
+    export(path, write, options = { format: 'json', type_safe: true }) {
+        options.format = 'json';
+        options.type_safe = options.type_safe !== false;
+        const url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}&type_safe=${options.type_safe ? 1 : 0}`;
+        return this._request({ url, dataReceivedCallback: chunk => write(chunk) });
+    }
+    import(path, read, options = { format: 'json', suppress_events: false }) {
+        options.format = 'json';
+        options.suppress_events = options.suppress_events === true;
+        const url = `${this.url}/import/${this.dbname}/${path}?format=${options.format}&suppress_events=${options.suppress_events ? 1 : 0}`;
+        return this._request({ method: 'POST', url, dataRequestCallback: length => read(length) });
+    }
+    get serverPingUrl() {
+        return `${this.url}/ping/${this.dbname}`;
+    }
+    getServerInfo() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const info = yield this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
+                // Prior to acebase-server v0.9.37, info was at /info (no dbname attached)
+                if (!err.isNetworkError) {
+                    this.debug.warn(`Could not get server info, update your acebase server version`);
+                }
+                return { version: 'unknown', time: Date.now() };
+            });
+            this._serverVersion = info.version;
+            return info;
+        });
+    }
+    setSchema(path, schema) {
+        if (schema !== null) {
+            schema = (new acebase_core_1.SchemaDefinition(schema)).text;
+        }
+        const data = JSON.stringify({ action: 'set', path, schema });
+        return this._request({ method: 'POST', url: `${this.url}/schema/${this.dbname}`, data });
+    }
+    getSchema(path) {
+        return this._request({ url: `${this.url}/schema/${this.dbname}/${path}` });
+    }
+    getSchemas() {
+        return this._request({ url: `${this.url}/schema/${this.dbname}` });
+    }
+    validateSchema(path, value, isUpdate) {
+        return __awaiter(this, void 0, void 0, function* () {
+            throw new Error(`Manual schema validation can only be used on standalone databases`);
+        });
+    }
+}
+exports.WebApi = WebApi;
+
+},{"./base64":4,"./errors":6,"./promise-timeout":9,"./request":10,"./request/error":11,"acebase-core":30,"socket.io-client":18}],3:[function(require,module,exports){
+"use strict";
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AceBaseClientAuth = void 0;
+const user_1 = require("./user");
+class AceBaseClientAuth {
+    constructor(client, eventCallback) {
+        this.client = client;
+        this.eventCallback = eventCallback;
+        this.user = null;
+        this.accessToken = null;
+    }
+    /**
+     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * @param username A database username
+     * @param password The password
+     * @returns returns a promise that resolves with the signed in user and access token
+     */
+    signIn(username, password) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            const details = yield this.client.api.signIn(username, password);
+            if (this.user) {
+                this.eventCallback('signout', { source: 'signin', user: this.user });
+            }
+            this.accessToken = details.accessToken;
+            this.user = new user_1.AceBaseUser(details.user);
+            this.eventCallback('signin', { source: 'signin', user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken };
+        });
+    }
+    /**
+     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * @param email An email address
+     * @param password The password
+     * @returns returns a promise that resolves with the signed in user and access token
+     */
+    signInWithEmail(email, password) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            const details = yield this.client.api.signInWithEmail(email, password);
+            if (this.user) {
+                this.eventCallback('signout', { source: 'email_signin', user: this.user });
+            }
+            this.accessToken = details.accessToken;
+            this.user = new user_1.AceBaseUser(details.user);
+            this.eventCallback('signin', { source: 'email_signin', user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken }; //success: true,
+        });
+    }
+    /**
+     * Sign into an account using a previously acquired access token
+     * @param accessToken a previously acquired access token
+     * @returns returns a promise that resolves with the signed in user and access token. If the token is not right, the thrown `error.code` will be `'not_found'` or `'invalid_token'`
+     */
+    signInWithToken(accessToken) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            const details = yield this.client.api.signInWithToken(accessToken);
+            if (this.user) {
+                this.eventCallback('signout', { source: 'token_signin', user: this.user });
+            }
+            this.accessToken = details.accessToken;
+            this.user = new user_1.AceBaseUser(details.user);
+            this.eventCallback('signin', { source: 'token_signin', user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken }; // success: true,
+        });
+    }
+    /**
+     * If the client is offline, you can specify an access token to automatically try signing in the user once a connection is made.
+     * Doing this is recommended if you are subscribing to event paths that require user authentication/authorization. Subscribing to
+     * those server events will then be done after signing in, instead of failing after connecting anonymously.
+     * @param accessToken A previously acquired access token
+     */
+    setAccessToken(accessToken) {
+        this.client.api.setAccessToken(accessToken);
+    }
+    /**
+     * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
+     * This method returs a Promise that resolves with the url you have to redirect your user to authenticate
+     * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
+     * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
+     * to finish signing in.
+     * @param providerName one of the configured providers (eg 'facebook', 'google', 'apple', 'spotify')
+     * @param callbackUrl url on your website/app that will receive the sign in result
+     * @param options optional provider specific authentication settings
+     * @returns returns a Promise that resolves with the url you have to redirect your user to.
+     */
+    startAuthProviderSignIn(providerName, callbackUrl, options) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            const details = yield this.client.api.startAuthProviderSignIn(providerName, callbackUrl, options);
+            return details.redirectUrl;
+        });
+    }
+    /**
+     * Use this method to finish OAuth flow from your callbackUrl.
+     * @param callbackResult result received in your.callback/url?result
+     */
+    finishAuthProviderSignIn(callbackResult) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            const details = yield this.client.api.finishAuthProviderSignIn(callbackResult);
+            const isOtherUser = !this.user || this.user.uid !== details.user.uid;
+            isOtherUser && this.eventCallback('signout', { source: 'oauth_signin', user: this.user });
+            this.accessToken = details.accessToken;
+            this.user = new user_1.AceBaseUser(details.user);
+            isOtherUser && this.eventCallback('signin', { source: 'oauth_signin', user: this.user, accessToken: this.accessToken });
+            return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true,
+        });
+    }
+    /**
+     * Refreshes an expiring access token with the refresh token returned from finishAuthProviderSignIn
+     */
+    refreshAuthProviderToken(providerName, refreshToken) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            const details = yield this.client.api.refreshAuthProviderToken(providerName, refreshToken);
+            return { provider: details.provider };
+        });
+    }
+    /**
+     * Signs in with an external auth provider by redirecting the user to the provider's login page.
+     * After signing in, the user will be redirected to the current browser url. Execute
+     * getRedirectResult() when your page is loaded again to check if the user was authenticated.
+     */
+    signInWithRedirect(providerName) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (typeof window === 'undefined') {
+                throw new Error(`signInWithRedirect can only be used within a browser context`);
+            }
+            const redirectUrl = yield this.startAuthProviderSignIn(providerName, window.location.href);
+            window.location.href = redirectUrl;
+        });
+    }
+    /**
+     * Checks if the user authentication with an auth provider.
+     */
+    getRedirectResult() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (typeof window === 'undefined') {
+                throw new Error(`getRedirectResult can only be used within a browser context`);
+            }
+            const match = window.location.search.match(/[?&]result=(.*?)(?:&|$)/);
+            const callbackResult = match && decodeURIComponent(match[1]);
+            if (!callbackResult) {
+                return null;
+            }
+            return yield this.finishAuthProviderSignIn(callbackResult);
+        });
+    }
+    /**
+     * Signs out of the current account
+     * @param options options object, or boolean specifying whether to signout everywhere
+     * @returnsreturns a promise that resolves when user was signed out successfully
+     */
+    signOut(options) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            else if (!this.user) {
+                throw { code: 'not_signed_in', message: 'Not signed in!' };
+            }
+            if (this.client.connected) {
+                yield this.client.api.signOut(options);
+            }
+            this.accessToken = null;
+            const user = this.user;
+            this.user = null;
+            this.eventCallback('signout', { source: 'signout', user });
+        });
+    }
+    /**
+     * Changes the password of the currently signed into account
+     * @param oldPassword
+     * @param newPassword
+     * @returns returns a promise that resolves with a new access token
+     */
+    changePassword(oldPassword, newPassword) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            if (!this.user) {
+                throw { code: 'not_signed_in', message: 'Not signed in!' };
+            }
+            const result = yield this.client.api.changePassword(this.user.uid, oldPassword, newPassword);
+            this.accessToken = result.accessToken;
+            this.eventCallback('signin', { source: 'password_change', user: this.user, accessToken: this.accessToken });
+            return { accessToken: result.accessToken }; //success: true,
+        });
+    }
+    /**
+     * Requests a password reset for the account with specified email address
+     * @param email
+     * @returns returns a promise that resolves once the request has been processed
+     */
+    forgotPassword(email) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            yield this.client.api.forgotPassword(email);
+        });
+    }
+    /**
+     * Requests a password to be changed using a previously acquired reset code, sent to the email address with forgotPassword
+     * @param resetCode
+     * @param newPassword
+     * @returns returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
+     */
+    resetPassword(resetCode, newPassword) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            yield this.client.api.resetPassword(resetCode, newPassword);
+        });
+    }
+    /**
+     * Verifies an e-mail address using the code sent to the email address upon signing up
+     * @param verificationCode
+     * @returns returns a promise that resolves when verification was successful
+     */
+    verifyEmailAddress(verificationCode) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            yield this.client.api.verifyEmailAddress(verificationCode);
+        });
+    }
+    /**
+     * Updates one or more user account details
+     * @returns returns a promise with the updated user details
+     */
+    updateUserDetails(details) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            if (!this.user) {
+                throw { code: 'not_signed_in', message: 'Not signed in!' };
+            }
+            if (typeof details !== 'object') {
+                throw { code: 'invalid_details', message: 'details must be an object' };
+            }
+            const result = yield this.client.api.updateUserDetails(details);
+            if (!this.user) {
+                // Signed out in the mean time
+                return { user: null };
+            }
+            for (const key of Object.keys(result.user)) {
+                this.user[key] = result.user[key];
+            }
+            return { user: this.user };
+        });
+    }
+    /**
+     * Changes the username of the currrently signed into account
+     * @returns returns a promise that resolves with the updated user details
+     */
+    changeUsername(newUsername) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return this.updateUserDetails({ username: newUsername });
+        });
+    }
+    /**
+     * Changes the display name of the currrently signed into account
+     * @param newName
+     * @returns returns a promise that resolves with the updated user details
+     */
+    changeDisplayName(newName) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return this.updateUserDetails({ display_name: newName });
+        });
+    }
+    /**
+     * Changes the email address of the currrently signed in user
+     * @param newEmail
+     * @returns returns a promise that resolves with the updated user details
+     */
+    changeEmail(newEmail) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return this.updateUserDetails({ email: newEmail });
+        });
+    }
+    /**
+     * Changes the user's profile picture
+     * @returns returns a promise that resolves with the updated user details
+     */
+    changePicture(newPicture) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return yield this.updateUserDetails({ picture: newPicture });
+        });
+    }
+    /**
+     * Updates settings of the currrently signed in user. Passed settings will be merged with the user's current settings
+     * @param settings the settings to update
+     * @returns returns a promise that resolves with the updated user details
+     */
+    updateUserSettings(settings) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return yield this.updateUserDetails({ settings });
+        });
+    }
+    /**
+     * Creates a new user account with the given details. If successful, you will automatically be
+     * signed into the account. Note: the request will fail if the server has disabled this option
+     * @returns returns a promise that resolves with the signed in user and access token
+     */
+    signUp(details) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!details.username && !details.email) {
+                throw { code: 'invalid_details', message: 'No username or email set' };
+            }
+            if (!details.password) {
+                throw { code: 'invalid_details', message: 'No password given' };
+            }
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            const isAdmin = this.user && this.user.uid === 'admin';
+            if (this.user && !isAdmin) {
+                // Sign out of current account
+                const user = this.user;
+                this.user = null;
+                this.eventCallback('signout', { source: 'signup', user });
+            }
+            const result = yield this.client.api.signUp(details, !isAdmin);
+            if (isAdmin) {
+                return { user: result.user };
+            }
+            else {
+                // Sign into new account
+                this.accessToken = result.accessToken;
+                this.user = new user_1.AceBaseUser(result.user);
+                this.eventCallback('signin', { source: 'signup', user: this.user, accessToken: this.accessToken });
+                return { user: this.user, accessToken: this.accessToken }; //success: true,
+            }
+        });
+    }
+    /**
+     * Removes the currently signed in user account and signs out. Note: this will only
+     * remove the database user account, not any data stored in the database by this user. It is
+     * your own responsibility to remove that data.
+     * @param uid for admin user only: remove account with specific uid
+     */
+    deleteAccount(uid) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.client.isReady) {
+                yield this.client.ready();
+            }
+            if (!this.user) {
+                throw { code: 'not_signed_in', message: 'Not signed in!' };
+            }
+            if (uid && this.user.uid !== 'admin') {
+                throw { code: 'not_admin', message: 'Cannot remove other accounts than signed into account, unless you are admin' };
+            }
+            const deleteUid = uid || this.user.uid;
+            if (deleteUid === 'admin') {
+                throw { code: 'not_allowed', message: 'Cannot remove admin user' };
+            }
+            const signOut = this.user.uid !== 'admin';
+            const result = yield this.client.api.deleteAccount(deleteUid, signOut);
+            if (signOut) {
+                // Sign out of the account
+                this.accessToken = null;
+                const user = this.user;
+                this.user = null;
+                this.eventCallback('signout', { source: 'delete_account', user });
+            }
+        });
+    }
+}
+exports.AceBaseClientAuth = AceBaseClientAuth;
+
+},{"./user":13}],4:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.decode = exports.encode = void 0;
+function encode(str) {
+    return btoa(unescape(encodeURIComponent(str)));
+}
+exports.encode = encode;
+function decode(base64) {
+    return decodeURIComponent(escape(atob(base64)));
+}
+exports.decode = decode;
+
+},{}],5:[function(require,module,exports){
+"use strict";
+/*
+    * This file is used to generate a browser bundle to use as an include
+    (re)generate it with: npm run browserify
+
+    * To use AceBaseClient in the browser:
+    <script type="text/javascript" src="dist/browser.min.js"></script>
+    <script type="text/javascript">
+        const db = new AceBaseClient({ dbname: 'dbname', host: 'localhost', port: 3000, https: false });
+        db.ready(() => {
+            // Ready to do some work
+        })
+    </script>
+*/
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __exportStar = (this && this.__exportStar) || function(m, exports) {
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const acebaseclient = require("./index");
+window.acebaseclient = acebaseclient;
+window.AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
+__exportStar(require("./index"), exports);
+
+},{"./index":7}],6:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.CachedValueUnavailableError = void 0;
+class CachedValueUnavailableError extends Error {
+    constructor(path, message) {
+        super(message || `Value for path "/${path}" is not available in cache`);
+        this.path = path;
+    }
+}
+exports.CachedValueUnavailableError = CachedValueUnavailableError;
+
+},{}],7:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.CachedValueUnavailableError = exports.ServerDate = exports.AceBaseClient = exports.Transport = exports.PartialArray = exports.ObjectCollection = exports.proxyAccess = exports.ID = exports.TypeMappings = exports.PathReference = exports.EventSubscription = exports.DataSnapshot = exports.DataReference = void 0;
+var acebase_core_1 = require("acebase-core");
+Object.defineProperty(exports, "DataReference", { enumerable: true, get: function () { return acebase_core_1.DataReference; } });
+Object.defineProperty(exports, "DataSnapshot", { enumerable: true, get: function () { return acebase_core_1.DataSnapshot; } });
+Object.defineProperty(exports, "EventSubscription", { enumerable: true, get: function () { return acebase_core_1.EventSubscription; } });
+Object.defineProperty(exports, "PathReference", { enumerable: true, get: function () { return acebase_core_1.PathReference; } });
+Object.defineProperty(exports, "TypeMappings", { enumerable: true, get: function () { return acebase_core_1.TypeMappings; } });
+Object.defineProperty(exports, "ID", { enumerable: true, get: function () { return acebase_core_1.ID; } });
+Object.defineProperty(exports, "proxyAccess", { enumerable: true, get: function () { return acebase_core_1.proxyAccess; } });
+Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: function () { return acebase_core_1.ObjectCollection; } });
+Object.defineProperty(exports, "PartialArray", { enumerable: true, get: function () { return acebase_core_1.PartialArray; } });
+Object.defineProperty(exports, "Transport", { enumerable: true, get: function () { return acebase_core_1.Transport; } });
+var acebase_client_1 = require("./acebase-client");
+Object.defineProperty(exports, "AceBaseClient", { enumerable: true, get: function () { return acebase_client_1.AceBaseClient; } });
+var server_date_1 = require("./server-date");
+Object.defineProperty(exports, "ServerDate", { enumerable: true, get: function () { return server_date_1.ServerDate; } });
+var errors_1 = require("./errors");
+Object.defineProperty(exports, "CachedValueUnavailableError", { enumerable: true, get: function () { return errors_1.CachedValueUnavailableError; } });
+
+},{"./acebase-client":1,"./errors":6,"./server-date":12,"acebase-core":30}],8:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.default = performance;
+
+},{}],9:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.promiseTimeout = exports.PromiseTimeoutError = void 0;
+class PromiseTimeoutError extends Error {
+}
+exports.PromiseTimeoutError = PromiseTimeoutError;
+function promiseTimeout(promise, ms, comment) {
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new PromiseTimeoutError(`Promise ${comment ? `"${comment}" ` : ''}timed out after ${ms}ms`)), ms);
+        function success(result) {
+            clearTimeout(timeout);
+            resolve(result);
+        }
+        promise.then(success).catch(reject);
+    });
+}
+exports.promiseTimeout = promiseTimeout;
+
+},{}],10:[function(require,module,exports){
+"use strict";
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const error_1 = require("./error");
+/**
+ * @returns returns a promise that resolves with an object containing data and an optionally returned context
+ */
+function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, dataRequestCallback: null, context: null }) {
+    var _a;
+    return __awaiter(this, void 0, void 0, function* () {
+        let postData = options.data;
+        if (typeof postData === 'undefined' || postData === null) {
+            postData = '';
+        }
+        else if (typeof postData === 'object') {
+            postData = JSON.stringify(postData);
+        }
+        const headers = {
+            'AceBase-Context': JSON.stringify(options.context || null),
+        };
+        const init = {
+            method,
+            headers,
+            body: undefined,
+        };
+        if (typeof options.dataRequestCallback === 'function') {
+            // Stream data to the server instead of posting all from memory at once
+            headers['Content-Type'] = 'text/plain'; // Prevent server middleware parsing the content as JSON
+            const supportsStreaming = false;
+            if (supportsStreaming) {
+                // Streaming uploads appears not to be implemented in Chromium/Chrome yet.
+                // Setting the body property to a ReadableStream results in the string "[object ReadableStream]"
+                // See https://bugs.chromium.org/p/chromium/issues/detail?id=688906 and https://stackoverflow.com/questions/40939857/fetch-with-readablestream-as-request-body
+                let canceled = false;
+                init.body = new ReadableStream({
+                    pull(controller) {
+                        var _a;
+                        return __awaiter(this, void 0, void 0, function* () {
+                            const chunkSize = controller.desiredSize || 1024 * 16;
+                            const chunk = yield ((_a = options.dataRequestCallback) === null || _a === void 0 ? void 0 : _a.call(options, chunkSize));
+                            if (canceled || [null, ''].includes(chunk)) {
+                                controller.close();
+                            }
+                            else {
+                                controller.enqueue(chunk);
+                            }
+                        });
+                    },
+                    // eslint-disable-next-line @typescript-eslint/no-empty-function, @typescript-eslint/no-unused-vars
+                    start(controller) {
+                        return __awaiter(this, void 0, void 0, function* () { });
+                    },
+                    cancel() {
+                        canceled = true;
+                    },
+                });
+            }
+            else {
+                // Streaming not supported
+                postData = '';
+                const chunkSize = 1024 * 512; // Use large chunk size, we have to store everything in memory anyway.
+                let chunk;
+                while ((chunk = yield options.dataRequestCallback(chunkSize))) {
+                    postData += chunk;
+                }
+                init.body = postData;
+            }
+        }
+        else if (postData.length > 0) {
+            headers['Content-Type'] = 'application/json';
+            init.body = postData;
+        }
+        if (options.accessToken) {
+            headers['Authorization'] = `Bearer ${options.accessToken}`;
+        }
+        const request = { url, method, headers, body: undefined };
+        const res = yield fetch(request.url, init).catch(err => {
+            // console.error(err);
+            throw new error_1.AceBaseRequestError(request, null, 'fetch_failed', err.message);
+        });
+        let data = '';
+        if (typeof options.dataReceivedCallback === 'function') {
+            // Stream response
+            const reader = (_a = res.body) === null || _a === void 0 ? void 0 : _a.getReader();
+            yield new Promise((resolve, reject) => {
+                (function readNext() {
+                    var _a;
+                    return __awaiter(this, void 0, void 0, function* () {
+                        try {
+                            const result = yield (reader === null || reader === void 0 ? void 0 : reader.read());
+                            (_a = options.dataReceivedCallback) === null || _a === void 0 ? void 0 : _a.call(options, result === null || result === void 0 ? void 0 : result.value);
+                            if (result === null || result === void 0 ? void 0 : result.done) {
+                                return resolve();
+                            }
+                            readNext();
+                        }
+                        catch (err) {
+                            reader === null || reader === void 0 ? void 0 : reader.cancel('error');
+                            reject(err);
+                        }
+                    });
+                })();
+            });
+        }
+        else {
+            data = yield res.text();
+        }
+        const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
+        if (res.status === 200) {
+            const contextHeader = res.headers.get('AceBase-Context');
+            let context;
+            if (contextHeader && contextHeader[0] === '{') {
+                context = JSON.parse(contextHeader);
+            }
+            else {
+                context = {};
+            }
+            if (isJSON) {
+                data = JSON.parse(data);
+            }
+            return { context, data };
+        }
+        else {
+            request.body = postData;
+            const response = {
+                statusCode: res.status,
+                statusMessage: res.statusText,
+                headers: res.headers,
+                body: data,
+            };
+            let code = res.status, message = res.statusText;
+            if (isJSON) {
+                const err = JSON.parse(data);
+                if (err.code) {
+                    code = err.code;
+                }
+                if (err.message) {
+                    message = err.message;
+                }
+            }
+            throw (new error_1.AceBaseRequestError(request, response, code, message));
+        }
+    });
+}
+exports.default = request;
+
+},{"./error":11}],11:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.NOT_CONNECTED_ERROR_MESSAGE = exports.AceBaseRequestError = void 0;
+class AceBaseRequestError extends Error {
+    constructor(request, response, code, message = 'unknown error') {
+        super(message);
+        this.request = request;
+        this.response = response;
+        this.code = code;
+        this.message = message;
+    }
+    get isNetworkError() {
+        return this.response === null;
+    }
+}
+exports.AceBaseRequestError = AceBaseRequestError;
+exports.NOT_CONNECTED_ERROR_MESSAGE = 'remote database is not connected'; //'AceBaseClient is not connected';
+
+},{}],12:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ServerDate = exports.setServerBias = void 0;
+const acebase_core_1 = require("acebase-core");
+const performance_1 = require("./performance");
+const time = {
+    serverBias: 0,
+    localBias: 0,
+    lastTime: Date.now(),
+    lastPerf: performance_1.default.now(),
+    get bias() { return this.serverBias + this.localBias; },
+};
+function biasChanged() {
+    console.log(`Bias changed. server bias = ${time.serverBias}ms, local bias = ${time.localBias}ms`);
+    acebase_core_1.ID.timeBias = time.bias; // undocumented
+}
+// Keep monitoring local time for changes, adjust local bias accordingly
+const interval = 10000; // 10s
+function checkLocalTime() {
+    // console.log('Checking time...');
+    const now = Date.now(), // eg 20:00:00
+    perf = performance_1.default.now(), msPassed = perf - time.lastPerf, // now - time.lastTime, //
+    expected = time.lastTime + Math.round(msPassed), // 19:00:00
+    diff = expected - now; // -1h
+    if (Math.abs(diff) > 1) {
+        console.log(`Local time changed. diff = ${diff}ms`);
+        time.localBias += diff;
+        biasChanged();
+    }
+    time.lastTime = now;
+    time.lastPerf = perf;
+    scheduleLocalTimeCheck();
+}
+function scheduleLocalTimeCheck() {
+    const timeout = setTimeout(checkLocalTime, interval);
+    timeout.unref && timeout.unref(); // Don't delay exiting the main process when the event loop is empty
+}
+scheduleLocalTimeCheck();
+function setServerBias(bias) {
+    if (typeof bias === 'number') {
+        time.serverBias = bias;
+        time.localBias = 0;
+        biasChanged();
+    }
+}
+exports.setServerBias = setServerBias;
+class ServerDate extends Date {
+    constructor() {
+        const biasedTime = Date.now() + time.bias;
+        super(biasedTime);
+    }
+}
+exports.ServerDate = ServerDate;
+
+},{"./performance":8,"acebase-core":30}],13:[function(require,module,exports){
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AceBaseUser = void 0;
+class AceBaseUser {
+    constructor(user) {
+        var _a, _b, _c;
+        Object.assign(this, user);
+        if (!user.uid) {
+            throw new Error('User details is missing required uid field');
+        }
+        this.uid = user.uid;
+        this.displayName = (_a = user.displayName) !== null && _a !== void 0 ? _a : 'unknown';
+        this.created = (_b = user.created) !== null && _b !== void 0 ? _b : new Date(0);
+        this.settings = (_c = user.settings) !== null && _c !== void 0 ? _c : {};
+    }
+}
+exports.AceBaseUser = AceBaseUser;
+// export class AceBaseAuthResult {
+//     success: boolean;
+//     reason?: { code: string, message: string };
+//     constructor(result: { success: boolean; reason?: { code: string, message: string }}) {
+//         this.success = result.success;
+//         if (!result.success) {
+//             this.reason = result.reason;
+//         }
+//     }
+// }
+
+},{}],14:[function(require,module,exports){
 'use strict'
 
 exports.byteLength = byteLength
@@ -150,9 +3400,9 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],2:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 
-},{}],3:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 (function (Buffer){(function (){
 /*!
  * The buffer module from node.js, for the browser.
@@ -1933,7 +5183,7 @@ function numberIsNaN (obj) {
 }
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"base64-js":1,"buffer":3,"ieee754":4}],4:[function(require,module,exports){
+},{"base64-js":14,"buffer":16,"ieee754":17}],17:[function(require,module,exports){
 /*! ieee754. BSD-3-Clause License. Feross Aboukhadijeh <https://feross.org/opensource> */
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
@@ -2020,3238 +5270,15 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],5:[function(require,module,exports){
-(function (Buffer){(function (){
+},{}],18:[function(require,module,exports){
 /*!
- * Socket.IO v2.4.0
- * (c) 2014-2021 Guillermo Rauch
+ * Socket.IO v4.5.3
+ * (c) 2014-2022 Guillermo Rauch
  * Released under the MIT License.
  */
-!function(t,e){"object"==typeof exports&&"object"==typeof module?module.exports=e():"function"==typeof define&&define.amd?define([],e):"object"==typeof exports?exports.io=e():t.io=e()}(this,function(){return function(t){function e(n){if(r[n])return r[n].exports;var o=r[n]={exports:{},id:n,loaded:!1};return t[n].call(o.exports,o,o.exports,e),o.loaded=!0,o.exports}var r={};return e.m=t,e.c=r,e.p="",e(0)}([function(t,e,r){"use strict";function n(t,e){"object"===("undefined"==typeof t?"undefined":o(t))&&(e=t,t=void 0),e=e||{};var r,n=i(t),s=n.source,p=n.id,h=n.path,u=c[p]&&h in c[p].nsps,f=e.forceNew||e["force new connection"]||!1===e.multiplex||u;return f?r=a(s,e):(c[p]||(c[p]=a(s,e)),r=c[p]),n.query&&!e.query&&(e.query=n.query),r.socket(n.path,e)}var o="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},i=r(1),s=r(4),a=r(9);r(3)("socket.io-client");t.exports=e=n;var c=e.managers={};e.protocol=s.protocol,e.connect=n,e.Manager=r(9),e.Socket=r(34)},function(t,e,r){"use strict";function n(t,e){var r=t;e=e||"undefined"!=typeof location&&location,null==t&&(t=e.protocol+"//"+e.host),"string"==typeof t&&("/"===t.charAt(0)&&(t="/"===t.charAt(1)?e.protocol+t:e.host+t),/^(https?|wss?):\/\//.test(t)||(t="undefined"!=typeof e?e.protocol+"//"+t:"https://"+t),r=o(t)),r.port||(/^(http|ws)$/.test(r.protocol)?r.port="80":/^(http|ws)s$/.test(r.protocol)&&(r.port="443")),r.path=r.path||"/";var n=r.host.indexOf(":")!==-1,i=n?"["+r.host+"]":r.host;return r.id=r.protocol+"://"+i+":"+r.port,r.href=r.protocol+"://"+i+(e&&e.port===r.port?"":":"+r.port),r}var o=r(2);r(3)("socket.io-client:url");t.exports=n},function(t,e){function r(t,e){var r=/\/{2,9}/g,n=e.replace(r,"/").split("/");return"/"!=e.substr(0,1)&&0!==e.length||n.splice(0,1),"/"==e.substr(e.length-1,1)&&n.splice(n.length-1,1),n}function n(t,e){var r={};return e.replace(/(?:^|&)([^&=]*)=?([^&]*)/g,function(t,e,n){e&&(r[e]=n)}),r}var o=/^(?:(?![^:@]+:[^:@\/]*@)(http|https|ws|wss):\/\/)?((?:(([^:@]*)(?::([^:@]*))?)?@)?((?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}|[^:\/?#]*)(?::(\d*))?)(((\/(?:[^?#](?![^?#\/]*\.[^?#\/.]+(?:[?#]|$)))*\/?)?([^?#\/]*))(?:\?([^#]*))?(?:#(.*))?)/,i=["source","protocol","authority","userInfo","user","password","host","port","relative","path","directory","file","query","anchor"];t.exports=function(t){var e=t,s=t.indexOf("["),a=t.indexOf("]");s!=-1&&a!=-1&&(t=t.substring(0,s)+t.substring(s,a).replace(/:/g,";")+t.substring(a,t.length));for(var c=o.exec(t||""),p={},h=14;h--;)p[i[h]]=c[h]||"";return s!=-1&&a!=-1&&(p.source=e,p.host=p.host.substring(1,p.host.length-1).replace(/;/g,":"),p.authority=p.authority.replace("[","").replace("]","").replace(/;/g,":"),p.ipv6uri=!0),p.pathNames=r(p,p.path),p.queryKey=n(p,p.query),p}},function(t,e){"use strict";t.exports=function(){return function(){}}},function(t,e,r){function n(){}function o(t){var r=""+t.type;if(e.BINARY_EVENT!==t.type&&e.BINARY_ACK!==t.type||(r+=t.attachments+"-"),t.nsp&&"/"!==t.nsp&&(r+=t.nsp+","),null!=t.id&&(r+=t.id),null!=t.data){var n=i(t.data);if(n===!1)return m;r+=n}return r}function i(t){try{return JSON.stringify(t)}catch(t){return!1}}function s(t,e){function r(t){var r=l.deconstructPacket(t),n=o(r.packet),i=r.buffers;i.unshift(n),e(i)}l.removeBlobs(t,r)}function a(){this.reconstructor=null}function c(t){var r=0,n={type:Number(t.charAt(0))};if(null==e.types[n.type])return u("unknown packet type "+n.type);if(e.BINARY_EVENT===n.type||e.BINARY_ACK===n.type){for(var o="";"-"!==t.charAt(++r)&&(o+=t.charAt(r),r!=t.length););if(o!=Number(o)||"-"!==t.charAt(r))throw new Error("Illegal attachments");n.attachments=Number(o)}if("/"===t.charAt(r+1))for(n.nsp="";++r;){var i=t.charAt(r);if(","===i)break;if(n.nsp+=i,r===t.length)break}else n.nsp="/";var s=t.charAt(r+1);if(""!==s&&Number(s)==s){for(n.id="";++r;){var i=t.charAt(r);if(null==i||Number(i)!=i){--r;break}if(n.id+=t.charAt(r),r===t.length)break}n.id=Number(n.id)}if(t.charAt(++r)){var a=p(t.substr(r)),c=a!==!1&&(n.type===e.ERROR||d(a));if(!c)return u("invalid payload");n.data=a}return n}function p(t){try{return JSON.parse(t)}catch(t){return!1}}function h(t){this.reconPack=t,this.buffers=[]}function u(t){return{type:e.ERROR,data:"parser error: "+t}}var f=(r(3)("socket.io-parser"),r(5)),l=r(6),d=r(7),y=r(8);e.protocol=4,e.types=["CONNECT","DISCONNECT","EVENT","ACK","ERROR","BINARY_EVENT","BINARY_ACK"],e.CONNECT=0,e.DISCONNECT=1,e.EVENT=2,e.ACK=3,e.ERROR=4,e.BINARY_EVENT=5,e.BINARY_ACK=6,e.Encoder=n,e.Decoder=a;var m=e.ERROR+'"encode error"';n.prototype.encode=function(t,r){if(e.BINARY_EVENT===t.type||e.BINARY_ACK===t.type)s(t,r);else{var n=o(t);r([n])}},f(a.prototype),a.prototype.add=function(t){var r;if("string"==typeof t)r=c(t),e.BINARY_EVENT===r.type||e.BINARY_ACK===r.type?(this.reconstructor=new h(r),0===this.reconstructor.reconPack.attachments&&this.emit("decoded",r)):this.emit("decoded",r);else{if(!y(t)&&!t.base64)throw new Error("Unknown type: "+t);if(!this.reconstructor)throw new Error("got binary data when not reconstructing a packet");r=this.reconstructor.takeBinaryData(t),r&&(this.reconstructor=null,this.emit("decoded",r))}},a.prototype.destroy=function(){this.reconstructor&&this.reconstructor.finishedReconstruction()},h.prototype.takeBinaryData=function(t){if(this.buffers.push(t),this.buffers.length===this.reconPack.attachments){var e=l.reconstructPacket(this.reconPack,this.buffers);return this.finishedReconstruction(),e}return null},h.prototype.finishedReconstruction=function(){this.reconPack=null,this.buffers=[]}},function(t,e,r){function n(t){if(t)return o(t)}function o(t){for(var e in n.prototype)t[e]=n.prototype[e];return t}t.exports=n,n.prototype.on=n.prototype.addEventListener=function(t,e){return this._callbacks=this._callbacks||{},(this._callbacks["$"+t]=this._callbacks["$"+t]||[]).push(e),this},n.prototype.once=function(t,e){function r(){this.off(t,r),e.apply(this,arguments)}return r.fn=e,this.on(t,r),this},n.prototype.off=n.prototype.removeListener=n.prototype.removeAllListeners=n.prototype.removeEventListener=function(t,e){if(this._callbacks=this._callbacks||{},0==arguments.length)return this._callbacks={},this;var r=this._callbacks["$"+t];if(!r)return this;if(1==arguments.length)return delete this._callbacks["$"+t],this;for(var n,o=0;o<r.length;o++)if(n=r[o],n===e||n.fn===e){r.splice(o,1);break}return 0===r.length&&delete this._callbacks["$"+t],this},n.prototype.emit=function(t){this._callbacks=this._callbacks||{};for(var e=new Array(arguments.length-1),r=this._callbacks["$"+t],n=1;n<arguments.length;n++)e[n-1]=arguments[n];if(r){r=r.slice(0);for(var n=0,o=r.length;n<o;++n)r[n].apply(this,e)}return this},n.prototype.listeners=function(t){return this._callbacks=this._callbacks||{},this._callbacks["$"+t]||[]},n.prototype.hasListeners=function(t){return!!this.listeners(t).length}},function(t,e,r){function n(t,e){if(!t)return t;if(s(t)){var r={_placeholder:!0,num:e.length};return e.push(t),r}if(i(t)){for(var o=new Array(t.length),a=0;a<t.length;a++)o[a]=n(t[a],e);return o}if("object"==typeof t&&!(t instanceof Date)){var o={};for(var c in t)o[c]=n(t[c],e);return o}return t}function o(t,e){if(!t)return t;if(t&&t._placeholder)return e[t.num];if(i(t))for(var r=0;r<t.length;r++)t[r]=o(t[r],e);else if("object"==typeof t)for(var n in t)t[n]=o(t[n],e);return t}var i=r(7),s=r(8),a=Object.prototype.toString,c="function"==typeof Blob||"undefined"!=typeof Blob&&"[object BlobConstructor]"===a.call(Blob),p="function"==typeof File||"undefined"!=typeof File&&"[object FileConstructor]"===a.call(File);e.deconstructPacket=function(t){var e=[],r=t.data,o=t;return o.data=n(r,e),o.attachments=e.length,{packet:o,buffers:e}},e.reconstructPacket=function(t,e){return t.data=o(t.data,e),t.attachments=void 0,t},e.removeBlobs=function(t,e){function r(t,a,h){if(!t)return t;if(c&&t instanceof Blob||p&&t instanceof File){n++;var u=new FileReader;u.onload=function(){h?h[a]=this.result:o=this.result,--n||e(o)},u.readAsArrayBuffer(t)}else if(i(t))for(var f=0;f<t.length;f++)r(t[f],f,t);else if("object"==typeof t&&!s(t))for(var l in t)r(t[l],l,t)}var n=0,o=t;r(o),n||e(o)}},function(t,e){var r={}.toString;t.exports=Array.isArray||function(t){return"[object Array]"==r.call(t)}},function(t,e){function r(t){return n&&Buffer.isBuffer(t)||o&&(t instanceof ArrayBuffer||i(t))}t.exports=r;var n="function"==typeof Buffer&&"function"==typeof Buffer.isBuffer,o="function"==typeof ArrayBuffer,i=function(t){return"function"==typeof ArrayBuffer.isView?ArrayBuffer.isView(t):t.buffer instanceof ArrayBuffer}},function(t,e,r){"use strict";function n(t,e){if(!(this instanceof n))return new n(t,e);t&&"object"===("undefined"==typeof t?"undefined":o(t))&&(e=t,t=void 0),e=e||{},e.path=e.path||"/socket.io",this.nsps={},this.subs=[],this.opts=e,this.reconnection(e.reconnection!==!1),this.reconnectionAttempts(e.reconnectionAttempts||1/0),this.reconnectionDelay(e.reconnectionDelay||1e3),this.reconnectionDelayMax(e.reconnectionDelayMax||5e3),this.randomizationFactor(e.randomizationFactor||.5),this.backoff=new f({min:this.reconnectionDelay(),max:this.reconnectionDelayMax(),jitter:this.randomizationFactor()}),this.timeout(null==e.timeout?2e4:e.timeout),this.readyState="closed",this.uri=t,this.connecting=[],this.lastPing=null,this.encoding=!1,this.packetBuffer=[];var r=e.parser||c;this.encoder=new r.Encoder,this.decoder=new r.Decoder,this.autoConnect=e.autoConnect!==!1,this.autoConnect&&this.open()}var o="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},i=r(10),s=r(34),a=r(5),c=r(4),p=r(36),h=r(37),u=(r(3)("socket.io-client:manager"),r(33)),f=r(38),l=Object.prototype.hasOwnProperty;t.exports=n,n.prototype.emitAll=function(){this.emit.apply(this,arguments);for(var t in this.nsps)l.call(this.nsps,t)&&this.nsps[t].emit.apply(this.nsps[t],arguments)},n.prototype.updateSocketIds=function(){for(var t in this.nsps)l.call(this.nsps,t)&&(this.nsps[t].id=this.generateId(t))},n.prototype.generateId=function(t){return("/"===t?"":t+"#")+this.engine.id},a(n.prototype),n.prototype.reconnection=function(t){return arguments.length?(this._reconnection=!!t,this):this._reconnection},n.prototype.reconnectionAttempts=function(t){return arguments.length?(this._reconnectionAttempts=t,this):this._reconnectionAttempts},n.prototype.reconnectionDelay=function(t){return arguments.length?(this._reconnectionDelay=t,this.backoff&&this.backoff.setMin(t),this):this._reconnectionDelay},n.prototype.randomizationFactor=function(t){return arguments.length?(this._randomizationFactor=t,this.backoff&&this.backoff.setJitter(t),this):this._randomizationFactor},n.prototype.reconnectionDelayMax=function(t){return arguments.length?(this._reconnectionDelayMax=t,this.backoff&&this.backoff.setMax(t),this):this._reconnectionDelayMax},n.prototype.timeout=function(t){return arguments.length?(this._timeout=t,this):this._timeout},n.prototype.maybeReconnectOnOpen=function(){!this.reconnecting&&this._reconnection&&0===this.backoff.attempts&&this.reconnect()},n.prototype.open=n.prototype.connect=function(t,e){if(~this.readyState.indexOf("open"))return this;this.engine=i(this.uri,this.opts);var r=this.engine,n=this;this.readyState="opening",this.skipReconnect=!1;var o=p(r,"open",function(){n.onopen(),t&&t()}),s=p(r,"error",function(e){if(n.cleanup(),n.readyState="closed",n.emitAll("connect_error",e),t){var r=new Error("Connection error");r.data=e,t(r)}else n.maybeReconnectOnOpen()});if(!1!==this._timeout){var a=this._timeout;0===a&&o.destroy();var c=setTimeout(function(){o.destroy(),r.close(),r.emit("error","timeout"),n.emitAll("connect_timeout",a)},a);this.subs.push({destroy:function(){clearTimeout(c)}})}return this.subs.push(o),this.subs.push(s),this},n.prototype.onopen=function(){this.cleanup(),this.readyState="open",this.emit("open");var t=this.engine;this.subs.push(p(t,"data",h(this,"ondata"))),this.subs.push(p(t,"ping",h(this,"onping"))),this.subs.push(p(t,"pong",h(this,"onpong"))),this.subs.push(p(t,"error",h(this,"onerror"))),this.subs.push(p(t,"close",h(this,"onclose"))),this.subs.push(p(this.decoder,"decoded",h(this,"ondecoded")))},n.prototype.onping=function(){this.lastPing=new Date,this.emitAll("ping")},n.prototype.onpong=function(){this.emitAll("pong",new Date-this.lastPing)},n.prototype.ondata=function(t){this.decoder.add(t)},n.prototype.ondecoded=function(t){this.emit("packet",t)},n.prototype.onerror=function(t){this.emitAll("error",t)},n.prototype.socket=function(t,e){function r(){~u(o.connecting,n)||o.connecting.push(n)}var n=this.nsps[t];if(!n){n=new s(this,t,e),this.nsps[t]=n;var o=this;n.on("connecting",r),n.on("connect",function(){n.id=o.generateId(t)}),this.autoConnect&&r()}return n},n.prototype.destroy=function(t){var e=u(this.connecting,t);~e&&this.connecting.splice(e,1),this.connecting.length||this.close()},n.prototype.packet=function(t){var e=this;t.query&&0===t.type&&(t.nsp+="?"+t.query),e.encoding?e.packetBuffer.push(t):(e.encoding=!0,this.encoder.encode(t,function(r){for(var n=0;n<r.length;n++)e.engine.write(r[n],t.options);e.encoding=!1,e.processPacketQueue()}))},n.prototype.processPacketQueue=function(){if(this.packetBuffer.length>0&&!this.encoding){var t=this.packetBuffer.shift();this.packet(t)}},n.prototype.cleanup=function(){for(var t=this.subs.length,e=0;e<t;e++){var r=this.subs.shift();r.destroy()}this.packetBuffer=[],this.encoding=!1,this.lastPing=null,this.decoder.destroy()},n.prototype.close=n.prototype.disconnect=function(){this.skipReconnect=!0,this.reconnecting=!1,"opening"===this.readyState&&this.cleanup(),this.backoff.reset(),this.readyState="closed",this.engine&&this.engine.close()},n.prototype.onclose=function(t){this.cleanup(),this.backoff.reset(),this.readyState="closed",this.emit("close",t),this._reconnection&&!this.skipReconnect&&this.reconnect()},n.prototype.reconnect=function(){if(this.reconnecting||this.skipReconnect)return this;var t=this;if(this.backoff.attempts>=this._reconnectionAttempts)this.backoff.reset(),this.emitAll("reconnect_failed"),this.reconnecting=!1;else{var e=this.backoff.duration();this.reconnecting=!0;var r=setTimeout(function(){t.skipReconnect||(t.emitAll("reconnect_attempt",t.backoff.attempts),t.emitAll("reconnecting",t.backoff.attempts),t.skipReconnect||t.open(function(e){e?(t.reconnecting=!1,t.reconnect(),t.emitAll("reconnect_error",e.data)):t.onreconnect()}))},e);this.subs.push({destroy:function(){clearTimeout(r)}})}},n.prototype.onreconnect=function(){var t=this.backoff.attempts;this.reconnecting=!1,this.backoff.reset(),this.updateSocketIds(),this.emitAll("reconnect",t)}},function(t,e,r){t.exports=r(11),t.exports.parser=r(19)},function(t,e,r){function n(t,e){return this instanceof n?(e=e||{},t&&"object"==typeof t&&(e=t,t=null),t?(t=p(t),e.hostname=t.host,e.secure="https"===t.protocol||"wss"===t.protocol,e.port=t.port,t.query&&(e.query=t.query)):e.host&&(e.hostname=p(e.host).host),this.secure=null!=e.secure?e.secure:"undefined"!=typeof location&&"https:"===location.protocol,e.hostname&&!e.port&&(e.port=this.secure?"443":"80"),this.agent=e.agent||!1,this.hostname=e.hostname||("undefined"!=typeof location?location.hostname:"localhost"),this.port=e.port||("undefined"!=typeof location&&location.port?location.port:this.secure?443:80),this.query=e.query||{},"string"==typeof this.query&&(this.query=h.decode(this.query)),this.upgrade=!1!==e.upgrade,this.path=(e.path||"/engine.io").replace(/\/$/,"")+"/",this.forceJSONP=!!e.forceJSONP,this.jsonp=!1!==e.jsonp,this.forceBase64=!!e.forceBase64,this.enablesXDR=!!e.enablesXDR,this.withCredentials=!1!==e.withCredentials,this.timestampParam=e.timestampParam||"t",this.timestampRequests=e.timestampRequests,this.transports=e.transports||["polling","websocket"],this.transportOptions=e.transportOptions||{},this.readyState="",this.writeBuffer=[],this.prevBufferLen=0,this.policyPort=e.policyPort||843,this.rememberUpgrade=e.rememberUpgrade||!1,this.binaryType=null,this.onlyBinaryUpgrades=e.onlyBinaryUpgrades,this.perMessageDeflate=!1!==e.perMessageDeflate&&(e.perMessageDeflate||{}),!0===this.perMessageDeflate&&(this.perMessageDeflate={}),this.perMessageDeflate&&null==this.perMessageDeflate.threshold&&(this.perMessageDeflate.threshold=1024),this.pfx=e.pfx||null,this.key=e.key||null,this.passphrase=e.passphrase||null,this.cert=e.cert||null,this.ca=e.ca||null,this.ciphers=e.ciphers||null,this.rejectUnauthorized=void 0===e.rejectUnauthorized||e.rejectUnauthorized,this.forceNode=!!e.forceNode,this.isReactNative="undefined"!=typeof navigator&&"string"==typeof navigator.product&&"reactnative"===navigator.product.toLowerCase(),("undefined"==typeof self||this.isReactNative)&&(e.extraHeaders&&Object.keys(e.extraHeaders).length>0&&(this.extraHeaders=e.extraHeaders),e.localAddress&&(this.localAddress=e.localAddress)),this.id=null,this.upgrades=null,this.pingInterval=null,this.pingTimeout=null,this.pingIntervalTimer=null,this.pingTimeoutTimer=null,void this.open()):new n(t,e)}function o(t){var e={};for(var r in t)t.hasOwnProperty(r)&&(e[r]=t[r]);return e}var i=r(12),s=r(5),a=(r(3)("engine.io-client:socket"),r(33)),c=r(19),p=r(2),h=r(27);t.exports=n,n.priorWebsocketSuccess=!1,s(n.prototype),n.protocol=c.protocol,n.Socket=n,n.Transport=r(18),n.transports=r(12),n.parser=r(19),n.prototype.createTransport=function(t){var e=o(this.query);e.EIO=c.protocol,e.transport=t;var r=this.transportOptions[t]||{};this.id&&(e.sid=this.id);var n=new i[t]({query:e,socket:this,agent:r.agent||this.agent,hostname:r.hostname||this.hostname,port:r.port||this.port,secure:r.secure||this.secure,path:r.path||this.path,forceJSONP:r.forceJSONP||this.forceJSONP,jsonp:r.jsonp||this.jsonp,forceBase64:r.forceBase64||this.forceBase64,enablesXDR:r.enablesXDR||this.enablesXDR,withCredentials:r.withCredentials||this.withCredentials,timestampRequests:r.timestampRequests||this.timestampRequests,timestampParam:r.timestampParam||this.timestampParam,policyPort:r.policyPort||this.policyPort,pfx:r.pfx||this.pfx,key:r.key||this.key,passphrase:r.passphrase||this.passphrase,cert:r.cert||this.cert,ca:r.ca||this.ca,ciphers:r.ciphers||this.ciphers,rejectUnauthorized:r.rejectUnauthorized||this.rejectUnauthorized,perMessageDeflate:r.perMessageDeflate||this.perMessageDeflate,extraHeaders:r.extraHeaders||this.extraHeaders,forceNode:r.forceNode||this.forceNode,localAddress:r.localAddress||this.localAddress,requestTimeout:r.requestTimeout||this.requestTimeout,protocols:r.protocols||void 0,isReactNative:this.isReactNative});return n},n.prototype.open=function(){var t;if(this.rememberUpgrade&&n.priorWebsocketSuccess&&this.transports.indexOf("websocket")!==-1)t="websocket";else{if(0===this.transports.length){var e=this;return void setTimeout(function(){e.emit("error","No transports available")},0)}t=this.transports[0]}this.readyState="opening";try{t=this.createTransport(t)}catch(t){return this.transports.shift(),void this.open()}t.open(),this.setTransport(t)},n.prototype.setTransport=function(t){var e=this;this.transport&&this.transport.removeAllListeners(),this.transport=t,t.on("drain",function(){e.onDrain()}).on("packet",function(t){e.onPacket(t)}).on("error",function(t){e.onError(t)}).on("close",function(){e.onClose("transport close")})},n.prototype.probe=function(t){function e(){if(u.onlyBinaryUpgrades){var t=!this.supportsBinary&&u.transport.supportsBinary;h=h||t}h||(p.send([{type:"ping",data:"probe"}]),p.once("packet",function(t){if(!h)if("pong"===t.type&&"probe"===t.data){if(u.upgrading=!0,u.emit("upgrading",p),!p)return;n.priorWebsocketSuccess="websocket"===p.name,u.transport.pause(function(){h||"closed"!==u.readyState&&(c(),u.setTransport(p),p.send([{type:"upgrade"}]),u.emit("upgrade",p),p=null,u.upgrading=!1,u.flush())})}else{var e=new Error("probe error");e.transport=p.name,u.emit("upgradeError",e)}}))}function r(){h||(h=!0,c(),p.close(),p=null)}function o(t){var e=new Error("probe error: "+t);e.transport=p.name,r(),u.emit("upgradeError",e)}function i(){o("transport closed")}function s(){o("socket closed")}function a(t){p&&t.name!==p.name&&r()}function c(){p.removeListener("open",e),p.removeListener("error",o),p.removeListener("close",i),u.removeListener("close",s),u.removeListener("upgrading",a)}var p=this.createTransport(t,{probe:1}),h=!1,u=this;n.priorWebsocketSuccess=!1,p.once("open",e),p.once("error",o),p.once("close",i),this.once("close",s),this.once("upgrading",a),p.open()},n.prototype.onOpen=function(){if(this.readyState="open",n.priorWebsocketSuccess="websocket"===this.transport.name,this.emit("open"),this.flush(),"open"===this.readyState&&this.upgrade&&this.transport.pause)for(var t=0,e=this.upgrades.length;t<e;t++)this.probe(this.upgrades[t])},n.prototype.onPacket=function(t){if("opening"===this.readyState||"open"===this.readyState||"closing"===this.readyState)switch(this.emit("packet",t),this.emit("heartbeat"),t.type){case"open":this.onHandshake(JSON.parse(t.data));break;case"pong":this.setPing(),this.emit("pong");break;case"error":var e=new Error("server error");e.code=t.data,this.onError(e);break;case"message":this.emit("data",t.data),this.emit("message",t.data)}},n.prototype.onHandshake=function(t){this.emit("handshake",t),this.id=t.sid,this.transport.query.sid=t.sid,this.upgrades=this.filterUpgrades(t.upgrades),this.pingInterval=t.pingInterval,this.pingTimeout=t.pingTimeout,this.onOpen(),"closed"!==this.readyState&&(this.setPing(),this.removeListener("heartbeat",this.onHeartbeat),this.on("heartbeat",this.onHeartbeat))},n.prototype.onHeartbeat=function(t){clearTimeout(this.pingTimeoutTimer);var e=this;e.pingTimeoutTimer=setTimeout(function(){"closed"!==e.readyState&&e.onClose("ping timeout")},t||e.pingInterval+e.pingTimeout)},n.prototype.setPing=function(){var t=this;clearTimeout(t.pingIntervalTimer),t.pingIntervalTimer=setTimeout(function(){t.ping(),t.onHeartbeat(t.pingTimeout)},t.pingInterval)},n.prototype.ping=function(){var t=this;this.sendPacket("ping",function(){t.emit("ping")})},n.prototype.onDrain=function(){this.writeBuffer.splice(0,this.prevBufferLen),this.prevBufferLen=0,0===this.writeBuffer.length?this.emit("drain"):this.flush()},n.prototype.flush=function(){"closed"!==this.readyState&&this.transport.writable&&!this.upgrading&&this.writeBuffer.length&&(this.transport.send(this.writeBuffer),this.prevBufferLen=this.writeBuffer.length,this.emit("flush"))},n.prototype.write=n.prototype.send=function(t,e,r){return this.sendPacket("message",t,e,r),this},n.prototype.sendPacket=function(t,e,r,n){if("function"==typeof e&&(n=e,e=void 0),"function"==typeof r&&(n=r,r=null),"closing"!==this.readyState&&"closed"!==this.readyState){r=r||{},r.compress=!1!==r.compress;var o={type:t,data:e,options:r};this.emit("packetCreate",o),this.writeBuffer.push(o),n&&this.once("flush",n),this.flush()}},n.prototype.close=function(){function t(){n.onClose("forced close"),n.transport.close()}function e(){n.removeListener("upgrade",e),n.removeListener("upgradeError",e),t()}function r(){n.once("upgrade",e),n.once("upgradeError",e)}if("opening"===this.readyState||"open"===this.readyState){this.readyState="closing";var n=this;this.writeBuffer.length?this.once("drain",function(){this.upgrading?r():t()}):this.upgrading?r():t()}return this},n.prototype.onError=function(t){n.priorWebsocketSuccess=!1,this.emit("error",t),this.onClose("transport error",t)},n.prototype.onClose=function(t,e){if("opening"===this.readyState||"open"===this.readyState||"closing"===this.readyState){var r=this;clearTimeout(this.pingIntervalTimer),clearTimeout(this.pingTimeoutTimer),this.transport.removeAllListeners("close"),this.transport.close(),this.transport.removeAllListeners(),this.readyState="closed",this.id=null,this.emit("close",t,e),r.writeBuffer=[],r.prevBufferLen=0}},n.prototype.filterUpgrades=function(t){for(var e=[],r=0,n=t.length;r<n;r++)~a(this.transports,t[r])&&e.push(t[r]);return e}},function(t,e,r){function n(t){var e,r=!1,n=!1,a=!1!==t.jsonp;if("undefined"!=typeof location){var c="https:"===location.protocol,p=location.port;p||(p=c?443:80),r=t.hostname!==location.hostname||p!==t.port,n=t.secure!==c}if(t.xdomain=r,t.xscheme=n,e=new o(t),"open"in e&&!t.forceJSONP)return new i(t);if(!a)throw new Error("JSONP disabled");return new s(t)}var o=r(13),i=r(16),s=r(30),a=r(31);e.polling=n,e.websocket=a},function(t,e,r){var n=r(14),o=r(15);t.exports=function(t){var e=t.xdomain,r=t.xscheme,i=t.enablesXDR;try{if("undefined"!=typeof XMLHttpRequest&&(!e||n))return new XMLHttpRequest}catch(t){}try{if("undefined"!=typeof XDomainRequest&&!r&&i)return new XDomainRequest}catch(t){}if(!e)try{return new(o[["Active"].concat("Object").join("X")])("Microsoft.XMLHTTP")}catch(t){}}},function(t,e){try{t.exports="undefined"!=typeof XMLHttpRequest&&"withCredentials"in new XMLHttpRequest}catch(e){t.exports=!1}},function(t,e){t.exports=function(){return"undefined"!=typeof self?self:"undefined"!=typeof window?window:Function("return this")()}()},function(t,e,r){function n(){}function o(t){if(c.call(this,t),this.requestTimeout=t.requestTimeout,this.extraHeaders=t.extraHeaders,"undefined"!=typeof location){var e="https:"===location.protocol,r=location.port;r||(r=e?443:80),this.xd="undefined"!=typeof location&&t.hostname!==location.hostname||r!==t.port,this.xs=t.secure!==e}}function i(t){this.method=t.method||"GET",this.uri=t.uri,this.xd=!!t.xd,this.xs=!!t.xs,this.async=!1!==t.async,this.data=void 0!==t.data?t.data:null,this.agent=t.agent,this.isBinary=t.isBinary,this.supportsBinary=t.supportsBinary,this.enablesXDR=t.enablesXDR,this.withCredentials=t.withCredentials,this.requestTimeout=t.requestTimeout,this.pfx=t.pfx,this.key=t.key,this.passphrase=t.passphrase,this.cert=t.cert,this.ca=t.ca,this.ciphers=t.ciphers,this.rejectUnauthorized=t.rejectUnauthorized,this.extraHeaders=t.extraHeaders,this.create()}function s(){for(var t in i.requests)i.requests.hasOwnProperty(t)&&i.requests[t].abort()}var a=r(13),c=r(17),p=r(5),h=r(28),u=(r(3)("engine.io-client:polling-xhr"),r(15));if(t.exports=o,t.exports.Request=i,h(o,c),o.prototype.supportsBinary=!0,o.prototype.request=function(t){return t=t||{},t.uri=this.uri(),t.xd=this.xd,t.xs=this.xs,t.agent=this.agent||!1,t.supportsBinary=this.supportsBinary,t.enablesXDR=this.enablesXDR,t.withCredentials=this.withCredentials,t.pfx=this.pfx,t.key=this.key,t.passphrase=this.passphrase,t.cert=this.cert,t.ca=this.ca,t.ciphers=this.ciphers,t.rejectUnauthorized=this.rejectUnauthorized,t.requestTimeout=this.requestTimeout,t.extraHeaders=this.extraHeaders,new i(t)},o.prototype.doWrite=function(t,e){var r="string"!=typeof t&&void 0!==t,n=this.request({method:"POST",data:t,isBinary:r}),o=this;n.on("success",e),n.on("error",function(t){o.onError("xhr post error",t)}),this.sendXhr=n},o.prototype.doPoll=function(){var t=this.request(),e=this;t.on("data",function(t){e.onData(t)}),t.on("error",function(t){e.onError("xhr poll error",t)}),this.pollXhr=t},p(i.prototype),i.prototype.create=function(){var t={agent:this.agent,xdomain:this.xd,xscheme:this.xs,enablesXDR:this.enablesXDR};t.pfx=this.pfx,t.key=this.key,t.passphrase=this.passphrase,t.cert=this.cert,t.ca=this.ca,t.ciphers=this.ciphers,t.rejectUnauthorized=this.rejectUnauthorized;var e=this.xhr=new a(t),r=this;try{e.open(this.method,this.uri,this.async);try{if(this.extraHeaders){e.setDisableHeaderCheck&&e.setDisableHeaderCheck(!0);for(var n in this.extraHeaders)this.extraHeaders.hasOwnProperty(n)&&e.setRequestHeader(n,this.extraHeaders[n])}}catch(t){}if("POST"===this.method)try{this.isBinary?e.setRequestHeader("Content-type","application/octet-stream"):e.setRequestHeader("Content-type","text/plain;charset=UTF-8")}catch(t){}try{e.setRequestHeader("Accept","*/*")}catch(t){}"withCredentials"in e&&(e.withCredentials=this.withCredentials),this.requestTimeout&&(e.timeout=this.requestTimeout),this.hasXDR()?(e.onload=function(){r.onLoad()},e.onerror=function(){r.onError(e.responseText)}):e.onreadystatechange=function(){if(2===e.readyState)try{var t=e.getResponseHeader("Content-Type");(r.supportsBinary&&"application/octet-stream"===t||"application/octet-stream; charset=UTF-8"===t)&&(e.responseType="arraybuffer")}catch(t){}4===e.readyState&&(200===e.status||1223===e.status?r.onLoad():setTimeout(function(){r.onError("number"==typeof e.status?e.status:0)},0))},e.send(this.data)}catch(t){return void setTimeout(function(){r.onError(t)},0)}"undefined"!=typeof document&&(this.index=i.requestsCount++,i.requests[this.index]=this)},i.prototype.onSuccess=function(){this.emit("success"),this.cleanup()},i.prototype.onData=function(t){this.emit("data",t),this.onSuccess()},i.prototype.onError=function(t){this.emit("error",t),this.cleanup(!0)},i.prototype.cleanup=function(t){if("undefined"!=typeof this.xhr&&null!==this.xhr){if(this.hasXDR()?this.xhr.onload=this.xhr.onerror=n:this.xhr.onreadystatechange=n,t)try{this.xhr.abort()}catch(t){}"undefined"!=typeof document&&delete i.requests[this.index],this.xhr=null}},i.prototype.onLoad=function(){var t;try{var e;try{e=this.xhr.getResponseHeader("Content-Type")}catch(t){}t="application/octet-stream"===e||"application/octet-stream; charset=UTF-8"===e?this.xhr.response||this.xhr.responseText:this.xhr.responseText}catch(t){this.onError(t)}null!=t&&this.onData(t)},i.prototype.hasXDR=function(){return"undefined"!=typeof XDomainRequest&&!this.xs&&this.enablesXDR},i.prototype.abort=function(){this.cleanup()},i.requestsCount=0,i.requests={},"undefined"!=typeof document)if("function"==typeof attachEvent)attachEvent("onunload",s);else if("function"==typeof addEventListener){var f="onpagehide"in u?"pagehide":"unload";addEventListener(f,s,!1)}},function(t,e,r){function n(t){var e=t&&t.forceBase64;p&&!e||(this.supportsBinary=!1),o.call(this,t)}var o=r(18),i=r(27),s=r(19),a=r(28),c=r(29);r(3)("engine.io-client:polling");t.exports=n;var p=function(){var t=r(13),e=new t({xdomain:!1});return null!=e.responseType}();a(n,o),n.prototype.name="polling",n.prototype.doOpen=function(){this.poll()},n.prototype.pause=function(t){function e(){r.readyState="paused",t()}var r=this;if(this.readyState="pausing",this.polling||!this.writable){var n=0;this.polling&&(n++,this.once("pollComplete",function(){--n||e()})),this.writable||(n++,this.once("drain",function(){--n||e()}))}else e()},n.prototype.poll=function(){this.polling=!0,this.doPoll(),this.emit("poll")},n.prototype.onData=function(t){var e=this,r=function(t,r,n){return"opening"===e.readyState&&"open"===t.type&&e.onOpen(),"close"===t.type?(e.onClose(),!1):void e.onPacket(t)};s.decodePayload(t,this.socket.binaryType,r),"closed"!==this.readyState&&(this.polling=!1,this.emit("pollComplete"),"open"===this.readyState&&this.poll())},n.prototype.doClose=function(){function t(){e.write([{type:"close"}])}var e=this;"open"===this.readyState?t():this.once("open",t)},n.prototype.write=function(t){var e=this;this.writable=!1;var r=function(){e.writable=!0,e.emit("drain")};s.encodePayload(t,this.supportsBinary,function(t){e.doWrite(t,r)})},n.prototype.uri=function(){var t=this.query||{},e=this.secure?"https":"http",r="";!1!==this.timestampRequests&&(t[this.timestampParam]=c()),this.supportsBinary||t.sid||(t.b64=1),t=i.encode(t),this.port&&("https"===e&&443!==Number(this.port)||"http"===e&&80!==Number(this.port))&&(r=":"+this.port),t.length&&(t="?"+t);var n=this.hostname.indexOf(":")!==-1;return e+"://"+(n?"["+this.hostname+"]":this.hostname)+r+this.path+t}},function(t,e,r){function n(t){this.path=t.path,this.hostname=t.hostname,this.port=t.port,this.secure=t.secure,this.query=t.query,this.timestampParam=t.timestampParam,this.timestampRequests=t.timestampRequests,this.readyState="",this.agent=t.agent||!1,this.socket=t.socket,this.enablesXDR=t.enablesXDR,this.withCredentials=t.withCredentials,this.pfx=t.pfx,this.key=t.key,this.passphrase=t.passphrase,this.cert=t.cert,this.ca=t.ca,this.ciphers=t.ciphers,this.rejectUnauthorized=t.rejectUnauthorized,this.forceNode=t.forceNode,
-this.isReactNative=t.isReactNative,this.extraHeaders=t.extraHeaders,this.localAddress=t.localAddress}var o=r(19),i=r(5);t.exports=n,i(n.prototype),n.prototype.onError=function(t,e){var r=new Error(t);return r.type="TransportError",r.description=e,this.emit("error",r),this},n.prototype.open=function(){return"closed"!==this.readyState&&""!==this.readyState||(this.readyState="opening",this.doOpen()),this},n.prototype.close=function(){return"opening"!==this.readyState&&"open"!==this.readyState||(this.doClose(),this.onClose()),this},n.prototype.send=function(t){if("open"!==this.readyState)throw new Error("Transport not open");this.write(t)},n.prototype.onOpen=function(){this.readyState="open",this.writable=!0,this.emit("open")},n.prototype.onData=function(t){var e=o.decodePacket(t,this.socket.binaryType);this.onPacket(e)},n.prototype.onPacket=function(t){this.emit("packet",t)},n.prototype.onClose=function(){this.readyState="closed",this.emit("close")}},function(t,e,r){function n(t,r){var n="b"+e.packets[t.type]+t.data.data;return r(n)}function o(t,r,n){if(!r)return e.encodeBase64Packet(t,n);var o=t.data,i=new Uint8Array(o),s=new Uint8Array(1+o.byteLength);s[0]=v[t.type];for(var a=0;a<i.length;a++)s[a+1]=i[a];return n(s.buffer)}function i(t,r,n){if(!r)return e.encodeBase64Packet(t,n);var o=new FileReader;return o.onload=function(){e.encodePacket({type:t.type,data:o.result},r,!0,n)},o.readAsArrayBuffer(t.data)}function s(t,r,n){if(!r)return e.encodeBase64Packet(t,n);if(g)return i(t,r,n);var o=new Uint8Array(1);o[0]=v[t.type];var s=new w([o.buffer,t.data]);return n(s)}function a(t){try{t=d.decode(t,{strict:!1})}catch(t){return!1}return t}function c(t,e,r){for(var n=new Array(t.length),o=l(t.length,r),i=function(t,r,o){e(r,function(e,r){n[t]=r,o(e,n)})},s=0;s<t.length;s++)i(s,t[s],o)}var p,h=r(20),u=r(21),f=r(22),l=r(23),d=r(24);"undefined"!=typeof ArrayBuffer&&(p=r(25));var y="undefined"!=typeof navigator&&/Android/i.test(navigator.userAgent),m="undefined"!=typeof navigator&&/PhantomJS/i.test(navigator.userAgent),g=y||m;e.protocol=3;var v=e.packets={open:0,close:1,ping:2,pong:3,message:4,upgrade:5,noop:6},b=h(v),k={type:"error",data:"parser error"},w=r(26);e.encodePacket=function(t,e,r,i){"function"==typeof e&&(i=e,e=!1),"function"==typeof r&&(i=r,r=null);var a=void 0===t.data?void 0:t.data.buffer||t.data;if("undefined"!=typeof ArrayBuffer&&a instanceof ArrayBuffer)return o(t,e,i);if("undefined"!=typeof w&&a instanceof w)return s(t,e,i);if(a&&a.base64)return n(t,i);var c=v[t.type];return void 0!==t.data&&(c+=r?d.encode(String(t.data),{strict:!1}):String(t.data)),i(""+c)},e.encodeBase64Packet=function(t,r){var n="b"+e.packets[t.type];if("undefined"!=typeof w&&t.data instanceof w){var o=new FileReader;return o.onload=function(){var t=o.result.split(",")[1];r(n+t)},o.readAsDataURL(t.data)}var i;try{i=String.fromCharCode.apply(null,new Uint8Array(t.data))}catch(e){for(var s=new Uint8Array(t.data),a=new Array(s.length),c=0;c<s.length;c++)a[c]=s[c];i=String.fromCharCode.apply(null,a)}return n+=btoa(i),r(n)},e.decodePacket=function(t,r,n){if(void 0===t)return k;if("string"==typeof t){if("b"===t.charAt(0))return e.decodeBase64Packet(t.substr(1),r);if(n&&(t=a(t),t===!1))return k;var o=t.charAt(0);return Number(o)==o&&b[o]?t.length>1?{type:b[o],data:t.substring(1)}:{type:b[o]}:k}var i=new Uint8Array(t),o=i[0],s=f(t,1);return w&&"blob"===r&&(s=new w([s])),{type:b[o],data:s}},e.decodeBase64Packet=function(t,e){var r=b[t.charAt(0)];if(!p)return{type:r,data:{base64:!0,data:t.substr(1)}};var n=p.decode(t.substr(1));return"blob"===e&&w&&(n=new w([n])),{type:r,data:n}},e.encodePayload=function(t,r,n){function o(t){return t.length+":"+t}function i(t,n){e.encodePacket(t,!!s&&r,!1,function(t){n(null,o(t))})}"function"==typeof r&&(n=r,r=null);var s=u(t);return r&&s?w&&!g?e.encodePayloadAsBlob(t,n):e.encodePayloadAsArrayBuffer(t,n):t.length?void c(t,i,function(t,e){return n(e.join(""))}):n("0:")},e.decodePayload=function(t,r,n){if("string"!=typeof t)return e.decodePayloadAsBinary(t,r,n);"function"==typeof r&&(n=r,r=null);var o;if(""===t)return n(k,0,1);for(var i,s,a="",c=0,p=t.length;c<p;c++){var h=t.charAt(c);if(":"===h){if(""===a||a!=(i=Number(a)))return n(k,0,1);if(s=t.substr(c+1,i),a!=s.length)return n(k,0,1);if(s.length){if(o=e.decodePacket(s,r,!1),k.type===o.type&&k.data===o.data)return n(k,0,1);var u=n(o,c+i,p);if(!1===u)return}c+=i,a=""}else a+=h}return""!==a?n(k,0,1):void 0},e.encodePayloadAsArrayBuffer=function(t,r){function n(t,r){e.encodePacket(t,!0,!0,function(t){return r(null,t)})}return t.length?void c(t,n,function(t,e){var n=e.reduce(function(t,e){var r;return r="string"==typeof e?e.length:e.byteLength,t+r.toString().length+r+2},0),o=new Uint8Array(n),i=0;return e.forEach(function(t){var e="string"==typeof t,r=t;if(e){for(var n=new Uint8Array(t.length),s=0;s<t.length;s++)n[s]=t.charCodeAt(s);r=n.buffer}e?o[i++]=0:o[i++]=1;for(var a=r.byteLength.toString(),s=0;s<a.length;s++)o[i++]=parseInt(a[s]);o[i++]=255;for(var n=new Uint8Array(r),s=0;s<n.length;s++)o[i++]=n[s]}),r(o.buffer)}):r(new ArrayBuffer(0))},e.encodePayloadAsBlob=function(t,r){function n(t,r){e.encodePacket(t,!0,!0,function(t){var e=new Uint8Array(1);if(e[0]=1,"string"==typeof t){for(var n=new Uint8Array(t.length),o=0;o<t.length;o++)n[o]=t.charCodeAt(o);t=n.buffer,e[0]=0}for(var i=t instanceof ArrayBuffer?t.byteLength:t.size,s=i.toString(),a=new Uint8Array(s.length+1),o=0;o<s.length;o++)a[o]=parseInt(s[o]);if(a[s.length]=255,w){var c=new w([e.buffer,a.buffer,t]);r(null,c)}})}c(t,n,function(t,e){return r(new w(e))})},e.decodePayloadAsBinary=function(t,r,n){"function"==typeof r&&(n=r,r=null);for(var o=t,i=[];o.byteLength>0;){for(var s=new Uint8Array(o),a=0===s[0],c="",p=1;255!==s[p];p++){if(c.length>310)return n(k,0,1);c+=s[p]}o=f(o,2+c.length),c=parseInt(c);var h=f(o,0,c);if(a)try{h=String.fromCharCode.apply(null,new Uint8Array(h))}catch(t){var u=new Uint8Array(h);h="";for(var p=0;p<u.length;p++)h+=String.fromCharCode(u[p])}i.push(h),o=f(o,c)}var l=i.length;i.forEach(function(t,o){n(e.decodePacket(t,r,!0),o,l)})}},function(t,e){t.exports=Object.keys||function(t){var e=[],r=Object.prototype.hasOwnProperty;for(var n in t)r.call(t,n)&&e.push(n);return e}},function(t,e,r){function n(t){if(!t||"object"!=typeof t)return!1;if(o(t)){for(var e=0,r=t.length;e<r;e++)if(n(t[e]))return!0;return!1}if("function"==typeof Buffer&&Buffer.isBuffer&&Buffer.isBuffer(t)||"function"==typeof ArrayBuffer&&t instanceof ArrayBuffer||s&&t instanceof Blob||a&&t instanceof File)return!0;if(t.toJSON&&"function"==typeof t.toJSON&&1===arguments.length)return n(t.toJSON(),!0);for(var i in t)if(Object.prototype.hasOwnProperty.call(t,i)&&n(t[i]))return!0;return!1}var o=r(7),i=Object.prototype.toString,s="function"==typeof Blob||"undefined"!=typeof Blob&&"[object BlobConstructor]"===i.call(Blob),a="function"==typeof File||"undefined"!=typeof File&&"[object FileConstructor]"===i.call(File);t.exports=n},function(t,e){t.exports=function(t,e,r){var n=t.byteLength;if(e=e||0,r=r||n,t.slice)return t.slice(e,r);if(e<0&&(e+=n),r<0&&(r+=n),r>n&&(r=n),e>=n||e>=r||0===n)return new ArrayBuffer(0);for(var o=new Uint8Array(t),i=new Uint8Array(r-e),s=e,a=0;s<r;s++,a++)i[a]=o[s];return i.buffer}},function(t,e){function r(t,e,r){function o(t,n){if(o.count<=0)throw new Error("after called too many times");--o.count,t?(i=!0,e(t),e=r):0!==o.count||i||e(null,n)}var i=!1;return r=r||n,o.count=t,0===t?e():o}function n(){}t.exports=r},function(t,e){function r(t){for(var e,r,n=[],o=0,i=t.length;o<i;)e=t.charCodeAt(o++),e>=55296&&e<=56319&&o<i?(r=t.charCodeAt(o++),56320==(64512&r)?n.push(((1023&e)<<10)+(1023&r)+65536):(n.push(e),o--)):n.push(e);return n}function n(t){for(var e,r=t.length,n=-1,o="";++n<r;)e=t[n],e>65535&&(e-=65536,o+=d(e>>>10&1023|55296),e=56320|1023&e),o+=d(e);return o}function o(t,e){if(t>=55296&&t<=57343){if(e)throw Error("Lone surrogate U+"+t.toString(16).toUpperCase()+" is not a scalar value");return!1}return!0}function i(t,e){return d(t>>e&63|128)}function s(t,e){if(0==(4294967168&t))return d(t);var r="";return 0==(4294965248&t)?r=d(t>>6&31|192):0==(4294901760&t)?(o(t,e)||(t=65533),r=d(t>>12&15|224),r+=i(t,6)):0==(4292870144&t)&&(r=d(t>>18&7|240),r+=i(t,12),r+=i(t,6)),r+=d(63&t|128)}function a(t,e){e=e||{};for(var n,o=!1!==e.strict,i=r(t),a=i.length,c=-1,p="";++c<a;)n=i[c],p+=s(n,o);return p}function c(){if(l>=f)throw Error("Invalid byte index");var t=255&u[l];if(l++,128==(192&t))return 63&t;throw Error("Invalid continuation byte")}function p(t){var e,r,n,i,s;if(l>f)throw Error("Invalid byte index");if(l==f)return!1;if(e=255&u[l],l++,0==(128&e))return e;if(192==(224&e)){if(r=c(),s=(31&e)<<6|r,s>=128)return s;throw Error("Invalid continuation byte")}if(224==(240&e)){if(r=c(),n=c(),s=(15&e)<<12|r<<6|n,s>=2048)return o(s,t)?s:65533;throw Error("Invalid continuation byte")}if(240==(248&e)&&(r=c(),n=c(),i=c(),s=(7&e)<<18|r<<12|n<<6|i,s>=65536&&s<=1114111))return s;throw Error("Invalid UTF-8 detected")}function h(t,e){e=e||{};var o=!1!==e.strict;u=r(t),f=u.length,l=0;for(var i,s=[];(i=p(o))!==!1;)s.push(i);return n(s)}/*! https://mths.be/utf8js v2.1.2 by @mathias */
-var u,f,l,d=String.fromCharCode;t.exports={version:"2.1.2",encode:a,decode:h}},function(t,e){!function(t){"use strict";e.encode=function(e){var r,n=new Uint8Array(e),o=n.length,i="";for(r=0;r<o;r+=3)i+=t[n[r]>>2],i+=t[(3&n[r])<<4|n[r+1]>>4],i+=t[(15&n[r+1])<<2|n[r+2]>>6],i+=t[63&n[r+2]];return o%3===2?i=i.substring(0,i.length-1)+"=":o%3===1&&(i=i.substring(0,i.length-2)+"=="),i},e.decode=function(e){var r,n,o,i,s,a=.75*e.length,c=e.length,p=0;"="===e[e.length-1]&&(a--,"="===e[e.length-2]&&a--);var h=new ArrayBuffer(a),u=new Uint8Array(h);for(r=0;r<c;r+=4)n=t.indexOf(e[r]),o=t.indexOf(e[r+1]),i=t.indexOf(e[r+2]),s=t.indexOf(e[r+3]),u[p++]=n<<2|o>>4,u[p++]=(15&o)<<4|i>>2,u[p++]=(3&i)<<6|63&s;return h}}("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")},function(t,e){function r(t){return t.map(function(t){if(t.buffer instanceof ArrayBuffer){var e=t.buffer;if(t.byteLength!==e.byteLength){var r=new Uint8Array(t.byteLength);r.set(new Uint8Array(e,t.byteOffset,t.byteLength)),e=r.buffer}return e}return t})}function n(t,e){e=e||{};var n=new i;return r(t).forEach(function(t){n.append(t)}),e.type?n.getBlob(e.type):n.getBlob()}function o(t,e){return new Blob(r(t),e||{})}var i="undefined"!=typeof i?i:"undefined"!=typeof WebKitBlobBuilder?WebKitBlobBuilder:"undefined"!=typeof MSBlobBuilder?MSBlobBuilder:"undefined"!=typeof MozBlobBuilder&&MozBlobBuilder,s=function(){try{var t=new Blob(["hi"]);return 2===t.size}catch(t){return!1}}(),a=s&&function(){try{var t=new Blob([new Uint8Array([1,2])]);return 2===t.size}catch(t){return!1}}(),c=i&&i.prototype.append&&i.prototype.getBlob;"undefined"!=typeof Blob&&(n.prototype=Blob.prototype,o.prototype=Blob.prototype),t.exports=function(){return s?a?Blob:o:c?n:void 0}()},function(t,e){e.encode=function(t){var e="";for(var r in t)t.hasOwnProperty(r)&&(e.length&&(e+="&"),e+=encodeURIComponent(r)+"="+encodeURIComponent(t[r]));return e},e.decode=function(t){for(var e={},r=t.split("&"),n=0,o=r.length;n<o;n++){var i=r[n].split("=");e[decodeURIComponent(i[0])]=decodeURIComponent(i[1])}return e}},function(t,e){t.exports=function(t,e){var r=function(){};r.prototype=e.prototype,t.prototype=new r,t.prototype.constructor=t}},function(t,e){"use strict";function r(t){var e="";do e=s[t%a]+e,t=Math.floor(t/a);while(t>0);return e}function n(t){var e=0;for(h=0;h<t.length;h++)e=e*a+c[t.charAt(h)];return e}function o(){var t=r(+new Date);return t!==i?(p=0,i=t):t+"."+r(p++)}for(var i,s="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_".split(""),a=64,c={},p=0,h=0;h<a;h++)c[s[h]]=h;o.encode=r,o.decode=n,t.exports=o},function(t,e,r){function n(){}function o(t){i.call(this,t),this.query=this.query||{},c||(c=a.___eio=a.___eio||[]),this.index=c.length;var e=this;c.push(function(t){e.onData(t)}),this.query.j=this.index,"function"==typeof addEventListener&&addEventListener("beforeunload",function(){e.script&&(e.script.onerror=n)},!1)}var i=r(17),s=r(28),a=r(15);t.exports=o;var c,p=/\n/g,h=/\\n/g;s(o,i),o.prototype.supportsBinary=!1,o.prototype.doClose=function(){this.script&&(this.script.parentNode.removeChild(this.script),this.script=null),this.form&&(this.form.parentNode.removeChild(this.form),this.form=null,this.iframe=null),i.prototype.doClose.call(this)},o.prototype.doPoll=function(){var t=this,e=document.createElement("script");this.script&&(this.script.parentNode.removeChild(this.script),this.script=null),e.async=!0,e.src=this.uri(),e.onerror=function(e){t.onError("jsonp poll error",e)};var r=document.getElementsByTagName("script")[0];r?r.parentNode.insertBefore(e,r):(document.head||document.body).appendChild(e),this.script=e;var n="undefined"!=typeof navigator&&/gecko/i.test(navigator.userAgent);n&&setTimeout(function(){var t=document.createElement("iframe");document.body.appendChild(t),document.body.removeChild(t)},100)},o.prototype.doWrite=function(t,e){function r(){n(),e()}function n(){if(o.iframe)try{o.form.removeChild(o.iframe)}catch(t){o.onError("jsonp polling iframe removal error",t)}try{var t='<iframe src="javascript:0" name="'+o.iframeId+'">';i=document.createElement(t)}catch(t){i=document.createElement("iframe"),i.name=o.iframeId,i.src="javascript:0"}i.id=o.iframeId,o.form.appendChild(i),o.iframe=i}var o=this;if(!this.form){var i,s=document.createElement("form"),a=document.createElement("textarea"),c=this.iframeId="eio_iframe_"+this.index;s.className="socketio",s.style.position="absolute",s.style.top="-1000px",s.style.left="-1000px",s.target=c,s.method="POST",s.setAttribute("accept-charset","utf-8"),a.name="d",s.appendChild(a),document.body.appendChild(s),this.form=s,this.area=a}this.form.action=this.uri(),n(),t=t.replace(h,"\\\n"),this.area.value=t.replace(p,"\\n");try{this.form.submit()}catch(t){}this.iframe.attachEvent?this.iframe.onreadystatechange=function(){"complete"===o.iframe.readyState&&r()}:this.iframe.onload=r}},function(t,e,r){function n(t){var e=t&&t.forceBase64;e&&(this.supportsBinary=!1),this.perMessageDeflate=t.perMessageDeflate,this.usingBrowserWebSocket=o&&!t.forceNode,this.protocols=t.protocols,this.usingBrowserWebSocket||(u=i),s.call(this,t)}var o,i,s=r(18),a=r(19),c=r(27),p=r(28),h=r(29);r(3)("engine.io-client:websocket");if("undefined"!=typeof WebSocket?o=WebSocket:"undefined"!=typeof self&&(o=self.WebSocket||self.MozWebSocket),"undefined"==typeof window)try{i=r(32)}catch(t){}var u=o||i;t.exports=n,p(n,s),n.prototype.name="websocket",n.prototype.supportsBinary=!0,n.prototype.doOpen=function(){if(this.check()){var t=this.uri(),e=this.protocols,r={};this.isReactNative||(r.agent=this.agent,r.perMessageDeflate=this.perMessageDeflate,r.pfx=this.pfx,r.key=this.key,r.passphrase=this.passphrase,r.cert=this.cert,r.ca=this.ca,r.ciphers=this.ciphers,r.rejectUnauthorized=this.rejectUnauthorized),this.extraHeaders&&(r.headers=this.extraHeaders),this.localAddress&&(r.localAddress=this.localAddress);try{this.ws=this.usingBrowserWebSocket&&!this.isReactNative?e?new u(t,e):new u(t):new u(t,e,r)}catch(t){return this.emit("error",t)}void 0===this.ws.binaryType&&(this.supportsBinary=!1),this.ws.supports&&this.ws.supports.binary?(this.supportsBinary=!0,this.ws.binaryType="nodebuffer"):this.ws.binaryType="arraybuffer",this.addEventListeners()}},n.prototype.addEventListeners=function(){var t=this;this.ws.onopen=function(){t.onOpen()},this.ws.onclose=function(){t.onClose()},this.ws.onmessage=function(e){t.onData(e.data)},this.ws.onerror=function(e){t.onError("websocket error",e)}},n.prototype.write=function(t){function e(){r.emit("flush"),setTimeout(function(){r.writable=!0,r.emit("drain")},0)}var r=this;this.writable=!1;for(var n=t.length,o=0,i=n;o<i;o++)!function(t){a.encodePacket(t,r.supportsBinary,function(o){if(!r.usingBrowserWebSocket){var i={};if(t.options&&(i.compress=t.options.compress),r.perMessageDeflate){var s="string"==typeof o?Buffer.byteLength(o):o.length;s<r.perMessageDeflate.threshold&&(i.compress=!1)}}try{r.usingBrowserWebSocket?r.ws.send(o):r.ws.send(o,i)}catch(t){}--n||e()})}(t[o])},n.prototype.onClose=function(){s.prototype.onClose.call(this)},n.prototype.doClose=function(){"undefined"!=typeof this.ws&&this.ws.close()},n.prototype.uri=function(){var t=this.query||{},e=this.secure?"wss":"ws",r="";this.port&&("wss"===e&&443!==Number(this.port)||"ws"===e&&80!==Number(this.port))&&(r=":"+this.port),this.timestampRequests&&(t[this.timestampParam]=h()),this.supportsBinary||(t.b64=1),t=c.encode(t),t.length&&(t="?"+t);var n=this.hostname.indexOf(":")!==-1;return e+"://"+(n?"["+this.hostname+"]":this.hostname)+r+this.path+t},n.prototype.check=function(){return!(!u||"__initialize"in u&&this.name===n.prototype.name)}},function(t,e){},function(t,e){var r=[].indexOf;t.exports=function(t,e){if(r)return t.indexOf(e);for(var n=0;n<t.length;++n)if(t[n]===e)return n;return-1}},function(t,e,r){"use strict";function n(t,e,r){this.io=t,this.nsp=e,this.json=this,this.ids=0,this.acks={},this.receiveBuffer=[],this.sendBuffer=[],this.connected=!1,this.disconnected=!0,this.flags={},r&&r.query&&(this.query=r.query),this.io.autoConnect&&this.open()}var o="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},i=r(4),s=r(5),a=r(35),c=r(36),p=r(37),h=(r(3)("socket.io-client:socket"),r(27)),u=r(21);t.exports=e=n;var f={connect:1,connect_error:1,connect_timeout:1,connecting:1,disconnect:1,error:1,reconnect:1,reconnect_attempt:1,reconnect_failed:1,reconnect_error:1,reconnecting:1,ping:1,pong:1},l=s.prototype.emit;s(n.prototype),n.prototype.subEvents=function(){if(!this.subs){var t=this.io;this.subs=[c(t,"open",p(this,"onopen")),c(t,"packet",p(this,"onpacket")),c(t,"close",p(this,"onclose"))]}},n.prototype.open=n.prototype.connect=function(){return this.connected?this:(this.subEvents(),this.io.reconnecting||this.io.open(),"open"===this.io.readyState&&this.onopen(),this.emit("connecting"),this)},n.prototype.send=function(){var t=a(arguments);return t.unshift("message"),this.emit.apply(this,t),this},n.prototype.emit=function(t){if(f.hasOwnProperty(t))return l.apply(this,arguments),this;var e=a(arguments),r={type:(void 0!==this.flags.binary?this.flags.binary:u(e))?i.BINARY_EVENT:i.EVENT,data:e};return r.options={},r.options.compress=!this.flags||!1!==this.flags.compress,"function"==typeof e[e.length-1]&&(this.acks[this.ids]=e.pop(),r.id=this.ids++),this.connected?this.packet(r):this.sendBuffer.push(r),this.flags={},this},n.prototype.packet=function(t){t.nsp=this.nsp,this.io.packet(t)},n.prototype.onopen=function(){if("/"!==this.nsp)if(this.query){var t="object"===o(this.query)?h.encode(this.query):this.query;this.packet({type:i.CONNECT,query:t})}else this.packet({type:i.CONNECT})},n.prototype.onclose=function(t){this.connected=!1,this.disconnected=!0,delete this.id,this.emit("disconnect",t)},n.prototype.onpacket=function(t){var e=t.nsp===this.nsp,r=t.type===i.ERROR&&"/"===t.nsp;if(e||r)switch(t.type){case i.CONNECT:this.onconnect();break;case i.EVENT:this.onevent(t);break;case i.BINARY_EVENT:this.onevent(t);break;case i.ACK:this.onack(t);break;case i.BINARY_ACK:this.onack(t);break;case i.DISCONNECT:this.ondisconnect();break;case i.ERROR:this.emit("error",t.data)}},n.prototype.onevent=function(t){var e=t.data||[];null!=t.id&&e.push(this.ack(t.id)),this.connected?l.apply(this,e):this.receiveBuffer.push(e)},n.prototype.ack=function(t){var e=this,r=!1;return function(){if(!r){r=!0;var n=a(arguments);e.packet({type:u(n)?i.BINARY_ACK:i.ACK,id:t,data:n})}}},n.prototype.onack=function(t){var e=this.acks[t.id];"function"==typeof e&&(e.apply(this,t.data),delete this.acks[t.id])},n.prototype.onconnect=function(){this.connected=!0,this.disconnected=!1,this.emit("connect"),this.emitBuffered()},n.prototype.emitBuffered=function(){var t;for(t=0;t<this.receiveBuffer.length;t++)l.apply(this,this.receiveBuffer[t]);for(this.receiveBuffer=[],t=0;t<this.sendBuffer.length;t++)this.packet(this.sendBuffer[t]);this.sendBuffer=[]},n.prototype.ondisconnect=function(){this.destroy(),this.onclose("io server disconnect")},n.prototype.destroy=function(){if(this.subs){for(var t=0;t<this.subs.length;t++)this.subs[t].destroy();this.subs=null}this.io.destroy(this)},n.prototype.close=n.prototype.disconnect=function(){return this.connected&&this.packet({type:i.DISCONNECT}),this.destroy(),this.connected&&this.onclose("io client disconnect"),this},n.prototype.compress=function(t){return this.flags.compress=t,this},n.prototype.binary=function(t){return this.flags.binary=t,this}},function(t,e){function r(t,e){var r=[];e=e||0;for(var n=e||0;n<t.length;n++)r[n-e]=t[n];return r}t.exports=r},function(t,e){"use strict";function r(t,e,r){return t.on(e,r),{destroy:function(){t.removeListener(e,r)}}}t.exports=r},function(t,e){var r=[].slice;t.exports=function(t,e){if("string"==typeof e&&(e=t[e]),"function"!=typeof e)throw new Error("bind() requires a function");var n=r.call(arguments,2);return function(){return e.apply(t,n.concat(r.call(arguments)))}}},function(t,e){function r(t){t=t||{},this.ms=t.min||100,this.max=t.max||1e4,this.factor=t.factor||2,this.jitter=t.jitter>0&&t.jitter<=1?t.jitter:0,this.attempts=0}t.exports=r,r.prototype.duration=function(){var t=this.ms*Math.pow(this.factor,this.attempts++);if(this.jitter){var e=Math.random(),r=Math.floor(e*this.jitter*t);t=0==(1&Math.floor(10*e))?t-r:t+r}return 0|Math.min(t,this.max)},r.prototype.reset=function(){this.attempts=0},r.prototype.setMin=function(t){this.ms=t},r.prototype.setMax=function(t){this.max=t},r.prototype.setJitter=function(t){this.jitter=t}}])});
+!function(t,e){"object"==typeof exports&&"undefined"!=typeof module?module.exports=e():"function"==typeof define&&define.amd?define(e):(t="undefined"!=typeof globalThis?globalThis:t||self).io=e()}(this,(function(){"use strict";function t(e){return t="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(t){return typeof t}:function(t){return t&&"function"==typeof Symbol&&t.constructor===Symbol&&t!==Symbol.prototype?"symbol":typeof t},t(e)}function e(t,e){if(!(t instanceof e))throw new TypeError("Cannot call a class as a function")}function n(t,e){for(var n=0;n<e.length;n++){var r=e[n];r.enumerable=r.enumerable||!1,r.configurable=!0,"value"in r&&(r.writable=!0),Object.defineProperty(t,r.key,r)}}function r(t,e,r){return e&&n(t.prototype,e),r&&n(t,r),Object.defineProperty(t,"prototype",{writable:!1}),t}function i(){return i=Object.assign?Object.assign.bind():function(t){for(var e=1;e<arguments.length;e++){var n=arguments[e];for(var r in n)Object.prototype.hasOwnProperty.call(n,r)&&(t[r]=n[r])}return t},i.apply(this,arguments)}function o(t,e){if("function"!=typeof e&&null!==e)throw new TypeError("Super expression must either be null or a function");t.prototype=Object.create(e&&e.prototype,{constructor:{value:t,writable:!0,configurable:!0}}),Object.defineProperty(t,"prototype",{writable:!1}),e&&a(t,e)}function s(t){return s=Object.setPrototypeOf?Object.getPrototypeOf.bind():function(t){return t.__proto__||Object.getPrototypeOf(t)},s(t)}function a(t,e){return a=Object.setPrototypeOf?Object.setPrototypeOf.bind():function(t,e){return t.__proto__=e,t},a(t,e)}function c(){if("undefined"==typeof Reflect||!Reflect.construct)return!1;if(Reflect.construct.sham)return!1;if("function"==typeof Proxy)return!0;try{return Boolean.prototype.valueOf.call(Reflect.construct(Boolean,[],(function(){}))),!0}catch(t){return!1}}function u(t,e,n){return u=c()?Reflect.construct.bind():function(t,e,n){var r=[null];r.push.apply(r,e);var i=new(Function.bind.apply(t,r));return n&&a(i,n.prototype),i},u.apply(null,arguments)}function h(t){var e="function"==typeof Map?new Map:void 0;return h=function(t){if(null===t||(n=t,-1===Function.toString.call(n).indexOf("[native code]")))return t;var n;if("function"!=typeof t)throw new TypeError("Super expression must either be null or a function");if(void 0!==e){if(e.has(t))return e.get(t);e.set(t,r)}function r(){return u(t,arguments,s(this).constructor)}return r.prototype=Object.create(t.prototype,{constructor:{value:r,enumerable:!1,writable:!0,configurable:!0}}),a(r,t)},h(t)}function f(t){if(void 0===t)throw new ReferenceError("this hasn't been initialised - super() hasn't been called");return t}function l(t,e){if(e&&("object"==typeof e||"function"==typeof e))return e;if(void 0!==e)throw new TypeError("Derived constructors may only return object or undefined");return f(t)}function p(t){var e=c();return function(){var n,r=s(t);if(e){var i=s(this).constructor;n=Reflect.construct(r,arguments,i)}else n=r.apply(this,arguments);return l(this,n)}}function d(t,e){for(;!Object.prototype.hasOwnProperty.call(t,e)&&null!==(t=s(t)););return t}function y(){return y="undefined"!=typeof Reflect&&Reflect.get?Reflect.get.bind():function(t,e,n){var r=d(t,e);if(r){var i=Object.getOwnPropertyDescriptor(r,e);return i.get?i.get.call(arguments.length<3?t:n):i.value}},y.apply(this,arguments)}function v(t,e){(null==e||e>t.length)&&(e=t.length);for(var n=0,r=new Array(e);n<e;n++)r[n]=t[n];return r}function g(t,e){var n="undefined"!=typeof Symbol&&t[Symbol.iterator]||t["@@iterator"];if(!n){if(Array.isArray(t)||(n=function(t,e){if(t){if("string"==typeof t)return v(t,e);var n=Object.prototype.toString.call(t).slice(8,-1);return"Object"===n&&t.constructor&&(n=t.constructor.name),"Map"===n||"Set"===n?Array.from(t):"Arguments"===n||/^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n)?v(t,e):void 0}}(t))||e&&t&&"number"==typeof t.length){n&&(t=n);var r=0,i=function(){};return{s:i,n:function(){return r>=t.length?{done:!0}:{done:!1,value:t[r++]}},e:function(t){throw t},f:i}}throw new TypeError("Invalid attempt to iterate non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.")}var o,s=!0,a=!1;return{s:function(){n=n.call(t)},n:function(){var t=n.next();return s=t.done,t},e:function(t){a=!0,o=t},f:function(){try{s||null==n.return||n.return()}finally{if(a)throw o}}}}var m=Object.create(null);m.open="0",m.close="1",m.ping="2",m.pong="3",m.message="4",m.upgrade="5",m.noop="6";var b=Object.create(null);Object.keys(m).forEach((function(t){b[m[t]]=t}));for(var k={type:"error",data:"parser error"},w="function"==typeof Blob||"undefined"!=typeof Blob&&"[object BlobConstructor]"===Object.prototype.toString.call(Blob),_="function"==typeof ArrayBuffer,O=function(t,e,n){var r,i=t.type,o=t.data;return w&&o instanceof Blob?e?n(o):E(o,n):_&&(o instanceof ArrayBuffer||(r=o,"function"==typeof ArrayBuffer.isView?ArrayBuffer.isView(r):r&&r.buffer instanceof ArrayBuffer))?e?n(o):E(new Blob([o]),n):n(m[i]+(o||""))},E=function(t,e){var n=new FileReader;return n.onload=function(){var t=n.result.split(",")[1];e("b"+t)},n.readAsDataURL(t)},A="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",R="undefined"==typeof Uint8Array?[]:new Uint8Array(256),T=0;T<A.length;T++)R[A.charCodeAt(T)]=T;var C="function"==typeof ArrayBuffer,B=function(t,e){if("string"!=typeof t)return{type:"message",data:N(t,e)};var n=t.charAt(0);return"b"===n?{type:"message",data:S(t.substring(1),e)}:b[n]?t.length>1?{type:b[n],data:t.substring(1)}:{type:b[n]}:k},S=function(t,e){if(C){var n=function(t){var e,n,r,i,o,s=.75*t.length,a=t.length,c=0;"="===t[t.length-1]&&(s--,"="===t[t.length-2]&&s--);var u=new ArrayBuffer(s),h=new Uint8Array(u);for(e=0;e<a;e+=4)n=R[t.charCodeAt(e)],r=R[t.charCodeAt(e+1)],i=R[t.charCodeAt(e+2)],o=R[t.charCodeAt(e+3)],h[c++]=n<<2|r>>4,h[c++]=(15&r)<<4|i>>2,h[c++]=(3&i)<<6|63&o;return u}(t);return N(n,e)}return{base64:!0,data:t}},N=function(t,e){return"blob"===e&&t instanceof ArrayBuffer?new Blob([t]):t},x=String.fromCharCode(30);function L(t){if(t)return function(t){for(var e in L.prototype)t[e]=L.prototype[e];return t}(t)}L.prototype.on=L.prototype.addEventListener=function(t,e){return this._callbacks=this._callbacks||{},(this._callbacks["$"+t]=this._callbacks["$"+t]||[]).push(e),this},L.prototype.once=function(t,e){function n(){this.off(t,n),e.apply(this,arguments)}return n.fn=e,this.on(t,n),this},L.prototype.off=L.prototype.removeListener=L.prototype.removeAllListeners=L.prototype.removeEventListener=function(t,e){if(this._callbacks=this._callbacks||{},0==arguments.length)return this._callbacks={},this;var n,r=this._callbacks["$"+t];if(!r)return this;if(1==arguments.length)return delete this._callbacks["$"+t],this;for(var i=0;i<r.length;i++)if((n=r[i])===e||n.fn===e){r.splice(i,1);break}return 0===r.length&&delete this._callbacks["$"+t],this},L.prototype.emit=function(t){this._callbacks=this._callbacks||{};for(var e=new Array(arguments.length-1),n=this._callbacks["$"+t],r=1;r<arguments.length;r++)e[r-1]=arguments[r];if(n){r=0;for(var i=(n=n.slice(0)).length;r<i;++r)n[r].apply(this,e)}return this},L.prototype.emitReserved=L.prototype.emit,L.prototype.listeners=function(t){return this._callbacks=this._callbacks||{},this._callbacks["$"+t]||[]},L.prototype.hasListeners=function(t){return!!this.listeners(t).length};var P="undefined"!=typeof self?self:"undefined"!=typeof window?window:Function("return this")();function j(t){for(var e=arguments.length,n=new Array(e>1?e-1:0),r=1;r<e;r++)n[r-1]=arguments[r];return n.reduce((function(e,n){return t.hasOwnProperty(n)&&(e[n]=t[n]),e}),{})}var q=setTimeout,I=clearTimeout;function D(t,e){e.useNativeTimers?(t.setTimeoutFn=q.bind(P),t.clearTimeoutFn=I.bind(P)):(t.setTimeoutFn=setTimeout.bind(P),t.clearTimeoutFn=clearTimeout.bind(P))}var F,M=function(t){o(i,t);var n=p(i);function i(t,r,o){var s;return e(this,i),(s=n.call(this,t)).description=r,s.context=o,s.type="TransportError",s}return r(i)}(h(Error)),U=function(t){o(i,t);var n=p(i);function i(t){var r;return e(this,i),(r=n.call(this)).writable=!1,D(f(r),t),r.opts=t,r.query=t.query,r.readyState="",r.socket=t.socket,r}return r(i,[{key:"onError",value:function(t,e,n){return y(s(i.prototype),"emitReserved",this).call(this,"error",new M(t,e,n)),this}},{key:"open",value:function(){return"closed"!==this.readyState&&""!==this.readyState||(this.readyState="opening",this.doOpen()),this}},{key:"close",value:function(){return"opening"!==this.readyState&&"open"!==this.readyState||(this.doClose(),this.onClose()),this}},{key:"send",value:function(t){"open"===this.readyState&&this.write(t)}},{key:"onOpen",value:function(){this.readyState="open",this.writable=!0,y(s(i.prototype),"emitReserved",this).call(this,"open")}},{key:"onData",value:function(t){var e=B(t,this.socket.binaryType);this.onPacket(e)}},{key:"onPacket",value:function(t){y(s(i.prototype),"emitReserved",this).call(this,"packet",t)}},{key:"onClose",value:function(t){this.readyState="closed",y(s(i.prototype),"emitReserved",this).call(this,"close",t)}}]),i}(L),V="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_".split(""),H={},K=0,Y=0;function z(t){var e="";do{e=V[t%64]+e,t=Math.floor(t/64)}while(t>0);return e}function W(){var t=z(+new Date);return t!==F?(K=0,F=t):t+"."+z(K++)}for(;Y<64;Y++)H[V[Y]]=Y;function $(t){var e="";for(var n in t)t.hasOwnProperty(n)&&(e.length&&(e+="&"),e+=encodeURIComponent(n)+"="+encodeURIComponent(t[n]));return e}function J(t){for(var e={},n=t.split("&"),r=0,i=n.length;r<i;r++){var o=n[r].split("=");e[decodeURIComponent(o[0])]=decodeURIComponent(o[1])}return e}var X=!1;try{X="undefined"!=typeof XMLHttpRequest&&"withCredentials"in new XMLHttpRequest}catch(t){}var G=X;function Q(t){var e=t.xdomain;try{if("undefined"!=typeof XMLHttpRequest&&(!e||G))return new XMLHttpRequest}catch(t){}if(!e)try{return new(P[["Active"].concat("Object").join("X")])("Microsoft.XMLHTTP")}catch(t){}}function Z(){}var tt=null!=new Q({xdomain:!1}).responseType,et=function(t){o(s,t);var n=p(s);function s(t){var r;if(e(this,s),(r=n.call(this,t)).polling=!1,"undefined"!=typeof location){var i="https:"===location.protocol,o=location.port;o||(o=i?"443":"80"),r.xd="undefined"!=typeof location&&t.hostname!==location.hostname||o!==t.port,r.xs=t.secure!==i}var a=t&&t.forceBase64;return r.supportsBinary=tt&&!a,r}return r(s,[{key:"name",get:function(){return"polling"}},{key:"doOpen",value:function(){this.poll()}},{key:"pause",value:function(t){var e=this;this.readyState="pausing";var n=function(){e.readyState="paused",t()};if(this.polling||!this.writable){var r=0;this.polling&&(r++,this.once("pollComplete",(function(){--r||n()}))),this.writable||(r++,this.once("drain",(function(){--r||n()})))}else n()}},{key:"poll",value:function(){this.polling=!0,this.doPoll(),this.emitReserved("poll")}},{key:"onData",value:function(t){var e=this;(function(t,e){for(var n=t.split(x),r=[],i=0;i<n.length;i++){var o=B(n[i],e);if(r.push(o),"error"===o.type)break}return r})(t,this.socket.binaryType).forEach((function(t){if("opening"===e.readyState&&"open"===t.type&&e.onOpen(),"close"===t.type)return e.onClose({description:"transport closed by the server"}),!1;e.onPacket(t)})),"closed"!==this.readyState&&(this.polling=!1,this.emitReserved("pollComplete"),"open"===this.readyState&&this.poll())}},{key:"doClose",value:function(){var t=this,e=function(){t.write([{type:"close"}])};"open"===this.readyState?e():this.once("open",e)}},{key:"write",value:function(t){var e=this;this.writable=!1,function(t,e){var n=t.length,r=new Array(n),i=0;t.forEach((function(t,o){O(t,!1,(function(t){r[o]=t,++i===n&&e(r.join(x))}))}))}(t,(function(t){e.doWrite(t,(function(){e.writable=!0,e.emitReserved("drain")}))}))}},{key:"uri",value:function(){var t=this.query||{},e=this.opts.secure?"https":"http",n="";!1!==this.opts.timestampRequests&&(t[this.opts.timestampParam]=W()),this.supportsBinary||t.sid||(t.b64=1),this.opts.port&&("https"===e&&443!==Number(this.opts.port)||"http"===e&&80!==Number(this.opts.port))&&(n=":"+this.opts.port);var r=$(t);return e+"://"+(-1!==this.opts.hostname.indexOf(":")?"["+this.opts.hostname+"]":this.opts.hostname)+n+this.opts.path+(r.length?"?"+r:"")}},{key:"request",value:function(){var t=arguments.length>0&&void 0!==arguments[0]?arguments[0]:{};return i(t,{xd:this.xd,xs:this.xs},this.opts),new nt(this.uri(),t)}},{key:"doWrite",value:function(t,e){var n=this,r=this.request({method:"POST",data:t});r.on("success",e),r.on("error",(function(t,e){n.onError("xhr post error",t,e)}))}},{key:"doPoll",value:function(){var t=this,e=this.request();e.on("data",this.onData.bind(this)),e.on("error",(function(e,n){t.onError("xhr poll error",e,n)})),this.pollXhr=e}}]),s}(U),nt=function(t){o(i,t);var n=p(i);function i(t,r){var o;return e(this,i),D(f(o=n.call(this)),r),o.opts=r,o.method=r.method||"GET",o.uri=t,o.async=!1!==r.async,o.data=void 0!==r.data?r.data:null,o.create(),o}return r(i,[{key:"create",value:function(){var t=this,e=j(this.opts,"agent","pfx","key","passphrase","cert","ca","ciphers","rejectUnauthorized","autoUnref");e.xdomain=!!this.opts.xd,e.xscheme=!!this.opts.xs;var n=this.xhr=new Q(e);try{n.open(this.method,this.uri,this.async);try{if(this.opts.extraHeaders)for(var r in n.setDisableHeaderCheck&&n.setDisableHeaderCheck(!0),this.opts.extraHeaders)this.opts.extraHeaders.hasOwnProperty(r)&&n.setRequestHeader(r,this.opts.extraHeaders[r])}catch(t){}if("POST"===this.method)try{n.setRequestHeader("Content-type","text/plain;charset=UTF-8")}catch(t){}try{n.setRequestHeader("Accept","*/*")}catch(t){}"withCredentials"in n&&(n.withCredentials=this.opts.withCredentials),this.opts.requestTimeout&&(n.timeout=this.opts.requestTimeout),n.onreadystatechange=function(){4===n.readyState&&(200===n.status||1223===n.status?t.onLoad():t.setTimeoutFn((function(){t.onError("number"==typeof n.status?n.status:0)}),0))},n.send(this.data)}catch(e){return void this.setTimeoutFn((function(){t.onError(e)}),0)}"undefined"!=typeof document&&(this.index=i.requestsCount++,i.requests[this.index]=this)}},{key:"onError",value:function(t){this.emitReserved("error",t,this.xhr),this.cleanup(!0)}},{key:"cleanup",value:function(t){if(void 0!==this.xhr&&null!==this.xhr){if(this.xhr.onreadystatechange=Z,t)try{this.xhr.abort()}catch(t){}"undefined"!=typeof document&&delete i.requests[this.index],this.xhr=null}}},{key:"onLoad",value:function(){var t=this.xhr.responseText;null!==t&&(this.emitReserved("data",t),this.emitReserved("success"),this.cleanup())}},{key:"abort",value:function(){this.cleanup()}}]),i}(L);if(nt.requestsCount=0,nt.requests={},"undefined"!=typeof document)if("function"==typeof attachEvent)attachEvent("onunload",rt);else if("function"==typeof addEventListener){addEventListener("onpagehide"in P?"pagehide":"unload",rt,!1)}function rt(){for(var t in nt.requests)nt.requests.hasOwnProperty(t)&&nt.requests[t].abort()}var it="function"==typeof Promise&&"function"==typeof Promise.resolve?function(t){return Promise.resolve().then(t)}:function(t,e){return e(t,0)},ot=P.WebSocket||P.MozWebSocket,st="undefined"!=typeof navigator&&"string"==typeof navigator.product&&"reactnative"===navigator.product.toLowerCase(),at=function(t){o(i,t);var n=p(i);function i(t){var r;return e(this,i),(r=n.call(this,t)).supportsBinary=!t.forceBase64,r}return r(i,[{key:"name",get:function(){return"websocket"}},{key:"doOpen",value:function(){if(this.check()){var t=this.uri(),e=this.opts.protocols,n=st?{}:j(this.opts,"agent","perMessageDeflate","pfx","key","passphrase","cert","ca","ciphers","rejectUnauthorized","localAddress","protocolVersion","origin","maxPayload","family","checkServerIdentity");this.opts.extraHeaders&&(n.headers=this.opts.extraHeaders);try{this.ws=st?new ot(t,e,n):e?new ot(t,e):new ot(t)}catch(t){return this.emitReserved("error",t)}this.ws.binaryType=this.socket.binaryType||"arraybuffer",this.addEventListeners()}}},{key:"addEventListeners",value:function(){var t=this;this.ws.onopen=function(){t.opts.autoUnref&&t.ws._socket.unref(),t.onOpen()},this.ws.onclose=function(e){return t.onClose({description:"websocket connection closed",context:e})},this.ws.onmessage=function(e){return t.onData(e.data)},this.ws.onerror=function(e){return t.onError("websocket error",e)}}},{key:"write",value:function(t){var e=this;this.writable=!1;for(var n=function(n){var r=t[n],i=n===t.length-1;O(r,e.supportsBinary,(function(t){try{e.ws.send(t)}catch(t){}i&&it((function(){e.writable=!0,e.emitReserved("drain")}),e.setTimeoutFn)}))},r=0;r<t.length;r++)n(r)}},{key:"doClose",value:function(){void 0!==this.ws&&(this.ws.close(),this.ws=null)}},{key:"uri",value:function(){var t=this.query||{},e=this.opts.secure?"wss":"ws",n="";this.opts.port&&("wss"===e&&443!==Number(this.opts.port)||"ws"===e&&80!==Number(this.opts.port))&&(n=":"+this.opts.port),this.opts.timestampRequests&&(t[this.opts.timestampParam]=W()),this.supportsBinary||(t.b64=1);var r=$(t);return e+"://"+(-1!==this.opts.hostname.indexOf(":")?"["+this.opts.hostname+"]":this.opts.hostname)+n+this.opts.path+(r.length?"?"+r:"")}},{key:"check",value:function(){return!!ot}}]),i}(U),ct={websocket:at,polling:et},ut=/^(?:(?![^:@]+:[^:@\/]*@)(http|https|ws|wss):\/\/)?((?:(([^:@]*)(?::([^:@]*))?)?@)?((?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}|[^:\/?#]*)(?::(\d*))?)(((\/(?:[^?#](?![^?#\/]*\.[^?#\/.]+(?:[?#]|$)))*\/?)?([^?#\/]*))(?:\?([^#]*))?(?:#(.*))?)/,ht=["source","protocol","authority","userInfo","user","password","host","port","relative","path","directory","file","query","anchor"];function ft(t){var e=t,n=t.indexOf("["),r=t.indexOf("]");-1!=n&&-1!=r&&(t=t.substring(0,n)+t.substring(n,r).replace(/:/g,";")+t.substring(r,t.length));for(var i,o,s=ut.exec(t||""),a={},c=14;c--;)a[ht[c]]=s[c]||"";return-1!=n&&-1!=r&&(a.source=e,a.host=a.host.substring(1,a.host.length-1).replace(/;/g,":"),a.authority=a.authority.replace("[","").replace("]","").replace(/;/g,":"),a.ipv6uri=!0),a.pathNames=function(t,e){var n=/\/{2,9}/g,r=e.replace(n,"/").split("/");"/"!=e.slice(0,1)&&0!==e.length||r.splice(0,1);"/"==e.slice(-1)&&r.splice(r.length-1,1);return r}(0,a.path),a.queryKey=(i=a.query,o={},i.replace(/(?:^|&)([^&=]*)=?([^&]*)/g,(function(t,e,n){e&&(o[e]=n)})),o),a}var lt=function(n){o(a,n);var s=p(a);function a(n){var r,o=arguments.length>1&&void 0!==arguments[1]?arguments[1]:{};return e(this,a),r=s.call(this),n&&"object"===t(n)&&(o=n,n=null),n?(n=ft(n),o.hostname=n.host,o.secure="https"===n.protocol||"wss"===n.protocol,o.port=n.port,n.query&&(o.query=n.query)):o.host&&(o.hostname=ft(o.host).host),D(f(r),o),r.secure=null!=o.secure?o.secure:"undefined"!=typeof location&&"https:"===location.protocol,o.hostname&&!o.port&&(o.port=r.secure?"443":"80"),r.hostname=o.hostname||("undefined"!=typeof location?location.hostname:"localhost"),r.port=o.port||("undefined"!=typeof location&&location.port?location.port:r.secure?"443":"80"),r.transports=o.transports||["polling","websocket"],r.readyState="",r.writeBuffer=[],r.prevBufferLen=0,r.opts=i({path:"/engine.io",agent:!1,withCredentials:!1,upgrade:!0,timestampParam:"t",rememberUpgrade:!1,rejectUnauthorized:!0,perMessageDeflate:{threshold:1024},transportOptions:{},closeOnBeforeunload:!0},o),r.opts.path=r.opts.path.replace(/\/$/,"")+"/","string"==typeof r.opts.query&&(r.opts.query=J(r.opts.query)),r.id=null,r.upgrades=null,r.pingInterval=null,r.pingTimeout=null,r.pingTimeoutTimer=null,"function"==typeof addEventListener&&(r.opts.closeOnBeforeunload&&(r.beforeunloadEventListener=function(){r.transport&&(r.transport.removeAllListeners(),r.transport.close())},addEventListener("beforeunload",r.beforeunloadEventListener,!1)),"localhost"!==r.hostname&&(r.offlineEventListener=function(){r.onClose("transport close",{description:"network connection lost"})},addEventListener("offline",r.offlineEventListener,!1))),r.open(),r}return r(a,[{key:"createTransport",value:function(t){var e=i({},this.opts.query);e.EIO=4,e.transport=t,this.id&&(e.sid=this.id);var n=i({},this.opts.transportOptions[t],this.opts,{query:e,socket:this,hostname:this.hostname,secure:this.secure,port:this.port});return new ct[t](n)}},{key:"open",value:function(){var t,e=this;if(this.opts.rememberUpgrade&&a.priorWebsocketSuccess&&-1!==this.transports.indexOf("websocket"))t="websocket";else{if(0===this.transports.length)return void this.setTimeoutFn((function(){e.emitReserved("error","No transports available")}),0);t=this.transports[0]}this.readyState="opening";try{t=this.createTransport(t)}catch(t){return this.transports.shift(),void this.open()}t.open(),this.setTransport(t)}},{key:"setTransport",value:function(t){var e=this;this.transport&&this.transport.removeAllListeners(),this.transport=t,t.on("drain",this.onDrain.bind(this)).on("packet",this.onPacket.bind(this)).on("error",this.onError.bind(this)).on("close",(function(t){return e.onClose("transport close",t)}))}},{key:"probe",value:function(t){var e=this,n=this.createTransport(t),r=!1;a.priorWebsocketSuccess=!1;var i=function(){r||(n.send([{type:"ping",data:"probe"}]),n.once("packet",(function(t){if(!r)if("pong"===t.type&&"probe"===t.data){if(e.upgrading=!0,e.emitReserved("upgrading",n),!n)return;a.priorWebsocketSuccess="websocket"===n.name,e.transport.pause((function(){r||"closed"!==e.readyState&&(f(),e.setTransport(n),n.send([{type:"upgrade"}]),e.emitReserved("upgrade",n),n=null,e.upgrading=!1,e.flush())}))}else{var i=new Error("probe error");i.transport=n.name,e.emitReserved("upgradeError",i)}})))};function o(){r||(r=!0,f(),n.close(),n=null)}var s=function(t){var r=new Error("probe error: "+t);r.transport=n.name,o(),e.emitReserved("upgradeError",r)};function c(){s("transport closed")}function u(){s("socket closed")}function h(t){n&&t.name!==n.name&&o()}var f=function(){n.removeListener("open",i),n.removeListener("error",s),n.removeListener("close",c),e.off("close",u),e.off("upgrading",h)};n.once("open",i),n.once("error",s),n.once("close",c),this.once("close",u),this.once("upgrading",h),n.open()}},{key:"onOpen",value:function(){if(this.readyState="open",a.priorWebsocketSuccess="websocket"===this.transport.name,this.emitReserved("open"),this.flush(),"open"===this.readyState&&this.opts.upgrade&&this.transport.pause)for(var t=0,e=this.upgrades.length;t<e;t++)this.probe(this.upgrades[t])}},{key:"onPacket",value:function(t){if("opening"===this.readyState||"open"===this.readyState||"closing"===this.readyState)switch(this.emitReserved("packet",t),this.emitReserved("heartbeat"),t.type){case"open":this.onHandshake(JSON.parse(t.data));break;case"ping":this.resetPingTimeout(),this.sendPacket("pong"),this.emitReserved("ping"),this.emitReserved("pong");break;case"error":var e=new Error("server error");e.code=t.data,this.onError(e);break;case"message":this.emitReserved("data",t.data),this.emitReserved("message",t.data)}}},{key:"onHandshake",value:function(t){this.emitReserved("handshake",t),this.id=t.sid,this.transport.query.sid=t.sid,this.upgrades=this.filterUpgrades(t.upgrades),this.pingInterval=t.pingInterval,this.pingTimeout=t.pingTimeout,this.maxPayload=t.maxPayload,this.onOpen(),"closed"!==this.readyState&&this.resetPingTimeout()}},{key:"resetPingTimeout",value:function(){var t=this;this.clearTimeoutFn(this.pingTimeoutTimer),this.pingTimeoutTimer=this.setTimeoutFn((function(){t.onClose("ping timeout")}),this.pingInterval+this.pingTimeout),this.opts.autoUnref&&this.pingTimeoutTimer.unref()}},{key:"onDrain",value:function(){this.writeBuffer.splice(0,this.prevBufferLen),this.prevBufferLen=0,0===this.writeBuffer.length?this.emitReserved("drain"):this.flush()}},{key:"flush",value:function(){if("closed"!==this.readyState&&this.transport.writable&&!this.upgrading&&this.writeBuffer.length){var t=this.getWritablePackets();this.transport.send(t),this.prevBufferLen=t.length,this.emitReserved("flush")}}},{key:"getWritablePackets",value:function(){if(!(this.maxPayload&&"polling"===this.transport.name&&this.writeBuffer.length>1))return this.writeBuffer;for(var t,e=1,n=0;n<this.writeBuffer.length;n++){var r=this.writeBuffer[n].data;if(r&&(e+="string"==typeof(t=r)?function(t){for(var e=0,n=0,r=0,i=t.length;r<i;r++)(e=t.charCodeAt(r))<128?n+=1:e<2048?n+=2:e<55296||e>=57344?n+=3:(r++,n+=4);return n}(t):Math.ceil(1.33*(t.byteLength||t.size))),n>0&&e>this.maxPayload)return this.writeBuffer.slice(0,n);e+=2}return this.writeBuffer}},{key:"write",value:function(t,e,n){return this.sendPacket("message",t,e,n),this}},{key:"send",value:function(t,e,n){return this.sendPacket("message",t,e,n),this}},{key:"sendPacket",value:function(t,e,n,r){if("function"==typeof e&&(r=e,e=void 0),"function"==typeof n&&(r=n,n=null),"closing"!==this.readyState&&"closed"!==this.readyState){(n=n||{}).compress=!1!==n.compress;var i={type:t,data:e,options:n};this.emitReserved("packetCreate",i),this.writeBuffer.push(i),r&&this.once("flush",r),this.flush()}}},{key:"close",value:function(){var t=this,e=function(){t.onClose("forced close"),t.transport.close()},n=function n(){t.off("upgrade",n),t.off("upgradeError",n),e()},r=function(){t.once("upgrade",n),t.once("upgradeError",n)};return"opening"!==this.readyState&&"open"!==this.readyState||(this.readyState="closing",this.writeBuffer.length?this.once("drain",(function(){t.upgrading?r():e()})):this.upgrading?r():e()),this}},{key:"onError",value:function(t){a.priorWebsocketSuccess=!1,this.emitReserved("error",t),this.onClose("transport error",t)}},{key:"onClose",value:function(t,e){"opening"!==this.readyState&&"open"!==this.readyState&&"closing"!==this.readyState||(this.clearTimeoutFn(this.pingTimeoutTimer),this.transport.removeAllListeners("close"),this.transport.close(),this.transport.removeAllListeners(),"function"==typeof removeEventListener&&(removeEventListener("beforeunload",this.beforeunloadEventListener,!1),removeEventListener("offline",this.offlineEventListener,!1)),this.readyState="closed",this.id=null,this.emitReserved("close",t,e),this.writeBuffer=[],this.prevBufferLen=0)}},{key:"filterUpgrades",value:function(t){for(var e=[],n=0,r=t.length;n<r;n++)~this.transports.indexOf(t[n])&&e.push(t[n]);return e}}]),a}(L);lt.protocol=4,lt.protocol;var pt="function"==typeof ArrayBuffer,dt=Object.prototype.toString,yt="function"==typeof Blob||"undefined"!=typeof Blob&&"[object BlobConstructor]"===dt.call(Blob),vt="function"==typeof File||"undefined"!=typeof File&&"[object FileConstructor]"===dt.call(File);function gt(t){return pt&&(t instanceof ArrayBuffer||function(t){return"function"==typeof ArrayBuffer.isView?ArrayBuffer.isView(t):t.buffer instanceof ArrayBuffer}(t))||yt&&t instanceof Blob||vt&&t instanceof File}function mt(e,n){if(!e||"object"!==t(e))return!1;if(Array.isArray(e)){for(var r=0,i=e.length;r<i;r++)if(mt(e[r]))return!0;return!1}if(gt(e))return!0;if(e.toJSON&&"function"==typeof e.toJSON&&1===arguments.length)return mt(e.toJSON(),!0);for(var o in e)if(Object.prototype.hasOwnProperty.call(e,o)&&mt(e[o]))return!0;return!1}function bt(t){var e=[],n=t.data,r=t;return r.data=kt(n,e),r.attachments=e.length,{packet:r,buffers:e}}function kt(e,n){if(!e)return e;if(gt(e)){var r={_placeholder:!0,num:n.length};return n.push(e),r}if(Array.isArray(e)){for(var i=new Array(e.length),o=0;o<e.length;o++)i[o]=kt(e[o],n);return i}if("object"===t(e)&&!(e instanceof Date)){var s={};for(var a in e)Object.prototype.hasOwnProperty.call(e,a)&&(s[a]=kt(e[a],n));return s}return e}function wt(t,e){return t.data=_t(t.data,e),t.attachments=void 0,t}function _t(e,n){if(!e)return e;if(e&&e._placeholder)return n[e.num];if(Array.isArray(e))for(var r=0;r<e.length;r++)e[r]=_t(e[r],n);else if("object"===t(e))for(var i in e)Object.prototype.hasOwnProperty.call(e,i)&&(e[i]=_t(e[i],n));return e}var Ot;!function(t){t[t.CONNECT=0]="CONNECT",t[t.DISCONNECT=1]="DISCONNECT",t[t.EVENT=2]="EVENT",t[t.ACK=3]="ACK",t[t.CONNECT_ERROR=4]="CONNECT_ERROR",t[t.BINARY_EVENT=5]="BINARY_EVENT",t[t.BINARY_ACK=6]="BINARY_ACK"}(Ot||(Ot={}));var Et=function(){function t(n){e(this,t),this.replacer=n}return r(t,[{key:"encode",value:function(t){return t.type!==Ot.EVENT&&t.type!==Ot.ACK||!mt(t)?[this.encodeAsString(t)]:(t.type=t.type===Ot.EVENT?Ot.BINARY_EVENT:Ot.BINARY_ACK,this.encodeAsBinary(t))}},{key:"encodeAsString",value:function(t){var e=""+t.type;return t.type!==Ot.BINARY_EVENT&&t.type!==Ot.BINARY_ACK||(e+=t.attachments+"-"),t.nsp&&"/"!==t.nsp&&(e+=t.nsp+","),null!=t.id&&(e+=t.id),null!=t.data&&(e+=JSON.stringify(t.data,this.replacer)),e}},{key:"encodeAsBinary",value:function(t){var e=bt(t),n=this.encodeAsString(e.packet),r=e.buffers;return r.unshift(n),r}}]),t}(),At=function(n){o(a,n);var i=p(a);function a(t){var n;return e(this,a),(n=i.call(this)).reviver=t,n}return r(a,[{key:"add",value:function(t){var e;if("string"==typeof t)(e=this.decodeString(t)).type===Ot.BINARY_EVENT||e.type===Ot.BINARY_ACK?(this.reconstructor=new Rt(e),0===e.attachments&&y(s(a.prototype),"emitReserved",this).call(this,"decoded",e)):y(s(a.prototype),"emitReserved",this).call(this,"decoded",e);else{if(!gt(t)&&!t.base64)throw new Error("Unknown type: "+t);if(!this.reconstructor)throw new Error("got binary data when not reconstructing a packet");(e=this.reconstructor.takeBinaryData(t))&&(this.reconstructor=null,y(s(a.prototype),"emitReserved",this).call(this,"decoded",e))}}},{key:"decodeString",value:function(t){var e=0,n={type:Number(t.charAt(0))};if(void 0===Ot[n.type])throw new Error("unknown packet type "+n.type);if(n.type===Ot.BINARY_EVENT||n.type===Ot.BINARY_ACK){for(var r=e+1;"-"!==t.charAt(++e)&&e!=t.length;);var i=t.substring(r,e);if(i!=Number(i)||"-"!==t.charAt(e))throw new Error("Illegal attachments");n.attachments=Number(i)}if("/"===t.charAt(e+1)){for(var o=e+1;++e;){if(","===t.charAt(e))break;if(e===t.length)break}n.nsp=t.substring(o,e)}else n.nsp="/";var s=t.charAt(e+1);if(""!==s&&Number(s)==s){for(var c=e+1;++e;){var u=t.charAt(e);if(null==u||Number(u)!=u){--e;break}if(e===t.length)break}n.id=Number(t.substring(c,e+1))}if(t.charAt(++e)){var h=this.tryParse(t.substr(e));if(!a.isPayloadValid(n.type,h))throw new Error("invalid payload");n.data=h}return n}},{key:"tryParse",value:function(t){try{return JSON.parse(t,this.reviver)}catch(t){return!1}}},{key:"destroy",value:function(){this.reconstructor&&this.reconstructor.finishedReconstruction()}}],[{key:"isPayloadValid",value:function(e,n){switch(e){case Ot.CONNECT:return"object"===t(n);case Ot.DISCONNECT:return void 0===n;case Ot.CONNECT_ERROR:return"string"==typeof n||"object"===t(n);case Ot.EVENT:case Ot.BINARY_EVENT:return Array.isArray(n)&&n.length>0;case Ot.ACK:case Ot.BINARY_ACK:return Array.isArray(n)}}}]),a}(L),Rt=function(){function t(n){e(this,t),this.packet=n,this.buffers=[],this.reconPack=n}return r(t,[{key:"takeBinaryData",value:function(t){if(this.buffers.push(t),this.buffers.length===this.reconPack.attachments){var e=wt(this.reconPack,this.buffers);return this.finishedReconstruction(),e}return null}},{key:"finishedReconstruction",value:function(){this.reconPack=null,this.buffers=[]}}]),t}(),Tt=Object.freeze({__proto__:null,protocol:5,get PacketType(){return Ot},Encoder:Et,Decoder:At});function Ct(t,e,n){return t.on(e,n),function(){t.off(e,n)}}var Bt=Object.freeze({connect:1,connect_error:1,disconnect:1,disconnecting:1,newListener:1,removeListener:1}),St=function(t){o(i,t);var n=p(i);function i(t,r,o){var s;return e(this,i),(s=n.call(this)).connected=!1,s.receiveBuffer=[],s.sendBuffer=[],s.ids=0,s.acks={},s.flags={},s.io=t,s.nsp=r,o&&o.auth&&(s.auth=o.auth),s.io._autoConnect&&s.open(),s}return r(i,[{key:"disconnected",get:function(){return!this.connected}},{key:"subEvents",value:function(){if(!this.subs){var t=this.io;this.subs=[Ct(t,"open",this.onopen.bind(this)),Ct(t,"packet",this.onpacket.bind(this)),Ct(t,"error",this.onerror.bind(this)),Ct(t,"close",this.onclose.bind(this))]}}},{key:"active",get:function(){return!!this.subs}},{key:"connect",value:function(){return this.connected||(this.subEvents(),this.io._reconnecting||this.io.open(),"open"===this.io._readyState&&this.onopen()),this}},{key:"open",value:function(){return this.connect()}},{key:"send",value:function(){for(var t=arguments.length,e=new Array(t),n=0;n<t;n++)e[n]=arguments[n];return e.unshift("message"),this.emit.apply(this,e),this}},{key:"emit",value:function(t){if(Bt.hasOwnProperty(t))throw new Error('"'+t.toString()+'" is a reserved event name');for(var e=arguments.length,n=new Array(e>1?e-1:0),r=1;r<e;r++)n[r-1]=arguments[r];n.unshift(t);var i={type:Ot.EVENT,data:n,options:{}};if(i.options.compress=!1!==this.flags.compress,"function"==typeof n[n.length-1]){var o=this.ids++,s=n.pop();this._registerAckCallback(o,s),i.id=o}var a=this.io.engine&&this.io.engine.transport&&this.io.engine.transport.writable,c=this.flags.volatile&&(!a||!this.connected);return c||(this.connected?(this.notifyOutgoingListeners(i),this.packet(i)):this.sendBuffer.push(i)),this.flags={},this}},{key:"_registerAckCallback",value:function(t,e){var n=this,r=this.flags.timeout;if(void 0!==r){var i=this.io.setTimeoutFn((function(){delete n.acks[t];for(var r=0;r<n.sendBuffer.length;r++)n.sendBuffer[r].id===t&&n.sendBuffer.splice(r,1);e.call(n,new Error("operation has timed out"))}),r);this.acks[t]=function(){n.io.clearTimeoutFn(i);for(var t=arguments.length,r=new Array(t),o=0;o<t;o++)r[o]=arguments[o];e.apply(n,[null].concat(r))}}else this.acks[t]=e}},{key:"packet",value:function(t){t.nsp=this.nsp,this.io._packet(t)}},{key:"onopen",value:function(){var t=this;"function"==typeof this.auth?this.auth((function(e){t.packet({type:Ot.CONNECT,data:e})})):this.packet({type:Ot.CONNECT,data:this.auth})}},{key:"onerror",value:function(t){this.connected||this.emitReserved("connect_error",t)}},{key:"onclose",value:function(t,e){this.connected=!1,delete this.id,this.emitReserved("disconnect",t,e)}},{key:"onpacket",value:function(t){if(t.nsp===this.nsp)switch(t.type){case Ot.CONNECT:if(t.data&&t.data.sid){var e=t.data.sid;this.onconnect(e)}else this.emitReserved("connect_error",new Error("It seems you are trying to reach a Socket.IO server in v2.x with a v3.x client, but they are not compatible (more information here: https://socket.io/docs/v3/migrating-from-2-x-to-3-0/)"));break;case Ot.EVENT:case Ot.BINARY_EVENT:this.onevent(t);break;case Ot.ACK:case Ot.BINARY_ACK:this.onack(t);break;case Ot.DISCONNECT:this.ondisconnect();break;case Ot.CONNECT_ERROR:this.destroy();var n=new Error(t.data.message);n.data=t.data.data,this.emitReserved("connect_error",n)}}},{key:"onevent",value:function(t){var e=t.data||[];null!=t.id&&e.push(this.ack(t.id)),this.connected?this.emitEvent(e):this.receiveBuffer.push(Object.freeze(e))}},{key:"emitEvent",value:function(t){if(this._anyListeners&&this._anyListeners.length){var e,n=g(this._anyListeners.slice());try{for(n.s();!(e=n.n()).done;){e.value.apply(this,t)}}catch(t){n.e(t)}finally{n.f()}}y(s(i.prototype),"emit",this).apply(this,t)}},{key:"ack",value:function(t){var e=this,n=!1;return function(){if(!n){n=!0;for(var r=arguments.length,i=new Array(r),o=0;o<r;o++)i[o]=arguments[o];e.packet({type:Ot.ACK,id:t,data:i})}}}},{key:"onack",value:function(t){var e=this.acks[t.id];"function"==typeof e&&(e.apply(this,t.data),delete this.acks[t.id])}},{key:"onconnect",value:function(t){this.id=t,this.connected=!0,this.emitBuffered(),this.emitReserved("connect")}},{key:"emitBuffered",value:function(){var t=this;this.receiveBuffer.forEach((function(e){return t.emitEvent(e)})),this.receiveBuffer=[],this.sendBuffer.forEach((function(e){t.notifyOutgoingListeners(e),t.packet(e)})),this.sendBuffer=[]}},{key:"ondisconnect",value:function(){this.destroy(),this.onclose("io server disconnect")}},{key:"destroy",value:function(){this.subs&&(this.subs.forEach((function(t){return t()})),this.subs=void 0),this.io._destroy(this)}},{key:"disconnect",value:function(){return this.connected&&this.packet({type:Ot.DISCONNECT}),this.destroy(),this.connected&&this.onclose("io client disconnect"),this}},{key:"close",value:function(){return this.disconnect()}},{key:"compress",value:function(t){return this.flags.compress=t,this}},{key:"volatile",get:function(){return this.flags.volatile=!0,this}},{key:"timeout",value:function(t){return this.flags.timeout=t,this}},{key:"onAny",value:function(t){return this._anyListeners=this._anyListeners||[],this._anyListeners.push(t),this}},{key:"prependAny",value:function(t){return this._anyListeners=this._anyListeners||[],this._anyListeners.unshift(t),this}},{key:"offAny",value:function(t){if(!this._anyListeners)return this;if(t){for(var e=this._anyListeners,n=0;n<e.length;n++)if(t===e[n])return e.splice(n,1),this}else this._anyListeners=[];return this}},{key:"listenersAny",value:function(){return this._anyListeners||[]}},{key:"onAnyOutgoing",value:function(t){return this._anyOutgoingListeners=this._anyOutgoingListeners||[],this._anyOutgoingListeners.push(t),this}},{key:"prependAnyOutgoing",value:function(t){return this._anyOutgoingListeners=this._anyOutgoingListeners||[],this._anyOutgoingListeners.unshift(t),this}},{key:"offAnyOutgoing",value:function(t){if(!this._anyOutgoingListeners)return this;if(t){for(var e=this._anyOutgoingListeners,n=0;n<e.length;n++)if(t===e[n])return e.splice(n,1),this}else this._anyOutgoingListeners=[];return this}},{key:"listenersAnyOutgoing",value:function(){return this._anyOutgoingListeners||[]}},{key:"notifyOutgoingListeners",value:function(t){if(this._anyOutgoingListeners&&this._anyOutgoingListeners.length){var e,n=g(this._anyOutgoingListeners.slice());try{for(n.s();!(e=n.n()).done;){e.value.apply(this,t.data)}}catch(t){n.e(t)}finally{n.f()}}}}]),i}(L);function Nt(t){t=t||{},this.ms=t.min||100,this.max=t.max||1e4,this.factor=t.factor||2,this.jitter=t.jitter>0&&t.jitter<=1?t.jitter:0,this.attempts=0}Nt.prototype.duration=function(){var t=this.ms*Math.pow(this.factor,this.attempts++);if(this.jitter){var e=Math.random(),n=Math.floor(e*this.jitter*t);t=0==(1&Math.floor(10*e))?t-n:t+n}return 0|Math.min(t,this.max)},Nt.prototype.reset=function(){this.attempts=0},Nt.prototype.setMin=function(t){this.ms=t},Nt.prototype.setMax=function(t){this.max=t},Nt.prototype.setJitter=function(t){this.jitter=t};var xt=function(n){o(s,n);var i=p(s);function s(n,r){var o,a;e(this,s),(o=i.call(this)).nsps={},o.subs=[],n&&"object"===t(n)&&(r=n,n=void 0),(r=r||{}).path=r.path||"/socket.io",o.opts=r,D(f(o),r),o.reconnection(!1!==r.reconnection),o.reconnectionAttempts(r.reconnectionAttempts||1/0),o.reconnectionDelay(r.reconnectionDelay||1e3),o.reconnectionDelayMax(r.reconnectionDelayMax||5e3),o.randomizationFactor(null!==(a=r.randomizationFactor)&&void 0!==a?a:.5),o.backoff=new Nt({min:o.reconnectionDelay(),max:o.reconnectionDelayMax(),jitter:o.randomizationFactor()}),o.timeout(null==r.timeout?2e4:r.timeout),o._readyState="closed",o.uri=n;var c=r.parser||Tt;return o.encoder=new c.Encoder,o.decoder=new c.Decoder,o._autoConnect=!1!==r.autoConnect,o._autoConnect&&o.open(),o}return r(s,[{key:"reconnection",value:function(t){return arguments.length?(this._reconnection=!!t,this):this._reconnection}},{key:"reconnectionAttempts",value:function(t){return void 0===t?this._reconnectionAttempts:(this._reconnectionAttempts=t,this)}},{key:"reconnectionDelay",value:function(t){var e;return void 0===t?this._reconnectionDelay:(this._reconnectionDelay=t,null===(e=this.backoff)||void 0===e||e.setMin(t),this)}},{key:"randomizationFactor",value:function(t){var e;return void 0===t?this._randomizationFactor:(this._randomizationFactor=t,null===(e=this.backoff)||void 0===e||e.setJitter(t),this)}},{key:"reconnectionDelayMax",value:function(t){var e;return void 0===t?this._reconnectionDelayMax:(this._reconnectionDelayMax=t,null===(e=this.backoff)||void 0===e||e.setMax(t),this)}},{key:"timeout",value:function(t){return arguments.length?(this._timeout=t,this):this._timeout}},{key:"maybeReconnectOnOpen",value:function(){!this._reconnecting&&this._reconnection&&0===this.backoff.attempts&&this.reconnect()}},{key:"open",value:function(t){var e=this;if(~this._readyState.indexOf("open"))return this;this.engine=new lt(this.uri,this.opts);var n=this.engine,r=this;this._readyState="opening",this.skipReconnect=!1;var i=Ct(n,"open",(function(){r.onopen(),t&&t()})),o=Ct(n,"error",(function(n){r.cleanup(),r._readyState="closed",e.emitReserved("error",n),t?t(n):r.maybeReconnectOnOpen()}));if(!1!==this._timeout){var s=this._timeout;0===s&&i();var a=this.setTimeoutFn((function(){i(),n.close(),n.emit("error",new Error("timeout"))}),s);this.opts.autoUnref&&a.unref(),this.subs.push((function(){clearTimeout(a)}))}return this.subs.push(i),this.subs.push(o),this}},{key:"connect",value:function(t){return this.open(t)}},{key:"onopen",value:function(){this.cleanup(),this._readyState="open",this.emitReserved("open");var t=this.engine;this.subs.push(Ct(t,"ping",this.onping.bind(this)),Ct(t,"data",this.ondata.bind(this)),Ct(t,"error",this.onerror.bind(this)),Ct(t,"close",this.onclose.bind(this)),Ct(this.decoder,"decoded",this.ondecoded.bind(this)))}},{key:"onping",value:function(){this.emitReserved("ping")}},{key:"ondata",value:function(t){try{this.decoder.add(t)}catch(t){this.onclose("parse error",t)}}},{key:"ondecoded",value:function(t){var e=this;it((function(){e.emitReserved("packet",t)}),this.setTimeoutFn)}},{key:"onerror",value:function(t){this.emitReserved("error",t)}},{key:"socket",value:function(t,e){var n=this.nsps[t];return n||(n=new St(this,t,e),this.nsps[t]=n),n}},{key:"_destroy",value:function(t){for(var e=0,n=Object.keys(this.nsps);e<n.length;e++){var r=n[e];if(this.nsps[r].active)return}this._close()}},{key:"_packet",value:function(t){for(var e=this.encoder.encode(t),n=0;n<e.length;n++)this.engine.write(e[n],t.options)}},{key:"cleanup",value:function(){this.subs.forEach((function(t){return t()})),this.subs.length=0,this.decoder.destroy()}},{key:"_close",value:function(){this.skipReconnect=!0,this._reconnecting=!1,this.onclose("forced close"),this.engine&&this.engine.close()}},{key:"disconnect",value:function(){return this._close()}},{key:"onclose",value:function(t,e){this.cleanup(),this.backoff.reset(),this._readyState="closed",this.emitReserved("close",t,e),this._reconnection&&!this.skipReconnect&&this.reconnect()}},{key:"reconnect",value:function(){var t=this;if(this._reconnecting||this.skipReconnect)return this;var e=this;if(this.backoff.attempts>=this._reconnectionAttempts)this.backoff.reset(),this.emitReserved("reconnect_failed"),this._reconnecting=!1;else{var n=this.backoff.duration();this._reconnecting=!0;var r=this.setTimeoutFn((function(){e.skipReconnect||(t.emitReserved("reconnect_attempt",e.backoff.attempts),e.skipReconnect||e.open((function(n){n?(e._reconnecting=!1,e.reconnect(),t.emitReserved("reconnect_error",n)):e.onreconnect()})))}),n);this.opts.autoUnref&&r.unref(),this.subs.push((function(){clearTimeout(r)}))}}},{key:"onreconnect",value:function(){var t=this.backoff.attempts;this._reconnecting=!1,this.backoff.reset(),this.emitReserved("reconnect",t)}}]),s}(L),Lt={};function Pt(e,n){"object"===t(e)&&(n=e,e=void 0);var r,i=function(t){var e=arguments.length>1&&void 0!==arguments[1]?arguments[1]:"",n=arguments.length>2?arguments[2]:void 0,r=t;n=n||"undefined"!=typeof location&&location,null==t&&(t=n.protocol+"//"+n.host),"string"==typeof t&&("/"===t.charAt(0)&&(t="/"===t.charAt(1)?n.protocol+t:n.host+t),/^(https?|wss?):\/\//.test(t)||(t=void 0!==n?n.protocol+"//"+t:"https://"+t),r=ft(t)),r.port||(/^(http|ws)$/.test(r.protocol)?r.port="80":/^(http|ws)s$/.test(r.protocol)&&(r.port="443")),r.path=r.path||"/";var i=-1!==r.host.indexOf(":")?"["+r.host+"]":r.host;return r.id=r.protocol+"://"+i+":"+r.port+e,r.href=r.protocol+"://"+i+(n&&n.port===r.port?"":":"+r.port),r}(e,(n=n||{}).path||"/socket.io"),o=i.source,s=i.id,a=i.path,c=Lt[s]&&a in Lt[s].nsps;return n.forceNew||n["force new connection"]||!1===n.multiplex||c?r=new xt(o,n):(Lt[s]||(Lt[s]=new xt(o,n)),r=Lt[s]),i.query&&!n.query&&(n.query=i.queryKey),r.socket(i.path,n)}return i(Pt,{Manager:xt,Socket:St,io:Pt,connect:Pt}),Pt}));
 
 
-}).call(this)}).call(this,require("buffer").Buffer)
-},{"buffer":3}],6:[function(require,module,exports){
-const { AceBaseBase, DebugLogger, ColorStyle, DataSnapshot } = require('acebase-core');
-const { WebApi } = require('./api-web');
-const { AceBaseClientAuth } = require('./auth');
-const { setServerBias } = require('./server-date');
-
-class AceBaseClientConnectionSettings {
-
-    /**
-     * Settings to connect to a remote AceBase server
-     * @param {object} settings 
-     * @param {string} settings.dbname Name of the database you want to access
-     * @param {string} settings.host Host name, eg "localhost", or "mydb.domain.com"
-     * @param {number} settings.port Port number the server is running on
-     * @param {boolean} [settings.https=true] Use SSL (https) to access the server or not. Default: true
-     * @param {boolean} [settings.autoConnect=true] Automatically connect to the server, or wait until .connect is called
-     * @param {number} [settings.autoConnectDelay=0] Delay before auto connection. Useful for testing scenarios where both server and client start at the same time, and server needs to come online first.
-     * @param {object} [settings.cache] Settings for local cache
-     * @param {AceBase} [settings.cache.db] AceBase database instance to use for local cache
-     * @param {'verbose'|'log'|'warn'|'error'} [settings.logLevel='log'] debug logging level
-     * @param {object} [settings.sync] Settings for synchronization
-     * @param {'connect'|'signin'|'auto'|'manual'} [settings.sync.timing] Determines when synchronization should execute
-     * @param {boolean} [settings.sync.useCursor] Whether to enable cursor synchronization if transaction logging is enabled in the server configuration
-     * @param {object} [settings.network] Network settings
-     * @param {boolean} [settings.network.monitor=false] Whether to actively monitor the network for availability by pinging the server every `interval` seconds. This results in quicker offline detection. Default is `false` if `realtime` is `true` and vice versa
-     * @param {number} [settings.network.interval=60] Interval in seconds to send pings if `monitor` is `true`. Default is `60`
-     * @param {string[]} [settings.network.transports] Transport methods to try connecting to the server for realtime event notifications (in specified order). Default is `['websocket']`. Supported transport methods are `"websocket"` and `"polling"`. 
-     * @param {boolean} [settings.network.realtime=true] Whether to connect to a serverwebsocket to enable realtime event notifications. Default is `true`. Disable this option if you only want to use the server's REST API. 
-     * @param {boolean} [settings.sponsor=false] You can turn this on if you are a sponsor. See https://github.com/appy-one/acebase/discussions/100 for more info
-     */
-    constructor(settings) {
-        this.dbname = settings.dbname;
-        this.host = settings.host;
-        this.port = settings.port;
-        this.https = typeof settings.https === 'boolean' ? settings.https : true;
-        this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
-        this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
-        this.cache = typeof settings.cache === 'object' && typeof settings.cache.db === 'object' ? settings.cache : null; //  && settings.cache.db.constructor.name.startsWith('AceBase')
-        this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
-        this.sponsor = typeof settings.sponsor === 'boolean' ? settings.sponsor : false;
-        
-        // Set sync settings
-        this.sync = settings.sync;
-        if (this.sync === null || typeof this.sync !== 'object') { this.sync = {}; }
-        if (!['connect','signin','auto','manual'].includes(this.sync.timing)) { this.sync.timing = 'auto'; }
-        if (typeof this.sync.useCursor !== 'boolean') { this.sync.useCursor = true; }
-        
-        // Set network settings
-        this.network = settings.network;
-        if (this.network === null || typeof this.network !== 'object') { this.network = {}; }
-        if (!(this.network.transports instanceof Array)) { this.network.transports = ['websocket'] }
-        if (typeof this.network.realtime !== 'boolean') { this.network.realtime = true; }
-        if (typeof this.network.monitor !== 'boolean') { this.network.monitor = !this.network.realtime; }
-        if (typeof this.network.interval !== 'number') { this.network.interval = 60; }
-    }
-}
-
-/**
- * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
- * @extends module:acebase-core/AceBaseBase
- */
-class AceBaseClient extends AceBaseBase {
-
-    /**
-     * Create a client to access an AceBase server
-     * @param {AceBaseClientConnectionSettings} settings
-     */
-    constructor(settings) {
-        if (typeof settings !== 'object') {
-            // Use old constructor signature: host, port, dbname, https = true
-            settings = {};
-            settings.host = arguments[0];
-            settings.port = arguments[1];
-            settings.dbname = arguments[2];
-            settings.https = arguments[3];
-        }
-        if (!(settings instanceof AceBaseClientConnectionSettings)) {
-            settings = new AceBaseClientConnectionSettings(settings);
-        }
-        super(settings.dbname, { info: 'realtime database client', sponsor: settings.sponsor });
-
-        /*
-            TODO: improve init flow with await/async (requires Node 7.6+) 
-        */
-
-        const cacheDb = settings.cache && settings.cache.db;
-        const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
-
-        let ready = false;
-        this.on('ready', () => { ready = true; });
-        this.debug = new DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(ColorStyle.blue)); // `[ ${settings.dbname} ]`
-
-        const synchronizeClocks = async () => {
-            // Synchronize date/time
-            // const start = Date.now(); // performance.now();
-            const info = await this.api.getServerInfo()
-            const now = Date.now(),
-                // roundtrip = now - start, //performance.now() - start,
-                // expectedTime = now - Math.floor(roundtrip / 2),
-                // bias = info.time - expectedTime;
-                bias = info.time - now;
-            setServerBias(bias);
-        };
-
-        this.on('connect', () => {
-            // Disable cache db's ipc events, we are already notified of data changes by the server (prevents double event callbacks)
-            if (cacheDb) { cacheDb.settings.ipcEvents = false; }
-            synchronizeClocks();
-        });
-
-        this.on('disconnect', () => {
-            // Enable cache db's ipc events, so we get event notifications of changes by other ipc peers while offline
-            if (cacheDb) { cacheDb.settings.ipcEvents = true; }
-        });
-
-        this.sync = () => {
-            return syncPendingChanges(true);
-        }
-        
-        let syncRunning = false, firstSync = true;
-        const syncPendingChanges = async (throwErrors = false) => {
-            if (syncRunning) { 
-                // Already syncing
-                if (throwErrors) { throw new Error('sync already running'); }
-                return; 
-            }
-            if (!this.api.isConnected) {
-                // We'll retry once connected
-                // // Do set firstSync to false, this fixes the issue of the first sync firing after 
-                // // an initial succesful connection, but quick disconnect (sync does not run) 
-                // // and later reconnect --> Fresh data needs to be loaded
-                // firstSync = false; 
-                if (throwErrors) { throw new Error('not connected'); }
-                return; 
-            }
-            syncRunning = true;
-            try {
-                await cacheReadyPromise;
-                return await this.api.sync({
-                    firstSync,
-                    fetchFreshData: !firstSync,
-                    eventCallback: (eventName, args) => {
-                        this.debug.log(eventName, args || '');
-                        this.emit(eventName, args); // this.emit('cache_sync_event', { name: eventName, args });
-                    }
-                });
-            }
-            catch(err) {
-                // Sync failed for some reason
-                if (throwErrors) { throw err; }
-                else {
-                    console.error(`Failed to synchronize:`, err);
-                }
-            }
-            finally {
-                syncRunning = false;
-                firstSync = false;
-            }
-        }
-        let syncTimeout = 0;
-        this.on('connect', () => {
-            if (settings.sync.timing === 'connect' || (settings.sync.timing === 'signin' && this.auth.accessToken)) {
-                syncPendingChanges();
-            }
-            else if (settings.sync.timing === 'auto') {
-                syncTimeout && clearTimeout(syncTimeout);
-                syncTimeout = setTimeout(syncPendingChanges, 2500); // Start sync with a short delay to allow client to sign in first
-            }
-        });
-        this.on('signin', () => {
-            if (settings.sync.timing === 'auto') {
-                syncTimeout && clearTimeout(syncTimeout);
-            }
-            if (['auto','signin'].includes(settings.sync.timing)) {
-                syncPendingChanges();
-            }
-        });
-
-        const emitClientReady = async () => {
-            if (cacheDb) { await cacheDb.ready(); }
-            this.emit('ready');
-        };
-
-        this.api = new WebApi(settings.dbname, { network: settings.network, sync: settings.sync, logLevel: settings.logLevel, debug: this.debug, url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`, autoConnect: settings.autoConnect, autoConnectDelay: settings.autoConnectDelay, cache: settings.cache }, (evt, data) => {
-            if (evt === 'connect') {
-                this.emit('connect');
-                if (!ready) {
-                    emitClientReady();
-                }
-            }
-            else if (evt === 'connect_error') {
-                this.emit('connect_error', data);
-                if (!ready && cacheDb) { // If cache db is used, we can work without connection
-                    emitClientReady();
-                }
-            }            
-            else if (evt === 'disconnect') {
-                this.emit('disconnect');
-            }
-        });
-        this.auth = new AceBaseClientAuth(this, (event, arg) => {
-            this.emit(event, arg);
-        });
-    }
-
-    get connected() {
-        return this.api.isConnected;
-    }
-
-    get connectionState() {
-        return this.api.connectionState;
-    }
-
-    connect() {
-        return this.api.connect();
-    }
-
-    disconnect() {
-        this.api.disconnect();
-    }
-
-    close() {
-        this.disconnect();
-    }
-
-    callExtension(method, path, data) {
-        return this.api.callExtension(method, path, data);
-    }
-
-    /**
-     * Gets the current sync cursor
-     */
-    getCursor() {
-        return this.api._syncCursor;
-    }
-
-    /**
-     * Sets the sync cursor to use
-     * @param {string} cursor 
-     */
-    setCursor(cursor) {
-        this.api._syncCursor = cursor;
-    }
-
-    get cache() {
-        /**
-         * Clears the entire cache, or a specific path without raising any events
-         * @param {string} [path] 
-         * @returns 
-         */
-        const clear = async (path = '') => {
-            await this.api.clearCache(path);
-        };
-        /**
-         * Updates the local cache with remote changes by retrieving all changes to `path` since given `cursor` and applying them to the local cache database.
-         * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
-         * @param {string} [path=''] Path to update. The root path will be used if not given, synchronizing the entire database.
-         * @param {string|null} [cursor] A previously achieved cursor to update with. Path's entire value will be loaded from the server if not given.
-         * @returns {Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>}
-         */
-        const update = (path, cursor) => {
-            return this.api.updateCache(path, cursor);
-        };
-        /**
-         * Loads a value from cache database.If a cursor is provided, the cache will be updated with remote changes 
-         * first. If the value is not available in cache, it will be loaded from the server and stored in cache.
-         * This method is a shortcut for common cache logic provided by `db.ref(path).get` with the `cache_mode` 
-         * and `cache_cursor` options.
-         * @param {string} path target path to load
-         * @param {string} [cursor] A previously acquired cursor
-         * @returns {Promise<DataSnapshot>} Returns a Promise that resolves with a snapshot of the value
-         */
-        const get = async (path, cursor) => {
-            // Update the cache with provided cursor
-            return this.ref(path).get({ cache_mode: cursor ? 'allow' : 'force', cache_cursor: cursor });
-        };
-        return { clear, update, get };
-    }
-}
-
-module.exports = { AceBaseClient, AceBaseClientConnectionSettings };
-},{"./api-web":7,"./auth":8,"./server-date":17,"acebase-core":30}],7:[function(require,module,exports){
-const { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition, SimpleEventEmitter } = require('acebase-core');
-const connectSocket = require('socket.io-client');
-const Base64 = require('./base64');
-const { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } = require('./request/error');
-const { CachedValueUnavailableError } = require('./errors');
-const { promiseTimeout } = require('./promise-timeout');
-const _request = require('./request');
-const _websocketRequest = (socket, event, data, accessToken) => {
-
-    const requestId = ID.generate();
-    const request = data;
-    request.req_id = requestId;
-    request.access_token = accessToken;
-
-    return new Promise((resolve, reject) => {
-        if (!socket) {
-            return reject(new AceBaseRequestError(request, null, 'websocket', 'No open websocket connection'));
-        }
-
-        let timeout;
-        const send = (retry = 0) => { 
-            socket.emit(event, request);
-            timeout = setTimeout(() => {
-                if (retry < 2) { return send(retry+1); }
-                socket.off("result", handle);
-                const err = new AceBaseRequestError(request, null, 'timeout', `Server did not respond to "${event}" request after ${retry+1} tries`);
-                reject(err);
-            }, 1000);
-        };
-        const handle = response => {
-            if (response.req_id === requestId) {
-                clearTimeout(timeout);
-                socket.off("result", handle);
-                if (response.success) {
-                    return resolve(response);
-                }
-                // Access denied?
-                const code = typeof response.reason === 'object' ? response.reason.code : response.reason;
-                const message = typeof response.reason === 'object' ? response.reason.message : `request failed: ${code}`;
-                const err = new AceBaseRequestError(request, response, code, message);
-                reject(err);
-            }
-        }
-        socket.on("result", handle);
-        send();
-    });
-}
-
-/**
- * @typedef {((err: Error, path:string, newValue:any, oldValue:any, context: any) => any)} EventSubscriptionCallback
- * @typedef {{ newOnly: boolean, cancelCallback: (reason: Error) => any, syncFallback: 'reload'|(() => any|Promise<any>)}} EventSubscriptionSettings
- */
-
-class EventSubscription {
-    /**
-     * 
-     * @param {string} path 
-     * @param {string} event 
-     * @param {EventSubscriptionCallback} callback 
-     * @param {EventSubscriptionSettings} settings 
-     */
-    constructor(path, event, callback, settings) {
-        /** @type {string} */this.path = path;
-        /** @type {string} */this.event = event;
-        /** @type {EventSubscriptionCallback}*/this.callback = callback;
-        /** @type {EventSubscriptionSettings} */this.settings = settings;
-        /** @type {'requested'|'active'|'canceled'} */this.state = 'requested';
-        /** @type {number} */this.added = Date.now();
-        /** @type {number} */this.activated = 0;
-        /** @type {number} */this.lastEvent = 0;
-        /** @type {number} */this.lastSynced = 0;
-        /** @type {string} */this.cursor = null;
-        /** @type {EventSubscriptionCallback}*/this.cacheCallback = null;
-        /** @type {EventSubscriptionCallback}*/this.tempCallback = null;
-    }
-    activate() {
-        this.state = 'active';
-        if (this.activated === 0) {
-            this.activated = Date.now();
-        }
-    }
-    cancel(reason) {
-        this.state = 'canceled';
-        this.settings.cancelCallback(reason);
-    }
-}
-
-const CONNECTION_STATE_DISCONNECTED = 'disconnected';
-const CONNECTION_STATE_CONNECTING = 'connecting';
-const CONNECTION_STATE_CONNECTED = 'connected';
-const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
-
-/**
- * TODO: Use AceBaseClientSettings instead when refactoring to TypeScript
- * @typedef IWebApiSettings
- * @property {'verbose'|'log'|'warn'|'error'} logLevel
- * @property {typeof console} debug
- * @property {string} url
- * @property {boolean} [autoConnect=true]
- * @property {number} [autoConnectDelay=0]
- * @property {{ db: AceBase }} [cache] 
- * @property {{ monitor: boolean, interval: number, transports: Array<'polling','interval'>, realtime: boolean }} network
- * @property {{ timing: 'connect'|'signin'|'auto'|'manual', useCursor: boolean }} sync
- */
-
-/**
- * Api to connect to a remote AceBase server over http(s)
- */
-class WebApi extends Api {
-
-    /**
-     * 
-     * @param {string} dbname 
-     * @param {IWebApiSettings} settings 
-     * @param {(event: string, ...args: any[]) => void} callback 
-     */
-    constructor(dbname = "default", settings, callback) {
-        // operations are done through http calls,
-        // events are triggered through a websocket
-        super();
-
-        this._id = ID.generate(); // For mutation contexts, not using websocket client id because that might cause security issues
-        this.url = settings.url;
-        this.socket = null;
-        this._autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
-        this._autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
-        this.dbname = dbname;
-        this._connectionState = CONNECTION_STATE_DISCONNECTED;
-        this._serverVersion = 'unknown';
-        this._cursor = {
-            /** Last cursor received by the server */
-            current: null,
-            /** Last cursor received before client went offline, will be used for sync. */
-            sync: null
-        };
-        this._updateCursor = async cursor => {
-            if (!cursor || (this._cursor.current && cursor < this._cursor.current)) {
-                return; // Just in case this ever happens, ignore events with earlier cursors.
-            }
-            // console.log(`Updating sync cursor to ${cursor}`);
-            this._cursor.current = cursor;
-            // if (this._cache && this._cache.db) {
-            //     await this._cache.db.api.set(`${this.dbname}/cursor`, cursor)
-            //     .catch(err => {
-            //         console.error(`Can't store cursor?`, err);
-            //     });
-            // }
-        };
-        this._eventTimeline = { init: Date.now(), connect: 0, signIn: 0, sync: 0, disconnect: 0 };
-        if (settings.cache && settings.cache.enabled !== false) {
-            this._cache = {
-                db: settings.cache.db,
-                priority: settings.cache.priority || 'server'
-            };
-            // this._cache.db.api.get(`${this.dbname}/cursor`).then(({ value: cursor }) => {
-            //     this._syncCursor = cursor;
-            // });
-        }
-        
-        const manualConnectionMonitor = new SimpleEventEmitter();
-        const checkConnection = async () => {
-            // Websocket connection is used
-            if (settings.network.realtime && !this.isConnected) {
-                // socket.io handles reconnects, we don't have to monitor
-                return; 
-            }
-            if (!settings.network.realtime && ![CONNECTION_STATE_CONNECTING, CONNECTION_STATE_CONNECTED].includes(this._connectionState)) {
-                // No websocket connection. Do not check if we're not connecting or connected
-                return;
-            }
-            const wasConnected = this.isConnected;
-            try {
-                // Websocket is connected (or realtime is not used), check connectivity to server by sending http/s ping
-                await this._request({ url: this.serverPingUrl, ignoreConnectionState: true });
-                if (!wasConnected) {
-                    manualConnectionMonitor.emit('connect');
-                }
-            }
-            catch (err) {
-                // No need to handle error here, _request will have handled the disconnect by calling this._handleDetectedDisconnect
-            }
-        };
-        this._handleDetectedDisconnect = () => {
-            if (settings.network.realtime) {
-                // Launch reconnect flow by recycling the websocket
-                this._connectionState === CONNECTION_STATE_DISCONNECTED;
-                this.connect().catch(() => {});
-                // console.assert(this._connectionState === CONNECTION_STATE_CONNECTING, 'wrong connection state');
-            }
-            else {
-                if (this._connectionState === CONNECTION_STATE_CONNECTING) {
-                    manualConnectionMonitor.emit('connect_error', err);
-                }
-                else if (this._connectionState === CONNECTION_STATE_CONNECTED) {
-                    manualConnectionMonitor.emit('disconnect');
-                }
-            }
-        }
-        if (settings.network.monitor) {
-            // Mobile devices might go offline while the app is suspended (running in the backgound)
-            // no events will fire and when the app resumes, it might assume it is still connected while
-            // it is not. We'll manually poll the server to check the connection
-            const interval = setInterval(checkConnection, settings.network.interval * 1000); // ping every x seconds
-            interval.unref && interval.unref();
-        }
-        this.settings = settings;
-        this._realtimeQueries = {};
-        /** @type {typeof settings.debug} */
-        this.debug = settings.debug;
-        const eventCallback = (event, ...args) => {
-            if (event === 'disconnect') {
-                this._cursor.sync = this._cursor.current;
-            }
-            callback && callback(event, ...args);
-        };
-        /** @type {{ [path: string]: EventSubscription[] }} */
-        let subscriptions = this._subscriptions = {};
-        let accessToken;
-
-        this.connect = () => {            
-            if (this.socket !== null && typeof this.socket === 'object') {
-                this.disconnect();
-            }
-            this._connectionState = CONNECTION_STATE_CONNECTING;
-            this.debug.log(`Connecting to AceBase server "${this.url}"`);
-            if (!this.url.startsWith('https')) {
-                this.debug.warn(`WARNING: The server you are connecting to does not use https, any data transferred may be intercepted!`.colorize(ColorStyle.red));
-            }
-    
-            // Change default socket.io (engine.io) transports setting of ['polling', 'websocket']
-            // We should only use websocket (it's almost 2022!), because if an AceBaseServer is running in a cluster, 
-            // polling should be disabled entirely because the server is not stateless: the client might reach 
-            // a different node on a next long-poll connection.
-            // For backward compatibility the transports setting is allowed to be overriden with a setting:
-            const transports = settings.network && settings.network.transports instanceof Array
-                ? settings.network.transports
-                : ['websocket'];
-            this.debug.log(`Using ${transports.join(',')} transport${transports.length > 1 ? 's' : ''} for socket.io`);
-
-            return new Promise((resolve, reject) => {
-
-                if (!settings.network.realtime) {
-                    // New option: not using websocket connection. Check if we can reach the server.
-
-                    // Make sure any previously attached events are removed
-                    manualConnectionMonitor.off('connect');
-                    manualConnectionMonitor.off('connect_error');
-                    manualConnectionMonitor.off('disconnect');
-
-                    manualConnectionMonitor.on('connect', () => {
-                        this._connectionState = CONNECTION_STATE_CONNECTED;
-                        this._eventTimeline.connect = Date.now();                    
-                        manualConnectionMonitor.off('connect_error'); // prevent connect_error to fire after a successful connect
-                        eventCallback('connect');
-                        resolve();
-                    });
-                    manualConnectionMonitor.on('connect_error', (err) => {
-                        // New connection failed to establish. Attempts will be made to reconnect, but fail for now
-                        this.debug.error(`API connection error: ${err.message || err}`);
-                        eventCallback('connect_error', err);
-                        reject(err);
-                    });
-                    manualConnectionMonitor.on('disconnect', () => {
-                        // Existing connection was broken, by us or network
-                        if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
-                            // Disconnect was requested by us: reason === 'client namespace disconnect'
-                            this._connectionState = CONNECTION_STATE_DISCONNECTED;
-                            // Remove event listeners
-                            manualConnectionMonitor.off('connect');
-                            manualConnectionMonitor.off('disconnect');
-                            manualConnectionMonitor.off('connect_error');
-                        }
-                        else {
-                            // Disconnect was not requested.
-                            this._connectionState = CONNECTION_STATE_CONNECTING;
-                            this._eventTimeline.disconnect = Date.now();
-                        }
-                        eventCallback('disconnect');
-                    });
-                    this._connectionState = CONNECTION_STATE_CONNECTING;
-                    return setTimeout(() => checkConnection(), 0);      
-                }
-    
-                const socket = this.socket = connectSocket(this.url, {
-                    // Use default socket.io connection settings:
-                    autoConnect: true,
-                    reconnection: true,
-                    reconnectionAttempts: Infinity,
-                    reconnectionDelay: 1000,
-                    reconnectionDelayMax: 5000,
-                    timeout: 20000,
-                    randomizationFactor: 0.5,
-                    transports // Override default setting of ['polling', 'websocket']
-                });
-
-                socket.on('connect_error', err => {
-                    // New connection failed to establish. Attempts will be made to reconnect, but fail for now
-                    this.debug.error(`Websocket connection error: ${err}`);
-                    eventCallback('connect_error', err);
-                    reject(err);
-                });
-
-                socket.on('connect', async data => {
-                    this._connectionState = CONNECTION_STATE_CONNECTED;
-                    this._eventTimeline.connect = Date.now();
-
-                    if (accessToken) {
-                        // User must be signed in again (NOTE: this does not emit the "signin" event if the user was signed in before)
-                        const isFirstSignIn = this._eventTimeline.signIn === 0;
-                        try {
-                            await this.signInWithToken(accessToken, isFirstSignIn);
-                        }
-                        catch(err) {
-                            this.debug.error(`Could not automatically sign in user with access token upon reconnect: ${err.code || err.message}`);
-                        }
-                    }
-
-                    /**
-                     * @param {EventSubscription} sub
-                     * @returns {Promise<void>}
-                     */
-                    const subscribeTo = async (sub) => {
-                        // Function is called for each unique path/event combination
-                        // We must activate or cancel all subscriptions with this combination
-                        const subs = subscriptions[sub.path].filter(s => s.event === sub.event);
-                        try {
-                            const result = await _websocketRequest(this.socket, 'subscribe', { path: sub.path, event: sub.event }, accessToken);
-                            subs.forEach(s => s.activate());
-                        }
-                        catch(err) {
-                            if (err.code === 'access_denied' && !accessToken) {
-                                this.debug.error(`Could not subscribe to event "${sub.event}" on path "${sub.path}" because you are not signed in. If you added this event while offline and have a user access token, you can prevent this by using client.auth.setAccessToken(token) to automatically try signing in after connecting`);
-                            }
-                            else {
-                                this.debug.error(err);
-                            }
-                            subs.forEach(s => s.cancel(err));
-                        }
-                    };
-
-                    // (re)subscribe to any active subscriptions
-                    const subscribePromises = [];
-                    Object.keys(subscriptions).forEach(path => {
-                        const events = [];
-                        subscriptions[path].forEach(sub => {
-                            if (sub.event === 'mutated') { return; } // Skip mutated events for now
-                            const serverAlreadyNotifying = events.includes(sub.event);
-                            if (!serverAlreadyNotifying) {
-                                events.push(sub.event);
-                                const promise = subscribeTo(sub);
-                                subscribePromises.push(promise);
-                            }
-                        });
-                    });
-
-                    // Now, subscribe to all top path mutated events
-                    const subscribeToMutatedEvents = async () => {
-                        let retry = false;
-                        const promises = Object.keys(subscriptions)
-                            .filter(path => subscriptions[path].some(sub => sub.event === 'mutated' && sub.state !== 'canceled'))
-                            .filter((path, i, arr) => !arr.some(otherPath => PathInfo.get(otherPath).isAncestorOf(path)))
-                            .reduce((topPaths, path) => (topPaths.includes(path) || topPaths.push(path)) && topPaths, [])
-                            .map(topEventPath => {
-                                const sub = subscriptions[topEventPath].find(s => s.event === 'mutated');
-                                const promise = subscribeTo(sub).then(() => {
-                                    if (sub.state === 'canceled') {
-                                        // Oops, could not subscribe to 'mutated' event on topEventPath, other event(s) at child path(s) should now take over
-                                        retry = true;
-                                    }
-                                });
-                                return promise;
-                            });
-                        await Promise.all(promises);
-                        if (retry) {
-                            return subscribeToMutatedEvents();
-                        }
-                    }
-                    subscribePromises.push(subscribeToMutatedEvents());
-                    await Promise.all(subscribePromises);
-
-                    eventCallback('connect'); // Safe to let client know we're connected
-                    resolve(); // Resolve the .connect() promise
-                });
-
-                socket.on('disconnect', reason => {
-                    this.debug.warn(`Websocket disconnected: ${reason}`);
-                    // Existing connection was broken, by us or network
-                    if (this._connectionState === CONNECTION_STATE_DISCONNECTING) {
-                        // disconnect was requested by us: reason === 'client namespace disconnect'
-                        this._connectionState = CONNECTION_STATE_DISCONNECTED;
-                    }
-                    else {
-                        // Automatic reconnect should be done by socket.io
-                        this._connectionState = CONNECTION_STATE_CONNECTING;
-                        this._eventTimeline.disconnect = Date.now();
-                        if (reason === 'io server disconnect') {
-                            // if the server has shut down and disconnected all clients, we have to reconnect manually
-                            this.socket = null;
-                            this.connect().catch(err => {
-                                // Immediate reconnect failed, which is ok. 
-                                // socket.io will retry now
-                            });
-                        }
-                    }
-                    eventCallback('disconnect');
-                });
-
-                socket.on('data-event', data => {
-                    const val = Transport.deserialize(data.val);
-                    const context = data.context || {};
-                    context.acebase_event_source = 'server';
-                    this._updateCursor(context.acebase_cursor); // If the server passes a cursor, it supports transaction logging. Save it for sync later on
-
-                    /*
-                        Using the new context, we can determine how we should handle this data event.
-                        From client v0.9.29 on, the set and update API methods add an acebase_mutation object
-                        to the context with the following info:
-
-                        client_id: which client initiated the mutation (web api instance, also different per browser tab)
-                        id: a unique id of the mutation
-                        op: operation used: 'set' or 'update'
-                        path: the path the operation was executed on
-                        flow: the flow used: 
-                            - 'server': app was connected, cache was not used.
-                            - 'cache': app was offline while mutating, now syncs its change
-                            - 'parallel': app was connected, cache was used and updated
-
-                        To determine how to handle this data event, we have to know what events may have already
-                        been fired.
-
-                        [Mutation initiated:]
-                            - Cache database used?
-                                - No -> 'server' flow
-                                - Yes -> Client was online/connected?
-                                    - No -> 'cache' flow (saved to cache db, sycing once connected)
-                                    - Yes -> 'parallel' flow
-                        
-                        During 'cache' and 'parallel' flow, any change events will have fired on the cache database
-                        already. If we are receiving this data event on the same client, that means we don't have to
-                        fire those events again. If we receive this event on a different client, we only have to fire 
-                        events if they change cached data.
-
-                        [Change event received:]
-                            - Is mutation done by us?
-                                - No -> Are we using cache?
-                                    - No -> Fire events
-                                    - Yes -> Update cache with events disabled*, fire events
-                                - Yes -> Are we using cache?
-                                    - No -> Fire events ourself
-                                    - Yes -> Skip cache update, don't fire events (both done already)
-
-                        * Different browser tabs use the same cache database. If we would let the cache database fire data change
-                        events, they would only fire in 1 browser tab - the first one to update the cache, the others will see 
-                        no changes because the data will have been updated already.
-
-                        NOTE: While offline, the in-memory state of 2 separate browser tabs will go out of sync
-                        because they rely on change notifications from the server - to tackle this problem, 
-                        cross-tab communication has been implemented. (TODO: let cache db's use the same client 
-                        ID for server communications)
-                    */
-                    const causedByUs = context.acebase_mutation && context.acebase_mutation.client_id === this._id;
-                    const cacheEnabled = !!(this._cache && this._cache.db);
-                    const fireThisEvent = !causedByUs || !cacheEnabled;
-                    const updateCache = !causedByUs && cacheEnabled;
-                    const fireCacheEvents = false; // See above flow documentation
-
-                    // console.log(`${this._cache ? `[${this._cache.db.api.storage.name}] ` : ''}Received data event "${data.event}" on path "${data.path}":`, val);
-                    // console.log(`Received data event "${data.event}" on path "${data.path}":`, val);
-                    const pathSubs = subscriptions[data.subscr_path];
-
-                    if (!pathSubs && data.event !== 'mutated') { 
-                        // NOTE: 'mutated' events fire on the mutated path itself. 'mutations' events fire on subscription path
-
-                        // We are not subscribed on this path. Happens when an event fires while a server unsubscribe 
-                        // has been requested, but not processed yet: the local subscription will be gone already.
-                        // This can be confusing when using cache, an unsubscribe may have been requested after a cache
-                        // event fired - the server event will follow but we're not listening anymore!
-                        // this.debug.warn(`Received a data-event on a path we did not subscribe to: "${data.subscr_path}"`);
-                        return;
-                    }
-                    if (updateCache) {
-                        if (data.path.startsWith('__')) {
-                            // Don't cache private data. This happens when the admin user is signed in 
-                            // and has an event subscription on the root, or private path.
-                            // NOTE: fireThisEvent === true, because it is impossible that this mutation was caused by us (well, it should be!)
-                        }
-                        else if (data.event === 'mutations') {
-                            // Apply all mutations
-                            const mutations = val.current;
-                            mutations.forEach(m => {
-                                const path = m.target.reduce((path, key) => PathInfo.getChildPath(path, key), PathInfo.getChildPath(`${this.dbname}/cache`, data.path));
-                                this._cache.db.api.set(path, m.val, { suppress_events: !fireCacheEvents, context });
-                            });
-                        }
-                        else if (data.event === 'notify_child_removed') {
-                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
-                        }
-                        else if (!data.event.startsWith('notify_')) {
-                            this._cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
-                        }
-                    }
-                    if (!fireThisEvent) {
-                        return;
-                    }
-                    // The cache db will not have fired any events (const fireCacheEvents = false), so we can fire them here now.
-                    /** @type {EventSubscription[]} */
-                    const targetSubs = data.event === 'mutated'
-                        ? Object.keys(subscriptions)
-                            .filter(path => {
-                                const pathInfo = PathInfo.get(path);
-                                return path === data.path || pathInfo.equals(data.subscr_path) || pathInfo.isAncestorOf(data.path)
-                            })
-                            .reduce((subs, path) => {
-                                const add = subscriptions[path].filter(sub => sub.event === 'mutated');
-                                subs.push(...add);
-                                return subs;
-                            }, [])
-                        : pathSubs.filter(sub => sub.event === data.event);
-                    
-                    targetSubs.forEach(subscr => {
-                        subscr.lastEvent = Date.now();
-                        subscr.cursor = context.acebase_cursor;
-                        subscr.callback(null, data.path, val.current, val.previous, context);
-                    });
-                });
-
-                socket.on("query-event", data => {
-                    data = Transport.deserialize(data);
-                    const query = this._realtimeQueries[data.query_id];
-                    let keepMonitoring = true;
-                    try {
-                        keepMonitoring = query.options.eventHandler(data);
-                    }
-                    catch(err) {
-                        keepMonitoring = false;
-                    }
-                    if (keepMonitoring === false) {
-                        delete this._realtimeQueries[data.query_id];
-                        socket.emit("query-unsubscribe", { query_id: data.query_id });
-                    }
-                });
-            });
-        };
-
-        if (this._autoConnect) {
-            if (this._autoConnectDelay) { setTimeout(() => this.connect().catch(() => {}), this._autoConnectDelay); }
-            else { this.connect().catch(() => {}); }
-        }
-
-        this.disconnect = () => {
-            if (!settings.network.realtime) {
-                // No websocket connectino is used
-                this._connectionState = CONNECTION_STATE_DISCONNECTING;
-                this._eventTimeline.disconnect = Date.now();
-                manualConnectionMonitor.emit('disconnect');
-            }
-            else if (this.socket !== null && typeof this.socket === 'object') {
-                this._connectionState = CONNECTION_STATE_DISCONNECTING;
-                this._eventTimeline.disconnect = Date.now();
-                this.socket.disconnect();
-                this.socket = null;
-            }
-        };
-
-        /**
-         * 
-         * @param {string} path 
-         * @param {string} event 
-         * @param {function} callback 
-         * @param {EventSubscriptionSettings} settings 
-         * @returns 
-         */
-        this.subscribe = async (path, event, callback, settings) => {
-            if (!this.settings.network.realtime) {
-                throw new Error(`Cannot subscribe to realtime events because it has been disabled in the network settings`);
-            }
-            let pathSubs = subscriptions[path];
-            if (!pathSubs) { pathSubs = subscriptions[path] = []; }
-            let serverAlreadyNotifying = pathSubs.some(sub => sub.event === event)
-                || (event === 'mutated' && Object.keys(subscriptions).some(otherPath => PathInfo.get(otherPath).isAncestorOf(path) && subscriptions[otherPath].some(sub => sub.event === event && sub.state === 'active')));
-            const subscr = new EventSubscription(path, event, callback, settings);
-            // { path, event, callback, settings, added: Date.now(), activate() { this.activated = Date.now() }, activated: null, lastEvent: null, cursor: null };
-            pathSubs.push(subscr);
-
-            if (this._cache) {
-                // Events are also handled by cache db
-                subscr.cacheCallback = (err, path, newValue, oldValue, context) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue, context);
-                this._cache.db.api.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
-            }
-
-            if (serverAlreadyNotifying || !this.isConnected) { 
-                // If we're offline, the event will be subscribed once connected
-                return;
-            }
-            if (event === 'mutated') {
-                // Unsubscribe from 'mutated' events set on descendant paths of current path
-                Object.keys(subscriptions)
-                .filter(otherPath => 
-                    PathInfo.get(otherPath).isDescendantOf(path) 
-                    && subscriptions[otherPath].some(sub => sub.event === 'mutated')
-                )
-                .map(path => _websocketRequest(this.socket, 'unsubscribe', { path, event: 'mutated' }, accessToken))
-                .map(promise => promise.catch(err => console.error(err)))
-            }
-            const result = await _websocketRequest(this.socket, 'subscribe', { path, event }, accessToken);
-            subscr.activate();
-            return result;
-        };
-
-        this.unsubscribe = (path, event = undefined, callback = undefined) => {
-            if (!this.settings.network.realtime) {
-                throw new Error(`Cannot unsubscribe from realtime events because it has been disabled in the network settings`);
-            }
-            let pathSubs = subscriptions[path];
-            if (!pathSubs) { return Promise.resolve(); }
-
-            const unsubscribeFrom = (subscriptions) => {
-                subscriptions.forEach(subscr => {
-                    pathSubs.splice(pathSubs.indexOf(subscr), 1);
-                    if (this._cache) {
-                        // Events are also handled by cache db, also remove those
-                        console.assert(typeof subscr.cacheCallback !== 'undefined', 'When subscription was added, cacheCallback must have been set');
-                        this._cache.db.api.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);
-                    }
-                });
-            };
-
-            const hadMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
-            if (!event) {
-                // Unsubscribe from all events on path
-                unsubscribeFrom(pathSubs);
-            }
-            else if (!callback) {
-                // Unsubscribe from specific event on path
-                const subscriptions = pathSubs.filter(subscr => subscr.event === event);
-                unsubscribeFrom(subscriptions);
-            }
-            else {
-                // Unsubscribe from a specific callback on path event
-                const subscriptions = pathSubs.filter(subscr => subscr.event === event && subscr.callback === callback);
-                unsubscribeFrom(subscriptions);
-            }
-            const hasMutatedEvents = pathSubs.some(sub => sub.event === 'mutated');
-
-            let promise = Promise.resolve();
-            if (pathSubs.length === 0) {
-                // Unsubscribed from all events on path
-                delete subscriptions[path];
-                if (this.isConnected) {
-                    promise = _websocketRequest(this.socket, 'unsubscribe', { path, access_token: accessToken }, accessToken)
-                        .catch(err => this.debug.error(`Failed to unsubscribe from event(s) on "${path}": ${err.message}`));
-                }
-            }
-            else if (this.isConnected && !pathSubs.some(subscr => subscr.event === event)) {
-                // No callbacks left for specific event
-                promise = _websocketRequest(this.socket, 'unsubscribe', { path: path, event, access_token: accessToken }, accessToken)
-                    .catch(err => this.debug.error(`Failed to unsubscribe from event "${event}" on "${path}": ${err.message}`));
-            }
-            if (this.isConnected && hadMutatedEvents && !hasMutatedEvents) {
-                // If any descendant paths have mutated events, resubscribe those
-                const promises = Object.keys(subscriptions)
-                    .filter(otherPath => PathInfo.get(otherPath).isDescendantOf(path) && subscriptions[otherPath].some(sub => sub.event === 'mutated'))
-                    .map(path => _websocketRequest(this.socket, 'subscribe', { path: path, event: 'mutated' }, accessToken))
-                    .map(promise => promise.catch(err => this.debug.error(`Failed to subscribe to event "${event}" on path "${path}": ${err.message}`)));
-                promise = Promise.all([promise, ...promises]);
-            }
-            return promise;
-        };
-
-        this.transaction = (path, callback, options = { context: {} }) => {
-            const id = ID.generate();
-            options.context = options.context || {};
-            // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
-            options.context.acebase_mutation = {
-                client_id: this._id,
-                id,
-                op: 'transaction',
-                path,
-                flow: 'server'
-            };
-            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-
-            return new Promise(async (resolve, reject) => {
-                let cacheUpdateVal;
-                const handleSuccess = async (context) => {
-                    if (this._cache && typeof cacheUpdateVal !== 'undefined') {
-                        // Update cache db value
-                        await this._cache.db.api.set(cachePath, cacheUpdateVal);
-                    }
-                    resolve({ cursor: context && context.acebase_cursor });
-                };
-                if (this.isConnected && settings.network.realtime) {
-                    // Use websocket connection
-                    const startedCallback = async (data) => {
-                        if (data.id === id) {
-                            this.socket.off("tx_started", startedCallback);
-                            const currentValue = Transport.deserialize(data.value);
-                            let newValue = callback(currentValue);
-                            if (newValue instanceof Promise) {
-                                newValue = await newValue;
-                            }
-                            this.socket.emit("transaction", { action: "finish", id: id, path, value: Transport.serialize(newValue), access_token: accessToken });
-                            if (this._cache) {
-                                cacheUpdateVal = newValue;
-                            }
-                        }
-                    };
-                    const completedCallback = (data) => {
-                        if (data.id === id) {
-                            this.socket.off("tx_completed", completedCallback);
-                            this.socket.off("tx_error", errorCallback);
-                            handleSuccess(data.context);
-                        }
-                    };
-                    const errorCallback = data => {
-                        if (data.id === id) {
-                            this.socket.off("tx_started", startedCallback);
-                            this.socket.off("tx_completed", completedCallback);
-                            this.socket.off("tx_error", errorCallback);
-                            reject(new Error(data.reason));
-                        }
-                    };
-                    this.socket.on("tx_started", startedCallback);
-                    this.socket.on("tx_completed", completedCallback);
-                    this.socket.on("tx_error", errorCallback);
-                    // TODO: socket.on('disconnect', disconnectedCallback);
-                    this.socket.emit("transaction", { action: "start", id, path, access_token: accessToken, context: options.context });
-                }
-                else { 
-                    // Websocket not connected. Try http call instead
-                    const startData = JSON.stringify({ path });
-                    try {
-                        const tx = await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/start`, data: startData, context: options.context });
-                        const id = tx.id;
-                        const currentValue = Transport.deserialize(tx.value);
-                        let newValue = callback(currentValue);
-                        if (newValue instanceof Promise) {
-                            newValue = await newValue;
-                        }
-                        if (this._cache) {
-                            cacheUpdateVal = newValue;
-                        }
-                        const finishData = JSON.stringify({ id, value: Transport.serialize(newValue) });
-                        const { context } = await this._request({ ignoreConnectionState: true, method: 'POST', url: `${this.url}/transaction/${this.dbname}/finish`, data: finishData, context: options.context, includeContext: true });
-                        await handleSuccess(context);
-                    }
-                    catch (err) {
-                        if (['ETIMEDOUT','ENOTFOUND','ECONNRESET','ECONNREFUSED','EPIPE', 'fetch_failed'].includes(err.code)) {
-                            err.message = NOT_CONNECTED_ERROR_MESSAGE;
-                        }
-                        reject(err);
-                    }
-                }
-            });
-        };
-
-        /**
-         * @param {object} options 
-         * @param {string} options.url
-         * @param {'GET'|'PUT'|'POST'|'DELETE'} [options.method='GET']
-         * @param {any} [options.data] Data to post when method is PUT or POST
-         * @param {any} [options.context] Context to add to PUT or POST requests
-         * @param {(chunk: string) => void} [options.dataReceivedCallback] A method that overrides the default data receiving handler. Override for streaming.
-         * @param {(length: number) => string|ArrayBufferView|Promise<string|ArrayBufferView>} [options.dataRequestCallback] A method that overrides the default data send handler. Override for streaming.
-         * @param {boolean} [options.ignoreConnectionState=false] Whether to try the request even if there is no connection
-         * @param {boolean} [options.includeContext=false] NEW Whether the returned object should contain an optionally returned context object.
-         * @returns {Promise<any|{ context: any, data: any }>} returns a promise that resolves with the returned data, or (when options.includeContext === true) an object containing data and returned context
-         */
-        this._request = async (options) => {
-            if (this.isConnected || options.ignoreConnectionState === true) {
-                const result = await (async () => {
-                    try {
-                        return await _request(options.method || 'GET', options.url, { data: options.data, accessToken, dataReceivedCallback: options.dataReceivedCallback, dataRequestCallback: options.dataRequestCallback, context: options.context });
-                    }
-                    catch (err) {
-                        if (this.isConnected && err.isNetworkError) {
-                            // This is a network error, but the websocket thinks we are still connected. 
-                            this.debug.warn(`A network error occurred loading ${options.url}`);
-
-                            // Start reconnection flow
-                            this._handleDetectedDisconnect();
-                        }
-
-                        // Rethrow the error
-                        throw err;
-                    }
-                })();
-                if (result.context && result.context.acebase_cursor) {
-                    this._updateCursor(result.context.acebase_cursor);
-                }
-                if (options.includeContext === true) {
-                    if (!result.context) { result.context = {}; }
-                    return result;
-                }
-                else {
-                    return result.data;
-                }
-            }
-            else {
-                // We're not connected. We can wait for the connection to be established,
-                // or fail the request now. Because we have now implemented caching, live requests
-                // are only executed if they are not allowed to use cached responses. Wait for a
-                // connection to be established (max 1s), then retry or fail
-
-                if (!this.isConnecting || !settings.network.realtime) {
-                    // We're currently not trying to connect, or not using websocket connection (normal connection logic is still used).
-                    // Fail now
-                    throw new Error(NOT_CONNECTED_ERROR_MESSAGE);
-                }
-
-                const connectPromise = new Promise(resolve => this.socket.once('connect', resolve));
-                await promiseTimeout(connectPromise, 1000, 'Waiting for connection').catch(err => {
-                    throw new Error(NOT_CONNECTED_ERROR_MESSAGE);
-                });
-                return this._request(options); // Retry
-            }
-        };
-
-        const handleSignInResult = (result, emitEvent = true) => {
-            this._eventTimeline.signIn = Date.now();
-            const details = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
-            accessToken = details.accessToken;
-            this.socket & this.socket.emit('signin', details.accessToken); // Make sure the connected websocket server knows who we are as well.
-            emitEvent && eventCallback('signin', details);
-            return details;
-        }
-
-        this.signIn = async (username, password) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'account', username, password, client_id: this.socket && this.socket.id } });
-            return handleSignInResult(result);
-        };
-
-        this.signInWithEmail = async (email, password) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'email', email, password, client_id: this.socket && this.socket.id } });
-            return handleSignInResult(result);
-        };
-
-        this.signInWithToken = async (token, emitEvent = true) => {
-            if (!this.isConnected) { 
-                throw new Error('Cannot sign in because client is not connected to the server. If you want to automatically sign in the user with this access token once a connection is established, use client.auth.setAccessToken(token)'); 
-            }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signin`, data: { method: 'token', access_token: token, client_id: this.socket && this.socket.id } });
-            return handleSignInResult(result, emitEvent);
-        };
-
-        this.setAccessToken = (token) => {
-            accessToken = token;
-        };
-
-        this.startAuthProviderSignIn = async (providerName, callbackUrl, options) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const optionParams = typeof options === 'object' 
-                ? '&' + Object.keys(options).map(key => `option_${key}=${encodeURIComponent(options[key])}`).join('&')
-                : '';
-            const result = await this._request({ url: `${this.url}/oauth2/${this.dbname}/init?provider=${providerName}&callbackUrl=${callbackUrl}${optionParams}` });
-            return { redirectUrl: result.redirectUrl };
-        };
-
-        this.finishAuthProviderSignIn = async (callbackResult) => {
-            /** @type {{ provider: { name: string, access_token: string, refresh_token: string, expires_in: number }, access_token: string, user?: AceBaseUser }} */
-            let result;
-            try {
-                result = JSON.parse(Base64.decode(callbackResult));
-            }
-            catch (err) {
-                throw new Error(`Invalid result`);
-            }
-            if (!result.user) {
-                // AceBaseServer 1.9.0+ does not include user details in the redirect.
-                // We must get (and validate) auth state with received access token
-                accessToken = result.access_token;
-                const authState = await this._request({ url: `${this.url}/auth/${this.dbname}/state` });
-                if (!authState.signed_in) {
-                    accessToken = null;
-                    throw new Error(`Invalid access token received: not signed in`);
-                }
-                result.user = authState.user;
-            }
-            return handleSignInResult(result);
-        };
-
-        this.refreshAuthProviderToken = async (providerName, refreshToken) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            return this._request({ url: `${this.url}/oauth2/${this.dbname}/refresh?provider=${providerName}&refresh_token=${refreshToken}` });
-        };
-
-        this.signOut = async (options = { everywhere: false, clearCache: false }) => {
-            if (typeof options === 'boolean') {
-                // Old signature signOut(everywhere:boolean = false)
-                options = { everywhere: options };
-            }
-            else if (typeof options !== 'object') {
-                throw new TypeError('options must be an object');
-            }
-            if (typeof options.everywhere !== 'boolean') { options.everywhere = false; }
-            if (typeof options.clearCache !== 'boolean') { options.clearCache = false; }
-
-            if (!accessToken) { return; }
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signout`, data: { client_id: this.socket && this.socket.id, everywhere: options.everywhere } });
-            this.socket && this.socket.emit('signout', accessToken); // Make sure the connected websocket server knows we signed out as well. 
-            accessToken = null;
-            if (this._cache && options.clearCache) {
-                // Clear cache, but don't wait for it to finish
-                this.clearCache().catch(err => {
-                    console.error(`Could not clear cache:`, err);
-                });
-            }
-            eventCallback('signout');
-        };
-
-        this.changePassword = async (uid, currentPassword, newPassword) => {
-            if (!accessToken) { throw new Error(`not_signed_in`); }
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } });
-            accessToken = result.access_token;
-            return { accessToken };
-        };
-    
-        this.forgotPassword = async (email) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/forgot_password`, data: { email } });
-            return result;
-        };
-
-        this.verifyEmailAddress = async (verificationCode) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/verify_email`, data: { code: verificationCode } });
-            return result;
-        };
-
-        this.resetPassword = async (resetCode, newPassword) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/reset_password`, data: { code: resetCode, password: newPassword } })
-            return result;
-        };
-
-        this.signUp = async (details, signIn = true) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/signup`, data: details });
-            if (signIn) {
-                return handleSignInResult(result);
-            }
-            return { user: result.user, accessToken };
-        };
-
-        this.updateUserDetails = async (details) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/update`, data: details });
-            return { user: result.user };
-        };
-
-        this.deleteAccount = async (uid, signOut = true) => {
-            if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-            const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/delete`, data: { uid } });
-            if (signOut) {
-                this.socket && this.socket.emit('signout', accessToken);
-                accessToken = null;
-                eventCallback('signout');
-            }
-            return true;
-        };
-    }
-
-    get isConnected() {
-        return this._connectionState === CONNECTION_STATE_CONNECTED;
-    }
-    get isConnecting() {
-        return this._connectionState === CONNECTION_STATE_CONNECTING;
-    }
-    get connectionState() {
-        return this._connectionState;
-    }
-
-    stats(options = undefined) {
-        return this._request({ url: `${this.url}/stats/${this.dbname}` });
-    }
-
-    async sync(options = { firstSync: false, fetchFreshData: true, eventCallback: null }) {
-        // Sync cache
-        if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-        if (this._cache && !this._cache.db.isReady) {
-            throw new Error(`cache database is not ready yet`);
-        }
-
-        this._eventTimeline.sync = Date.now();
-        options.eventCallback && options.eventCallback('sync_start');
-        const handleStatsUpdateError = err => {
-            this.debug.error(`Failed to update cache db stats:`, err);
-        };
-
-        try {
-            let totalPendingChanges = 0;
-            const useCursor = this.settings.sync.useCursor !== false;
-            const cursor = useCursor ? this._cursor.sync : null;
-            const cacheApi = this._cache && this._cache.db.api;
-            if (this._cache) {
-                // Part 1: PUSH local changes
-                const { value: pendingChanges, context } = await cacheApi.get(`${this.dbname}/pending`);
-                cacheApi.set(`${this.dbname}/stats/last_sync_start`, new Date()).catch(handleStatsUpdateError);
-                try {
-                    // Merge mutations to multiple properties into single updates (again)
-                    // This prevents single property updates failing because of schema restrictions
-                    // Eg:
-                    // 1. set users/ewout/name: 'Ewout'
-                    // 2. set users/ewout/address: { street: 'My street', nr: 1 }
-                    // 3. remove users/ewout/age
-                    // 4. remove users/ewout/address/street
-                    // --> should merge into:
-                    // 1. update users/ewout: { name: 'Ewout', address: { street: 'My street', nr: 1 }, age: null }
-                    // 4. remove users/ewout/address/street (does not attempt to merge with nested properties of previous updates)
-
-                    const ids = Object.keys(pendingChanges || {}).sort(); // sort a-z, process oldest mutation first
-                    const compatibilityMode = ids.map(id => pendingChanges[id]).some(m => m.type === 'update');
-                    const mutations = compatibilityMode
-                        ? ids.map(id => {
-                            // If any "update" mutations are in the db, these are old mutations. Process them unaltered. This is for backward compatibility only, can be removed later. (if code was able to update, mutations could have already been synced too, right?)
-                            const mutation = pendingChanges[id];
-                            mutation.id = id;
-                            return mutation;
-                        })
-                        : ids.reduce((mutations, id) => {
-                            const change = pendingChanges[id];
-                            console.assert(['set', 'remove'].includes(change.type), 'Only "set" and "remove" mutations should be present');
-                            if (change.path === '') {
-                                // 'set' on the root path - can't turn this into an update on the parent.
-
-                                // With new approach, there should be no previous 'set' or 'remove' mutation on any node because they 
-                                // have been removed by _addCacheSetMutation. But... if there are old mutations in the db 
-                                // without 'update' mutations (because then we'd have been in compatibilityMode above) - we'll filter
-                                // them out here. In the future we could just add this change without checking, but code below doesn't
-                                // harm the process, so it's ok to stay.
-                                const rootUpdate = mutations.find(u => u.path === '');
-                                if (rootUpdate) { rootUpdate.data = change.data; }
-                                else { change.id = id; mutations.push(change); }
-                            }
-                            else {
-                                const pathInfo = PathInfo.get(change.path);
-                                const parentPath = pathInfo.parentPath;
-                                const parentUpdate = mutations.find(u => u.path === parentPath);
-                                const value =  change.type === 'remove' || change.data === null || typeof change.data === 'undefined' ? null : change.data;
-                                if (!parentUpdate) {
-                                    // Create new parent update
-                                    // change.context.acebase_sync = { }; // TODO: Think about what context we could add to let receivers know why this merged update happens
-                                    mutations.push({ ids: [id], type: 'update', path: parentPath, data: { [pathInfo.key]: value }, context: change.context });
-                                }
-                                else {
-                                    // Add this change to parent update
-                                    parentUpdate.data[pathInfo.key] = value;
-                                    parentUpdate.ids.push(id);
-                                }
-                            }
-                            return mutations;
-                        }, []);
-
-                    for (let m of mutations) {
-                        const ids = m.ids;
-                        this.debug.verbose(`SYNC pushing mutations ${ids.join(',')}: `, m);
-                        totalPendingChanges++;
-
-                        try {
-                            if (m.type === 'update') {
-                                await this.update(m.path, m.data, { allow_cache: false, context: m.context });
-                            }
-                            else if (m.type === 'set') {
-                                if (!m.data) { m.data = null; } // Before type 'remove' was implemented
-                                await this.set(m.path, m.data, { allow_cache: false, context: m.context });
-                            }
-                            else if (m.type === 'remove') {
-                                await this.set(m.path, null, { allow_cache: false, context: m.context });
-                            }
-                            else {
-                                throw new Error(`unsupported mutation type "${m.type}"`);
-                            }
-                            this.debug.verbose(`SYNC mutation ${ids.join(',')} processed ok`);
-
-                            const updates = ids.reduce((updates, id) => (updates[id] = null, updates), {});
-                            cacheApi.update(`${this.dbname}/pending`, updates); // delete from cache db
-                        }
-                        catch(err) {
-                            // Updating remote db failed
-                            this.debug.error(`SYNC mutations ${ids.join(',')} failed: ${err.message}`);
-                            if (!this.isConnected) {
-                                // Connection was broken, should retry later
-                                throw err;
-                            }
-                            // We are connected, so the mutation is not allowed or otherwise denied.
-                            if (typeof err === 'string') { 
-                                err = { code: 'unknown', message: err, stack: 'n/a' }; 
-                            }
-
-                            // Store error report
-                            const errorReport = { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack };
-                            ids.forEach(id => {
-                                cacheApi.transaction(`${this.dbname}/pending/${id}`, m => {
-                                    if (!m.error) {
-                                        m.error = {
-                                            first: errorReport, 
-                                            last: errorReport,
-                                            retries: 0
-                                        };
-                                    }
-                                    else {
-                                        m.error.last = errorReport;
-                                        m.error.retries++;
-                                    }
-                                    if (m.error.retries === 3) {
-                                        // After 3 failed retries, move to /dbname/failed/id
-                                        cacheApi.set(`${this.dbname}/failed/${id}`, m);
-                                        return null; // remove pending
-                                    }
-                                    return m;
-                                });
-                            });
-
-                            cacheApi.set(`${this.dbname}/stats/last_sync_error`, errorReport).catch(handleStatsUpdateError);
-                            // TODO: Send error report to server?
-                            // this.reportError({ code: 'sync-mutation', report: errorReport });
-
-                            options.eventCallback && options.eventCallback('sync_change_error', { error: err, change: m });
-                        }
-                    }
-
-                    this.debug.verbose(`SYNC push done`);
-
-                    // Update stats
-                    cacheApi.set(`${this.dbname}/stats/last_sync_end`, new Date()).catch(handleStatsUpdateError);
-                }
-                catch(err) {
-                    // 1 or more pending changes could not be processed.
-                    this.debug.error(`SYNC push error: ${err.message}`);
-                    if (typeof err === 'string') { 
-                        err = { code: 'unknown', message: err, stack: 'n/a' }; 
-                    }
-                    cacheApi.set(`${this.dbname}/stats/last_sync_error`, { date: new Date(), code: err.code || 'unknown', message: err.message, stack: err.stack }).catch(handleStatsUpdateError);
-                    throw err;
-                }
-            }
-
-            // We've pushed our changes, now get fresh data for all paths with active subscriptions
-
-            // Using a cursor we can get changes since disconnect
-            // - If we have a cursor, we were connected before. 
-            // - A cursor can only be used for events added while connected, not for events added while offline
-            // - A cursor can currently only be used if a cache db is used.
-            // - If there is no cursor because there were no events fired during a previous connection, use disconnected logic for all events
-            // 
-            //  -------------------------------------------------------------
-            // |                 |           event subscribe time           |
-            // |     event       |  pre-connect | connected | disconnected  |
-            // |------------------------------------------------------------|
-            // | value           |     get      |   cursor  |     get       |
-            // | child_added     |     get*     |   cursor  |     get*      |
-            // | child_removed   |     warn     |   cursor  |     warn      |
-            // | child_changed   |     warn     |   cursor  |     warn      |
-            // | mutated         |     warn     |   cursor  |     warn      |
-            // | mutations       |     warn     |   cursor  |     warn      |
-            // | notify_*        |     warn     |   warn    |     warn      |
-            // --------------------------------------------------------------
-            // * only if sub.newOnly === false, warn otherwise
-            // --------------------------------------------------------------
-
-            let totalRemoteChanges = 0, usedSyncMethod = 'reload';
-            const subscriptionPaths = Object.keys(this._subscriptions);
-            const subscriptions = subscriptionPaths.reduce((subs, path) => {
-                this._subscriptions[path].forEach(sub => subs.push(sub));
-                return subs;
-            }, []);
-            subscriptions.for = function(path) {
-                return this.filter(sub => sub.path === path);
-            };
-
-            if (this._cache) { //  && options.fetchFreshData
-                // Part 2: PULL remote changes / fresh data
-
-                // Attach temp events to cache db so they will fire for data changes (just for counting)
-                subscriptions.forEach(sub => {
-                    sub.tempCallback = (err, path, newValue, oldValue, context) => {
-                        totalRemoteChanges++;
-                    }
-                    cacheApi.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
-                });
-
-                let strategy = {
-                    /** @type {string[]} Data paths to reload */
-                    reload: [],
-                    /** @type {Array<{path: string, events: string[]}>} Event targets to fetch changes with cursor */
-                    cursor: [],
-                    /** @type {Array<EventSubscription>} Subscriptions that have custom sync fallback logic, used when there is no automated way to synchronize */
-                    fallback: [],
-                    /** @type {Array<{path: string, events: string[]}>} Event targets to warn about */
-                    warn: [],
-                    /** @type {Array<EventSubscription>} Subscriptions that require no action because they were added after last connect event */
-                    noop: []
-                };
-                // const wasAddedOffline = sub => {
-                //     return sub.lastSynced === 0 && sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
-                // };
-                const hasStaleValue = sub => {
-                    // --------------------------------
-                    // | cursor |   added   | stale   |
-                    // -------------------------------|
-                    // |   no   |  online   |  no     |
-                    // |   no   |  offline  |  yes    |
-                    // |   no   |  b/disct  |  yes    |
-                    // |   yes  |  online   |  no     |
-                    // |   yes  |  offline  |  yes    |
-                    // |   yes  |  b/disct  |  no     |
-                    // --------------------------------
-                    const addedWhileOffline = sub.added > this._eventTimeline.disconnect && sub.added < this._eventTimeline.connect;
-                    const addedBeforeDisconnection = sub.added < this._eventTimeline.disconnect;
-                    if (addedWhileOffline) { return true; }
-                    if (addedBeforeDisconnection) { return cursor ? false : true; }
-                    return false;
-                }
-                strategy.reload = subscriptionPaths
-                    .filter(path => {
-                        if (path.includes('*') || path.includes('$')) { return false; } // Can't load wildcard paths
-                        return subscriptions.for(path).some(sub => {
-                            if (hasStaleValue(sub)) {
-                                if (typeof sub.settings.syncFallback === 'function') { return false; }
-                                if (sub.settings.syncFallback === 'reload') { return true; }
-                                if (sub.event === 'value') { return true; }
-                                if (sub.event === 'child_added' && !sub.settings.newOnly) { return true; }
-                            }
-                            return false;
-                        });
-                    })
-                    .reduce((reloadPaths, path) => {
-                        !reloadPaths.some(p => p === path || PathInfo.get(p).isAncestorOf(path)) && reloadPaths.push(path);
-                        return reloadPaths;
-                    }, []);
-                strategy.fallback = subscriptionPaths
-                    .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
-                    .reduce((fallbackItems, path) => {
-                        subscriptions.for(path).forEach(sub => {
-                            if (hasStaleValue(sub) && typeof sub.settings.syncFallback === 'function') {
-                                fallbackItems.push(sub);
-                            }
-                        });
-                        return fallbackItems;
-                    }, []);
-                strategy.cursor = !cursor ? [] : subscriptionPaths
-                    .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
-                    .reduce((cursorItems, path) => {
-                        const subs = subscriptions.for(path);
-                        const events = subs.filter(sub => !hasStaleValue(sub) && !strategy.fallback.includes(sub))
-                            .reduce((events, sub) => (events.includes(sub.event) || events.push(sub.event)) && events, []);
-                        events.length > 0 && cursorItems.push({ path, events });
-                        return cursorItems;
-                    }, []);
-                strategy.warn = subscriptionPaths
-                    .filter(path => !strategy.reload.some(p => p === path || PathInfo.get(p).isAncestorOf(path)))
-                    .reduce((warnItems, path) => {
-                        const subs = subscriptions.for(path).filter(sub => !strategy.fallback.includes(sub));
-                        subs.forEach(sub => {
-                            if (typeof sub.settings.syncFallback === 'function' || sub.added > this._eventTimeline.connect) {
-                                strategy.noop.push(sub);
-                            }
-                            else if (!strategy.cursor.some(item => item.path === sub.path && item.events.includes(sub.event))) {
-                                let item = warnItems.find(item => item.path === sub.path);
-                                if (!item) {
-                                    warnItems.push({ path: sub.path, events: [sub.event] })
-                                }
-                                else if (!item.events.includes(sub.event)) {
-                                    item.events.push(sub.event);
-                                }
-                            }
-                        });
-                        return warnItems;
-                    }, []);
-
-                console.log(`SYNC strategy`, strategy);
-
-                const syncPromises = [];
-                if (strategy.cursor.length > 0) {
-                    this.debug.log(`SYNC using cursor "${cursor}" for event(s) ${strategy.cursor.map(item => `${item.events.join(', ')} on "/${item.path}"`).join(', ')}`);
-                    const cursorPromise = (async () => {
-                        let remoteMutations;
-                        try {
-                            const result = await this.getChanges({ for: strategy.cursor, cursor });
-                            remoteMutations = result.changes;
-                            this._updateCursor(result.new_cursor);
-                        }
-                        catch(err) {
-                            this.debug.error(`SYNC: Could not load remote changes`, err);
-                            options.eventCallback && options.eventCallback('sync_cursor_error', err);
-                            if (err.code === 'no_transaction_logging') {
-                                // Apparently the server did support transaction logging before, but is now disabled.
-                                // Remove cursor so it won't be used again.
-                                this._updateCursor(null);
-                            }
-                            // Check which subscriptions we'll be able to reload, and which we'll have to issue warnings for
-                            strategy.cursor.forEach(item => {
-                                if (item.events.includes('value')) {
-                                    strategy.reload.push(item.path);
-                                }
-                                else {
-                                    strategy.warn.push(item);
-                                }
-                            });
-                        }
-                        if (remoteMutations) {
-                            usedSyncMethod = 'cursor';
-                            this.debug.log(`SYNC: Got ${remoteMutations.length} remote mutations`, remoteMutations);
-                            const promises = remoteMutations.map(m => {
-                                const cachePath = `${this.dbname}/cache/${m.path}`;
-                                if (m.type === 'update') {
-                                    return cacheApi.update(cachePath, m.value, { context: m.context });
-                                }
-                                else if (m.type === 'set') {
-                                    return cacheApi.set(cachePath, m.value, { context: m.context });
-                                }
-                            });
-                            await Promise.all(promises);
-                        }
-                    })();
-                    syncPromises.push(cursorPromise);
-                }
-                if (strategy.reload.length > 0) {
-                    this.debug.log(`SYNC reloading data for event paths ${strategy.reload.map(path => `"/${path}"`).join(', ')}`);
-                    const reloadPromise = (async () => {
-                        const promises = strategy.reload.map(path => {
-                            this.debug.verbose(`SYNC: load "/${path}"`);
-                            return this.get(path, { allow_cache: false })
-                            .catch(err => {
-                                this.debug.error(`SYNC: could not load "/${path}"`, err);
-                                options.eventCallback && options.eventCallback('sync_pull_error', err);
-                            });
-                        });
-                        await Promise.all(promises);                        
-                    })();
-                    syncPromises.push(reloadPromise);
-                }
-                if (strategy.fallback.length > 0) {
-                    this.debug.log(`SYNC using fallback functions for event(s) ${strategy.fallback.map(sub => `${sub.event} on "/${sub.path}"`).join(', ')}`);
-                    const fallbackPromise = (async () => {
-                        const promises = strategy.fallback.map(async sub => {
-                            this.debug.verbose(`SYNC: running fallback for event ${sub.event} on "/${sub.path}"`);
-                            try {
-                                await sub.settings.syncFallback();
-                            }
-                            catch (err) {
-                                this.debug.error(`SYNC: error running fallback function for ${sub.event} on "/${sub.path}"`, err);
-                                options.eventCallback && options.eventCallback('sync_fallback_error', err);
-                            }
-                        });
-                        await Promise.all(promises);                        
-                    })();
-                    syncPromises.push(fallbackPromise);
-                }
-                if (strategy.warn.length > 0) {
-                    this.debug.warn(`SYNC warning: unable to sync event(s) ${strategy.warn.map(item => `${item.events.map(event => `"${event}"`).join(', ')} on "/${item.path}"`).join(', ')}. To resolve this, provide syncFallback functions for these events`);
-                }
-
-                // Wait until they're all done
-                await Promise.all(syncPromises);
-
-                // Wait shortly to allow any pending temp cache events to fire
-                await new Promise(resolve => setTimeout(resolve, 10));         
-
-                // Unsubscribe temp cache subscriptions
-                subscriptions.forEach(sub => {
-                    console.assert(typeof sub.tempCallback === 'function');
-                    cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
-                    delete sub.tempCallback;
-                });
-            }
-            else if (!this._cache) {
-                // Not using cache
-                const syncPromises = [];
-                
-                // No cache database used
-                // Until acebase-server supports getting missed events with a cursor (in addition to getting mutations),
-                // there is no way for the client to determine exact data changes at this moment - we have no previous values.
-                // We can only fetch fresh data for 'value' events, run syncFallback functions and warn about all other events
-
-                subscriptionPaths.forEach(path => {
-                    const subs = subscriptions.for(path);
-                    const warnEvents = [];
-                    subs.filter(sub => sub.event !== 'value').forEach(sub => {
-                        if (typeof sub.settings.syncFallback === 'function') {
-                            syncPromises.push(sub.settings.syncFallback());
-                        }
-                        else {
-                            !warnEvents.includes(sub.event) && warnEvents.push(sub.event);
-                        }
-                    })
-                    if (warnEvents.length > 0) {
-                        this.debug.warn(`Subscriptions ${warnEvents.join(', ')} on path "${path}" might have missed events while offline. Data should be reloaded!`);
-                    }
-                    const valueSubscriptions = subs.filter(sub => sub.event === 'value');
-                    if (valueSubscriptions.length > 0) {
-                        const p = this.get(path, { allow_cache: false }).then(value => {
-                            valueSubscriptions.forEach(subscr => subscr.callback(null, path, value)); // No previous value!
-                        });
-                        syncPromises.push(p);
-                    }
-                });
-
-                await Promise.all(syncPromises);
-            }
-
-            // Update subscription sync stats
-            subscriptions.forEach(sub => sub.lastSynced = Date.now());
-
-            this.debug.verbose(`SYNC done`);
-            const info = { local: totalPendingChanges, remote: totalRemoteChanges, method: usedSyncMethod, cursor };
-            options.eventCallback && options.eventCallback('sync_done', info);
-            return info;
-        }
-        catch(err) {
-            this.debug.error(`SYNC error`, err);
-            options.eventCallback && options.eventCallback('sync_error', err);
-            throw err;
-        }
-    }
-
-    /**
-     * Gets all relevant mutations for specific events on a path and since specified cursor
-     * @param {object} filter
-     * @param {string} [filter.path] path to get all mutations for, only used if `for` property isn't used
-     * @param {Array<{ path: string, events: string[] }>} [filter.for] paths and events to get relevant mutations for
-     * @param {string} filter.cursor cursor to use
-     * @param {number} filter.timestamp timestamp to use
-     * @returns {Promise<{ used_cursor: string, new_cursor: string, mutations: object[] }>}
-     */
-    async getMutations(filter) {
-        if (typeof filter !== 'object') { throw new Error('No filter specified'); }
-        if (typeof filter.cursor !== 'string' && typeof filter.timestamp !== 'number') { throw new Error('No cursor or timestamp given'); }
-        const query = Object.keys(filter)
-            .map(key => {
-                let val = filter[key];
-                if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
-                return typeof val !== 'undefined' ? `${key}=${val}` : null;
-            })
-            .filter(p => p != null)
-            .join('&');
-        const { data, context } = await this._request({ url: `${this.url}/sync/mutations/${this.dbname}?${query}`, includeContext: true });
-        const mutations = Transport.deserialize2(data);
-        return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, mutations };
-    }
-
-    /**
-     * Gets all relevant effective changes for specific events on a path and since specified cursor
-     * @param {object} filter
-     * @param {string} [filter.path] path to get all mutations for, only used if `for` property isn't used
-     * @param {Array<{ path: string, events: string[] }>} [filter.for] paths and events to get relevant mutations for
-     * @param {string} filter.cursor cursor to use
-     * @param {number} filter.timestamp timestamp to use
-     * @returns {Promise<{ used_cursor: string, new_cursor: string, changes: object[] }>}
-     */
-    async getChanges(filter) {
-        if (typeof filter !== 'object') { throw new Error('No filter specified'); }
-        if (typeof filter.cursor !== 'string' && typeof filter.timestamp !== 'number') { throw new Error('No cursor or timestamp given'); }
-        const query = Object.keys(filter)
-            .map(key => {
-                let val = filter[key];
-                if (key === 'for') { val = encodeURIComponent(JSON.stringify(val)); }
-                return typeof val !== 'undefined' ? `${key}=${val}` : null;
-            })
-            .filter(p => p != null)
-            .join('&');
-        const { data, context } = await this._request({ url: `${this.url}/sync/changes/${this.dbname}?${query}`, includeContext: true });
-        const changes = Transport.deserialize2(data);
-        return { used_cursor: filter.cursor, new_cursor: context.acebase_cursor, changes };
-    }
-
-    async _addCacheSetMutation(path, value, context) {
-        // Remove all previous mutations on this exact path, and descendants
-        const escapedPath = path.replace(/([.*+?\\$^\(\)\[\]\{\}])/g, '\\$1'); // Replace any character that could cripple the regex. NOTE: nobody should use these characters in their data paths in the first place.
-        const re = new RegExp(`^${escapedPath}(?:\\[|/|$)`); // matches path, path/child, path[0], path[0]/etc, path/child/etc/etc
-        await this._cache.db.query(`${this.dbname}/pending`)
-            .filter('path', 'matches', re)
-            .remove();
-
-        // Add new mutation
-        return this._cache.db.api.set(`${this.dbname}/pending/${ID.generate()}`, { type: value !== null ? 'set' : 'remove', path, data: value, context });
-    }
-
-    set(path, value, options = { allow_cache: true, context: {} }) {
-        // TODO: refactor allow_cache to cache_mode
-        if (!options.context) { options.context = {}; }
-        const useCache = this._cache && options.allow_cache !== false;
-        const useServer = this.isConnected;
-        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
-        options.context.acebase_mutation = options.context.acebase_mutation || {
-            client_id: this._id,
-            id: ID.generate(),
-            op: 'set',
-            path,
-            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
-        };
-        const updateServer = async () => {
-            const data = JSON.stringify(Transport.serialize(value));
-            const { context } = await this._request({ method: "PUT", url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
-            Object.assign(options.context, context); // Add to request context
-            const cursor = context && context.acebase_cursor;
-            return { cursor }; // And return the cursor
-        };
-        if (!useCache) {
-            return updateServer();
-        }
-
-        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-        let rollbackValue;
-        const updateCache = () => {
-            return this._cache.db.api.transaction(cachePath, (currentValue) => {
-                rollbackValue = currentValue;
-                return value;
-            }, { context: options.context });
-        };
-        const rollbackCache = async () => {
-            await cachePromise; // Must be ready first before we can rollback to previous value
-            return this._cache.db.api.set(cachePath, rollbackValue, { context: options.context });
-        };
-        const addPendingTransaction = async () => {
-            await this._addCacheSetMutation(path, value, options.context);
-        };
-
-        const cachePromise = updateCache();
-        const tryCachePromise = cachePromise
-            .then(() => ({ success: true }))
-            .catch(err => ({ success: false, error: err }));
-
-        const serverPromise = !useServer ? null : updateServer();
-        const tryServerPromise = !useServer ? null : serverPromise
-            .then(() => ({ success: true }))
-            .catch(err => ({ success: false, error: err }));
-
-        Promise.all([ tryCachePromise, tryServerPromise ])
-        .then(([ cacheResult, serverResult ]) => {
-            const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
-            if (serverPromise && !networkError) {
-                // Server update succeeded, or failed with a non-network related reason
-
-                if (serverResult.success) {
-                    // Server update success
-                    if (!cacheResult.success) { 
-                        // Cache update failed for some reason?
-                        this.debug.error(`Failed to set cache for "${path}". Error: `, cacheResult.error);
-                    }
-                }
-                else {
-                    // Server update failed (with a non-network related reason)
-                    if (cacheResult.success) {
-                        // Cache update did succeed, rollback to previous value
-                        this.debug.error(`Failed to set server value for "${path}", rolling back cache to previous value. Error:`, serverResult.error)
-                        rollbackCache().catch(err => {
-                            this.debug.error(`Failed to roll back cache? Error:`, err);
-                        });
-                    }
-                }
-            }
-            else if (cacheResult.success) {
-                // Server was not updated (because we're offline, or a network error occurred), cache update was successful.
-                // Add pending sync action
-
-                addPendingTransaction().catch(err => {
-                    this.debug.error(`Failed to add pending sync action for "${path}", rolling back cache to previous value. Error:`, err);
-                    rollbackCache().catch(err => {
-                        this.debug.error(`Failed to roll back cache? Error:`, err);
-                    });
-                });
-            }
-        });
-
-        if (!useServer) {
-            // Fixes issue #7
-            return cachePromise;
-        }
-
-        // return server promise by default, so caller can handle potential authorization issues
-        return this._cache.priority === 'cache' ? cachePromise : serverPromise;
-    }
-
-    update(path, updates, options = { allow_cache: true, context: {} }) {
-        // TODO: refactor allow_cache to cache_mode
-        const useCache = this._cache && options && options.allow_cache !== false;
-        const useServer = this.isConnected;
-        // TODO: reduce this contextual overhead to 'client_id' only, or additional debugging info upon request
-        options.context.acebase_mutation = options.context.acebase_mutation || {
-            client_id: this._id,
-            id: ID.generate(),
-            op: 'update',
-            path,
-            flow: useCache ? useServer ? 'parallel' : 'cache' : 'server'
-        };
-        const updateServer = async () => {
-            const data = JSON.stringify(Transport.serialize(updates));
-            const { context } = await this._request({ method: 'POST', url: `${this.url}/data/${this.dbname}/${path}`, data, context: options.context, includeContext: true });
-            Object.assign(options.context, context); // Add to request context
-            const cursor = context && context.acebase_cursor;
-            return { cursor }; // And return the cursor
-        };
-        if (!useCache) {
-            return updateServer();
-        }
-
-        const cacheApi = this._cache.db.api;
-        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-        let rollbackUpdates;
-        const updateCache = () => {
-            const properties = Object.keys(updates);
-            return cacheApi.get(cachePath, { include: properties })
-            .then(result => {
-                rollbackUpdates = result.value;
-                properties.forEach(prop => {
-                    if (!(prop in rollbackUpdates) && updates[prop] !== null) {
-                        // Property being updated doesn't exist in current value, set to null
-                        rollbackUpdates[prop] = null;
-                    }
-                });
-                return cacheApi.update(cachePath, updates, { context: options.context });
-            });
-        };
-        const rollbackCache = async () => {
-            await cachePromise; // Must be ready first before we can rollback to previous value
-            return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
-        };
-        const addPendingTransaction = async () => {
-            /*
-
-            In the old method, making multiple changes to the same data would store AND SYNC each
-            mutation separately. To only store net changes to the db, having mixed 'update' and 'set' mutations
-            make this hard. Consider the following mutations:
-
-                1. update 'users/ewout': { name: 'Ewout', surname: 'Stortenbeker' }
-                2. update 'users/ewout/address': { street: 'Main street', nr: 3 }
-                3. update 'users/ewout': { name: 'E', address: null }
-                4. update 'users/ewout': { name: 'E', address: { street: '2nd Ave', nr: 48 } }
-                5. set 'users/ewout/address/street': 'Main street'
-                6. set 'users/ewout/address/nr': 3
-                7. set 'users/ewout/name': 'Ewout'
-
-            If all updated properties are saved as 'set' operations, things become easier:
-
-                1a. set 'users/ewout/name': 'Ewout'
-                1b. set 'users/ewout/surname': 'Stortenbeker'
-                2a. set 'users/ewout/address/street': 'Main street'
-                2b. set 'users/ewout/address/nr': 3
-                3a. set 'users/ewout/name': 'E'
-                3b. set 'users/ewout/address': null
-                4a. set 'users/ewout/name': 'E'
-                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
-                5.  set 'users/ewout/address/street': 'Main street'
-                6.  set 'users/ewout/address/nr': 3
-                7.  set 'users/ewout/name': 'Ewout'
-
-            Now it's easy to remove obsolete mutations, only keeping the last ones:
-
-                1b. set 'users/ewout/surname': 'Stortenbeker'
-                4b. set 'users/ewout/address': { street: '2nd Ave', nr: 48 }
-                5.  set 'users/ewout/address/street': 'Main street'
-                6.  set 'users/ewout/address/nr': 3
-                7.  set 'users/ewout/name': 'Ewout'
-
-            */
-
-            // Create 'set' mutations for all of this 'update's properties
-            const pathInfo = PathInfo.get(path);
-            const mutations = Object.keys(updates).map(prop => {
-                if (updates instanceof Array) { prop = parseInt(prop); }
-                return {
-                    path: pathInfo.childPath(prop),
-                    value: updates[prop]
-                };
-            });
-
-            // Store new pending 'set' operations (null values will be stored as 'remove')
-            const promises = mutations.map(m => this._addCacheSetMutation(m.path, m.value, options.context));
-            await Promise.all(promises);
-        };
-
-        const cachePromise = updateCache();
-        const tryCachePromise = cachePromise
-            .then(() => ({ success: true }))
-            .catch(err => ({ success: false, error: err }));
-
-        const serverPromise = !useServer ? null : updateServer();
-        const tryServerPromise = !useServer ? null : serverPromise
-            .then(() => ({ success: true }))
-            .catch(err => ({ success: false, error: err }));
-
-        Promise.all([ tryCachePromise, tryServerPromise ])
-        .then(([ cacheResult, serverResult ]) => {
-            const networkError = serverPromise && !serverResult.success && serverResult.error.isNetworkError === true;
-            if (serverPromise && !networkError) {
-                // Server update succeeded, or failed with a non-network related reason
-
-                if (serverResult.success) {
-                    // Server update success
-                    if (!cacheResult.success) { 
-                        // Cache update failed for some reason?
-                        this.debug.error(`Failed to update cache for "${path}". Error: `, cacheResult.error);
-                    }
-                }
-                else {
-                    // Server update failed
-                    if (cacheResult.success) {
-                        // Cache update did succeed, rollback to previous value
-                        this.debug.error(`Failed to update server value for "${path}", rolling back cache to previous value. Error:`, serverResult.error)
-                        rollbackCache().catch(err => {
-                            this.debug.error(`Failed to roll back cache? Error:`, err);
-                        });
-                    }
-                }
-            }
-            else if (cacheResult.success) {
-                // Server was not updated, cache update was successful.
-                // Add pending sync action
-
-                addPendingTransaction().catch(err => {
-                    this.debug.error(`Failed to add pending sync action for "${path}", rolling back cache to previous value. Error:`, err);
-                    rollbackCache().catch(err => {
-                        this.debug.error(`Failed to roll back cache? Error:`, err);
-                    });
-                });
-            }
-        });
-
-        if (!useServer) {
-            // Fixes issue #7
-            return cachePromise;
-        }
-
-        // return server promise by default, so caller can handle potential authorization issues
-        return this._cache.priority === 'cache' ? cachePromise : serverPromise;
-    }
-
-    /**
-     * 
-     * @param {string} path 
-     * @param {object} [options] 
-     * @param {'allow'|'bypass'|'force'} [options.cache_mode='allow'] If a cached value is allowed or forced to be served.
-     * @param {string} [options.cache_cursor] Use a cursor to update the local cache with mutations from the server, then load and serve the entire value from cache. Only works in combination with `cache_mode: 'allow'` (previously `allow_cache: true`)
-     * @param {string[]} [options.include]
-     * @param {string[]} [options.exclude]
-     * @param {boolean} [options.child_objects]
-     * @returns {Promise<{ value: any, context: object, cursor?: string }>} Returns a promise that resolves with the value, context and optionally a server cursor
-     */
-    async get(path, options = { cache_mode: 'allow' }) {
-        if (typeof options.cache_mode !== 'string') { options.cache_mode = 'allow'; }
-        const useCache = this._cache && options.cache_mode !== 'bypass';
-        const getServerValue = async () => {
-            // Get from server
-            let url = `${this.url}/data/${this.dbname}/${path}`;
-            let filtered = false;
-            if (options) {
-                let query = [];
-                if (options.exclude instanceof Array) { 
-                    query.push(`exclude=${options.exclude.join(',')}`); 
-                }
-                if (options.include instanceof Array) { 
-                    query.push(`include=${options.include.join(',')}`); 
-                }
-                if (typeof options.child_objects === "boolean") {
-                    query.push(`child_objects=${options.child_objects}`);
-                }
-                if (query.length > 0) {
-                    filtered = true;
-                    url += `?${query.join('&')}`;
-                }
-            }
-            const result = await this._request({ url, includeContext: true });
-            const context = result.context;
-            const cursor = context && context.acebase_cursor;
-            const value = Transport.deserialize(result.data);
-            if (this._cache) {
-                // Update cache without waiting
-                // DISABLED: if filtered data was requested, it should be merged with current data (nested objects in particular)
-                // if (filtered) {
-                //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
-                // }
-                if (!filtered) {
-                    const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-                    this._cache.db.api.set(cachePath, value, { context: { acebase_operation: 'update_cache', acebase_server_context: context } })
-                    .catch(err => {
-                        this.debug.error(`Error caching data for "/${path}"`, err)
-                    });
-                }
-            }
-            return { value, context, cursor };
-        };
-        const getCacheValue = async (throwOnNull = false) => {
-            const result = await this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
-            let { value, context } = result;
-            if (!('value' in result && 'context' in result)) {
-                console.warn(`Missing context from cache results. Update your acebase package`);
-                value = result, context = {};
-            }
-            if (value === null && throwOnNull) {
-                throw new CachedValueUnavailableError(path);
-            }
-            delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
-            return { value, context };
-        };
-        if (options.cache_mode === 'force') {
-            // Only load cached value
-            const { value, context } = await getCacheValue(false); // Do not throw on null with cache_mode: 'force'
-            context.acebase_origin = 'cache';
-            return { value, context };
-        }
-        if (useCache && typeof options.cache_cursor === 'string') {
-            // Update cache with mutations from cursor, then load cached value
-            let syncResult;
-            try {
-                syncResult = await this.updateCache(path, options.cache_cursor);
-            }
-            catch (err) {
-                // Failed to update cache, we might be offline. Proceed with cache value
-            }
-            const { value, context } = await getCacheValue(false); // don't throw on null value, it was updated from the server just now
-            if (syncResult) {
-                context.acebase_cursor = syncResult.new_cursor;
-                context.acebase_origin = 'hybrid';
-            }
-            else {
-                context.acebase_cursor = options.cache_cursor;
-                context.acebase_origin = 'cache';
-            }
-            return { value, context, cursor: context.acebase_cursor };
-        }
-        if (!useCache) {
-            // Cache not available or allowed to be used, get server value
-            const { value, context, cursor } = await getServerValue();
-            context.acebase_origin = 'server';
-            return { value, context, cursor };
-        }
-        if (!this.isConnected || this._cache.priority === 'cache') {
-            // Server not connected, or priority is set to 'cache'. Get cached value
-            const throwOnNull = this._cache.priority !== 'cache';
-            const { value, context } = await getCacheValue(throwOnNull);
-            context.acebase_origin = 'cache';
-            return { value, context };
-        }
-        // Get both, use cached value if available and server version takes too long
-        return new Promise((resolve, reject) => {
-            let wait = true, done = false;
-            const gotValue = (source, val) => {
-                this.debug.verbose(`Got ${source} value of "${path}":`, val);
-                if (done) { return; }
-                const { value, context, cursor } = val;
-                if (source === 'server') {
-                    done = true;
-                    this.debug.verbose(`Using server value for "${path}"`);
-                    context.acebase_origin = 'server';
-                    resolve({ value, context, cursor });
-                }
-                else if (value === null) {
-                    // Cached value is not available
-                    if (!wait) {
-                        const serverError = errors.find(e => e.source === 'server').error;
-                        if (serverError.isNetworkError) {
-                            // On network related errors, we thought we were connected but apparently weren't.
-                            // If we had known this up-front, getCachedValue(true) would have been executed and
-                            // thrown a CachedValueUnavailableError with default message. Let's do that now
-                            return reject(new CachedValueUnavailableError(path));
-                        }
-                        // Could not get server value because of a non-network related issue - possibly unauthorized access
-                        const error = new CachedValueUnavailableError(path, `Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
-                        error.serverError = serverError;
-                        return reject(error); 
-                    }
-                }
-                else if (!wait) { 
-                    // Cached results, don't wait for server value
-                    done = true; 
-                    this.debug.verbose(`Using cache value for "${path}"`);
-                    context.acebase_origin = 'cache';
-                    resolve({ value, context });
-                }
-                else {
-                    // Cached results, wait 1s before resolving with this value, server value might follow soon
-                    setTimeout(() => {
-                        if (done) { return; }
-                        this.debug.verbose(`Using (delayed) cache value for "${path}"`);
-                        done = true;
-                        context.acebase_origin = 'cache';
-                        resolve({ value, context });
-                    }, 1000);
-                }
-            };
-            let errors = [];
-            const gotError = (source, error) => {
-                errors.push({ source, error });
-                if (errors.length === 2) { 
-                    // Both failed, reject with server error
-                    reject(errors.find(e => e.source === 'server').error);
-                }
-            };
-
-            getServerValue()
-                .then(val => gotValue('server', val))
-                .catch(err => (wait = false, gotError('server', err)));
-
-            getCacheValue(false)
-                .then(val => gotValue('cache', val))
-                .catch(err => gotError('cache', err));
-        });
-    }
-    
-    exists(path, options = { allow_cache: true }) {
-        // TODO: refactor allow_cache to cache_mode
-        // TODO: refactor to include context in return value: acebase_origin: 'cache' or 'server'
-        const useCache = this._cache && options.allow_cache !== false;
-        const getCacheExists = () => {
-            return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
-        };
-        const getServerExists = () => {
-            return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
-            .then(res => res.exists)
-            .catch(err => {
-                throw err;
-            });            
-        }
-        if (!useCache) {
-            return getServerExists();
-        }
-        else if (!this.isConnected) {
-            return getCacheExists();
-        }
-        else {
-            // Check both
-            return new Promise((resolve, reject) => {
-                let wait = true, done = false;
-                const gotExists = (source, exists) => {
-                    if (done) { return; }
-                    if (source === 'server') {
-                        done = true;
-                        resolve(exists);
-                    }
-                    else if (!wait) { 
-                        // Cached results, don't wait for server value
-                        done = true; 
-                        resolve(exists); 
-                    }
-                    else {
-                        // Cached results, wait 1s before resolving with this value, server value might follow soon
-                        setTimeout(() => {
-                            if (done) { return; }
-                            done = true;
-                            resolve(exists);
-                        }, 1000);
-                    }
-                };
-                let errors = [];
-                const gotError = (source, error) => {
-                    errors.push({ source, error });
-                    if (errors.length === 2) { 
-                        // Both failed, reject with server error
-                        reject(errors.find(e => e.source === 'server'));
-                    }
-                };
-
-                getServerExists()
-                    .then(exists => gotExists('server', exists))
-                    .catch(err => (wait = false, gotError('server', err)));
-
-                getCacheExists()
-                    .then(exists => gotExists('cache', exists))
-                    .catch(err => gotError('cache', err));
-            });
-        }
-    }
-
-    callExtension(method, path, data) {
-        method = method.toUpperCase();
-        const postData = ['PUT','POST'].includes(method) ? data : null;
-        let url = `${this.url}/ext/${this.dbname}/${path}`;
-        if (data && !['PUT','POST'].includes(method)) {
-            // Add to query string
-            if (typeof data === 'object') {
-                // Convert object to querystring
-                data = Object.keys(data)
-                    .filter(key => typeof data[key] !== 'undefined')
-                    .map(key => key + '=' + encodeURIComponent(JSON.stringify(data[key])))
-                    .join('&')
-            }
-            else if (typeof data !== 'string' || !data.includes('=')) {
-                throw new Error('data must be an object, or a string with query parameters, like "index=3&name=Something"');
-            }
-            url += `?` + data;
-        }
-        return this._request({ method, url, data: postData, ignoreConnectionState: true });
-    }
-
-    /**
-     * Clears the entire cache, or a specific path without raising any events
-     * @param {string} [path] 
-     * @returns 
-     */
-    async clearCache(path = '') {
-        if (this._cache) {
-            const value = path === '' ? {} : null;
-            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-            return this._cache.db.api.set(cachePath, value, { suppress_events: true });
-        }
-    }
-
-    /**
-     * Updates the local cache with remote changes by retrieving all mutations to `path` since given `cursor` and applying them to the local cache database.
-     * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
-     * @param {string} [path=''] Path to update. The root path will be used if not given, synchronizing the entire database.
-     * @param {string} [cursor] A previously acquired cursor to update the cache with. If not specified, `path`'s entire value will be loaded from the server.
-     * @returns {Promise<{ path: string, used_cursor: string, new_cursor: string, loaded_value: boolean, changes: Array<{ path: string, previous: any, value: any, context: any }> }>}
-     */
-     async updateCache(path = '', cursor) {
-        if (!this._cache) { throw new Error(`No cache database used`); }
-        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
-        const cacheApi = this._cache.db.api;
-        let loadValue = cursor === null || typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
-        if (loadValue) {
-            // Load from server, store in cache (.get takes care of that)
-            const { value, context } = await this.get(path, { cache_mode: 'bypass' });
-            return { path, used_cursor: cursor, new_cursor: context.acebase_cursor, loaded_value: true, changes: [] };
-        }
-        // Get effective changes from server
-        const { changes, new_cursor } = await this.getChanges({ path, cursor });
-        for (let ch of changes) {
-            // Apply to local cache
-            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, ch.path);
-            const options = { context: ch.context, suppress_events: false };
-            if (ch.type === 'update') {
-                await cacheApi.update(cachePath, ch.value, options);
-            }
-            else if (ch.type === 'set') {
-                await cacheApi.set(cachePath, ch.value, options);
-            }
-        }
-        return { path, used_cursor: cursor, new_cursor, loaded_value: false, changes };
-    }
-
-    /**
-     * 
-     * @param {string} path 
-     * @param {object} query 
-     * @param {Array<{ key: string, op: string, compare: any}>} query.filters
-     * @param {number} query.skip number of results to skip, useful for paging
-     * @param {number} query.take max number of results to return
-     * @param {Array<{ key: string, ascending: boolean }>} query.order
-     * @param {object} [options]
-     * @param {boolean} [options.snapshots=false] whether to return matching data, or paths to matching nodes only
-     * @param {string[]} [options.include] when using snapshots, keys or relative paths to include in result data
-     * @param {string[]} [options.exclude] when using snapshots, keys or relative paths to exclude from result data
-     * @param {boolean} [options.child_objects] when using snapshots, whether to include child objects in result data
-     * @param {'allow'|'bypass'|'force'} [options.cache_mode] Whether to allow, force or bypass cache
-     * @param {(event: { name: string, [key]: any }) => void} [options.eventHandler]
-     * @param {object} [options.monitor] NEW (BETA) monitor changes
-     * @param {boolean} [options.monitor.add=false] monitor new matches (either because they were added, or changed and now match the query)
-     * @param {boolean} [options.monitor.change=false] monitor changed children that still match this query
-     * @param {boolean} [options.monitor.remove=false] monitor children that don't match this query anymore
-     * @ param {(event:string, path: string, value?: any) => boolean} [options.monitor.callback] NEW (BETA) callback with subscription to enable monitoring of new matches
-     * @returns {Promise<{ results: Array<object[]|string[]>, context: any, stop(): Promise<void> }} returns a promise that resolves with matching data or paths in `results`
-     */
-     async query(path, query, options = { snapshots: false, cache_mode: 'allow', eventListener: undefined, monitor: { add: false, change: false, remove: false } }) {
-        const useCache = this._cache && (options.cache_mode === 'force' || (options.cache_mode === 'allow' && !this.isConnected));
-        if (useCache) {
-            // Not connected, or "force" cache_mode: query cache db
-            const data = await this._cache.db.api.query(PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
-            let { results, context } = data;
-            if (!('results' in data && 'context' in data)) {
-                // OLD api did not return context
-                console.warn(`Missing context from local query results. Update your acebase package`);
-                results = data;
-                context = {};
-            }
-            context.acebase_origin = 'cache';
-            delete context.acebase_cursor; // Do NOT pass along use cache cursor!!
-            return { results, context };
-        }
-        const request = {
-            query,
-            options
-        };
-        if (options.monitor === true || (typeof options.monitor === 'object' && (options.monitor.add || options.monitor.change || options.monitor.remove))) {
-            console.assert(typeof options.eventHandler === 'function', `no eventHandler specified to handle realtime changes`);
-            if (!this.socket) {
-                throw new Error(`Cannot create realtime query because websocket is not connected. Check your AceBaseClient network.realtime setting`);
-            }
-            request.query_id = ID.generate();
-            request.client_id = this.socket.id;
-            this._realtimeQueries[request.query_id] = { query, options };
-        }
-        const reqData = JSON.stringify(Transport.serialize(request));
-        try {
-            const { data, context } = await this._request({ method: 'POST', url: `${this.url}/query/${this.dbname}/${path}`, data: reqData, includeContext: true });
-            let results = Transport.deserialize(data);
-            context.acebase_origin = 'server';
-            const stop = async () => {
-                // Stops subscription of realtime query results. Requires acebase-server v1.10.0+
-                delete this._realtimeQueries[request.query_id];
-                await _websocketRequest(socket, "query-unsubscribe", { query_id: request.query_id });
-            };
-            return { results: results.list, context, stop };
-        }
-        catch (err) {
-            throw err;
-        }
-    }
-
-    async createIndex(path, key, options) {
-        if (options && options.config && Object.values(options.config).find(val => typeof val === 'function')) {
-            throw new Error(`Cannot create an index with callback functions through a client. Move your code serverside`);
-        }
-        const version = this._serverVersion.split('.');
-        if (version.length === 3 && +version[0] >= 1 && +version[1] >= 10) {
-            // acebase-server v1.10+ has a new dedicated endpoint at /index/dbname/create
-            const data = JSON.stringify({ path, key, options });
-            return await this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}/create`, data }); 
-        }
-        else {
-            const data = JSON.stringify({ action: 'create', path, key, options });
-            return await this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}`, data });
-        }
-    }
-
-    getIndexes() {
-        return this._request({ url: `${this.url}/index/${this.dbname}` });
-    }
-
-    async deleteIndex(fileName) {
-        // Requires acebase-server v1.10+
-        const version = this._serverVersion.split('.');
-        if (version.length === 3 && +version[0] >= 1 && +version[1] >= 10) {
-            const data = JSON.stringify({ fileName });
-            return this._request({ method: 'POST', url: `${this.url}/index/${this.dbname}/delete`, data });
-        }
-        else {
-            throw new Error(`not supported, requires acebase-server 1.10 or higher`);
-        }
-    }
-
-    reflect(path, type, args) {
-        let url = `${this.url}/reflect/${this.dbname}/${path}?type=${type}`;
-        if (typeof args === 'object') {
-            let query = Object.keys(args).map(key => {
-                return `${key}=${args[key]}`;
-            });
-            if (query.length > 0) {
-                url += `&${query.join('&')}`;
-            }
-        }
-        return this._request({ url });
-    }
-
-    export(path, write, options = { format: 'json', type_safe: true }) {
-        options.format = 'json';
-        options.type_safe = options.type_safe !== false;
-        if (typeof write != 'function') {
-            write = write.write.bind(write);
-        }
-        const url = `${this.url}/export/${this.dbname}/${path}?format=${options.format}&type_safe=${options.type_safe ? 1 : 0}`;
-        return this._request({ url, dataReceivedCallback: chunk => write(chunk) });
-    }
-
-    import(path, read, options = { format: 'json', suppress_events: false }) {
-        options.format = 'json';
-        options.suppress_events = options.suppress_events === true;
-        const url = `${this.url}/import/${this.dbname}/${path}?format=${options.format}&suppress_events=${options.suppress_events ? 1 : 0}`;
-        return this._request({ method: 'POST', url, dataRequestCallback: length => read(length) });
-    }
-
-    get serverPingUrl() {
-        return `${this.url}/ping/${this.dbname}`;
-    }
-
-    async getServerInfo() {
-        const info = await this._request({ url: `${this.url}/info/${this.dbname}` }).catch(err => {
-            // Prior to acebase-server v0.9.37, info was at /info (no dbname attached)
-            if (!err.isNetworkError) {
-                this.debug.warn(`Could not get server info, update your acebase server version`);
-            }
-            return { version: 'unknown', time: Date.now() };
-        });
-        this._serverVersion = info.version;
-        return info;
-    }
-
-    setSchema(path, schema) {
-        if (schema !== null) {
-            schema = (new SchemaDefinition(schema)).text;
-        }
-        const data = JSON.stringify({ action: "set", path, schema });
-        return this._request({ method: 'POST', url: `${this.url}/schema/${this.dbname}`, data })
-        .catch(err => {
-            throw err;
-        });
-    }
-
-    getSchema(path) {
-        return this._request({ url: `${this.url}/schema/${this.dbname}/${path}` })
-        .catch(err => {
-            throw err;
-        });
-    }
-
-    getSchemas() {
-        return this._request({ url: `${this.url}/schema/${this.dbname}` })
-        .catch(err => {
-            throw err;
-        });
-    }
-
-    validateSchema(path, value, isUpdate) {
-        throw new Error(`Manual schema validation can only be used on standalone databases`);
-    }
-}
-
-module.exports = { WebApi };
-},{"./base64":9,"./errors":11,"./promise-timeout":14,"./request":15,"./request/error":16,"acebase-core":30,"socket.io-client":5}],8:[function(require,module,exports){
-const { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult } = require('./user');
-// const { AceBaseClient } = require('./acebase-client');
-
-class AceBaseClientAuth {
-
-    /**
-     * 
-     * @param {AceBaseClient} client 
-     */
-    constructor(client, eventCallback) {
-        this.client = client;
-        this.eventCallback = eventCallback;
-
-        this.user = null;
-        this.accessToken = null;
-    }
-
-    /**
-     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
-     * @param {string} username Your database username
-     * @param {string} password Your password
-     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
-     */
-    async signIn(username, password) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        const details = await this.client.api.signIn(username, password);
-        if (this.user) { this.eventCallback("signout", { source: "signin", user: this.user }); }
-        this.accessToken = details.accessToken;
-        this.user = new AceBaseUser(details.user);
-        this.eventCallback("signin", { source: "signin", user: this.user, accessToken: this.accessToken });
-        return { user: this.user, accessToken: this.accessToken };
-    }
-
-    /**
-     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
-     * @param {string} email Your email address
-     * @param {string} password Your password
-     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
-     */
-    async signInWithEmail(email, password) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        const details = await this.client.api.signInWithEmail(email, password);
-        if (this.user) { this.eventCallback("signout", { source: "email_signin", user: this.user }); }
-        this.accessToken = details.accessToken;
-        this.user = new AceBaseUser(details.user);
-        this.eventCallback("signin", { source: "email_signin", user: this.user, accessToken: this.accessToken });
-        return { user: this.user, accessToken: this.accessToken }; //success: true, 
-    }
-
-    /**
-     * Sign into an account using a previously assigned access token
-     * @param {string} accessToken a previously assigned access token
-     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token. If the token is not right, the thrown `error.code` will be `'not_found'` or `'invalid_token'`
-     */
-    async signInWithToken(accessToken) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        const details = await this.client.api.signInWithToken(accessToken);
-        if (this.user) { this.eventCallback("signout", { source: "token_signin", user: this.user }); }
-        this.accessToken = details.accessToken;
-        this.user = new AceBaseUser(details.user);
-        this.eventCallback("signin", { source: "token_signin", user: this.user, accessToken: this.accessToken });
-        return { user: this.user, accessToken: this.accessToken }; // success: true, 
-    }
-
-    /**
-     * If the client is offline, you can specify an access token to automatically try signing in the user once a connection is made. 
-     * Doing this is recommended if you are subscribing to event paths that require user authentication/authorization. Subscribing to
-     * those server events will then be done after signing in, instead of failing after connecting anonymously.
-     * @param {string} accessToken A previously acquired access token
-     */
-    setAccessToken(accessToken) {
-        this.client.api.setAccessToken(accessToken);
-    }
-
-    /**
-     * If the server has been configured with OAuth providers, use this to kick off the authentication flow.
-     * This method returs a Promise that resolves with the url you have to redirect your user to authenticate 
-     * with the requested provider. After the user has authenticated, they will be redirected back to your callbackUrl.
-     * Your code in the callbackUrl will have to call finishOAuthProviderSignIn with the result querystring parameter
-     * to finish signing in.
-     * @param {string} providerName one of the configured providers (eg 'facebook', 'google', 'apple', 'spotify')
-     * @param {string} callbackUrl url on your website/app that will receive the sign in result
-     * @param {any} [options] optional provider specific authentication settings
-     * @returns {Promise<string>} returns a Promise that resolves with the url you have to redirect your user to.
-     */
-    async startAuthProviderSignIn(providerName, callbackUrl, options) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        const details = await this.client.api.startAuthProviderSignIn(providerName, callbackUrl, options);
-        return details.redirectUrl;
-    }
-
-    /**
-     * Use this method to finish OAuth flow from your callbackUrl.
-     * @param {string} callbackResult result received in your.callback/url?result
-     * @returns {Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }>}
-     */
-    async finishAuthProviderSignIn(callbackResult) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        const details = await this.client.api.finishAuthProviderSignIn(callbackResult);
-        const isOtherUser = !this.user || this.user.uid !== details.user.uid;
-        isOtherUser && this.eventCallback("signout", { source: "oauth_signin", user: this.user });
-        this.accessToken = details.accessToken;
-        this.user = new AceBaseUser(details.user);
-        isOtherUser && this.eventCallback("signin", { source: "oauth_signin", user: this.user, accessToken: this.accessToken });
-        return { user: this.user, accessToken: this.accessToken, provider: details.provider }; // success: true, 
-    }
-
-    /**
-     * Refreshes an expiring access token with the refresh token returned from finishAuthProviderSignIn
-     * @param {string} providerName
-     * @param {string} refreshToken 
-     * @returns {Promise<{ provider: IAceBaseAuthProviderTokens }}
-     */
-    async refreshAuthProviderToken(providerName, refreshToken) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        const details = await this.client.api.refreshAuthProviderToken(providerName, refreshToken);
-        return { provider: details.provider };
-    }
-
-    /**
-     * Signs in with an external auth provider by redirecting the user to the provider's login page.
-     * After signing in, the user will be redirected to the current browser url. Execute
-     * getRedirectResult() when your page is loaded again to check if the user was authenticated.
-     * @param {string} providerName 
-     */
-    async signInWithRedirect(providerName) {
-        if (typeof window === 'undefined') {
-            throw new Error(`signInWithRedirect can only be used within a browser context`);
-        }
-        const redirectUrl = await this.startAuthProviderSignIn(providerName, window.location.href);
-        window.location.href = redirectUrl;
-    }
-
-    /** 
-     * Checks if the user authentication with an auth provider. 
-     */
-    async getRedirectResult() {
-        if (typeof window === 'undefined') {
-            throw new Error(`getRedirectResult can only be used within a browser context`);
-        }
-        const match = window.location.search.match(/[?&]result=(.*?)(?:&|$)/);
-        const callbackResult = match && decodeURIComponent(match[1]);
-        if (!callbackResult) {
-            return null;
-        }
-        return await this.finishAuthProviderSignIn(callbackResult);
-    }
-
-    /**
-     * Signs out of the current account
-     * @param {object|boolean} [options] options object, or boolean specifying whether to signout everywhere
-     * @param {boolean} [options.everywhere] whether to sign out all clients, or only this one
-     * @param {boolean} [options.clearCache] whether to clear the cache database (if used)
-     * @returns {Promise<void>} returns a promise that resolves when user was signed out successfully
-     */
-    async signOut(options) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        else if (!this.user) {
-            throw { code: 'not_signed_in', message: 'Not signed in!' };
-        }
-        if (this.client.isConnected) {
-            await this.client.api.signOut(options);
-        }
-        this.accessToken = null;
-        let user = this.user;
-        this.user = null;
-        this.eventCallback("signout", { source: 'signout', user });
-    }
-
-    /**
-     * Changes the password of the currrently signed into account
-     * @param {string} oldPassword 
-     * @param {string} newPassword 
-     * @returns {Promise<{ accessToken: string }>} returns a promise that resolves with a new access token
-     */
-    async changePassword(oldPassword, newPassword) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        else if (!this.user) {
-            throw { code: 'not_signed_in', message: 'Not signed in!' };
-        }
-        const result = await this.client.api.changePassword(this.user.uid, oldPassword, newPassword);
-        this.accessToken = result.accessToken;
-        this.eventCallback("signin", { source: "password_change", user: this.user, accessToken: this.accessToken });
-        return { accessToken: result.accessToken }; //success: true, 
-    }
-
-    /**
-     * Requests a password reset for the account with specified email address
-     * @param {string} email
-     * @returns {Promise<void>} returns a promise that resolves once the request has been processed
-     */
-    async forgotPassword(email) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        return await this.client.api.forgotPassword(email);
-    }
-
-    /**
-     * Requests a password to be changed using a previously acquired reset code, sent to the email address with forgotPassword
-     * @param {string} resetCode
-     * @param {string} newPassword
-     * @returns {Promise<void>} returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
-     */
-    async resetPassword(resetCode, newPassword) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        return await this.client.api.resetPassword(resetCode, newPassword);
-    }
-
-    /**
-     * Verifies an e-mail address using the code sent to the email address upon signing up
-     * @param {string} verificationCode
-     * @returns {Promise<void>} returns a promise that resolves when verification was successful
-     */
-    async verifyEmailAddress(verificationCode) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        return await this.client.api.verifyEmailAddress(verificationCode);
-    }
-
-    /**
-     * Updates one or more user account details
-     * @param {object} details 
-     * @param {string} [details.username] New username
-     * @param {string} [details.email] New email address
-     * @param {string} [details.display_name] New display name
-     * @param {{ url: string, width: number, height: number }} [details.picture] New profile picture
-     * @param {object} [details.settings] selection of user settings to update
-     * @returns returns a promise with the updated user details
-     */
-    async updateUserDetails(details) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        if (!this.user) {
-            throw { code: 'not_signed_in', message: 'Not signed in!' };
-        }
-        if (typeof details !== 'object') {
-            throw { code: 'invalid_details', message: 'details must be an object' };
-        }
-        const result = await this.client.api.updateUserDetails(details);
-        Object.keys(result.user).forEach(key => {
-            this.user[key] = result.user[key];
-        });
-        return { user: this.user }; // success: true
-    }
-
-    /**
-     * Changes the username of the currrently signed into account
-     * @param {string} newUsername 
-     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
-     */
-    async changeUsername(newUsername) {
-        return await this.updateUserDetails({ username: newUsername });
-    }
-
-    /**
-     * Changes the display name of the currrently signed into account
-     * @param {string} newName 
-     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
-     */
-    async changeDisplayName(newName) {
-        return await this.updateUserDetails({ display_name: newName });
-    }
-
-    /**
-     * Changes the email address of the currrently signed in user
-     * @param {string} newEmail 
-     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
-     */
-    async changeEmail(newEmail) {
-        return await this.updateUserDetails({ email: newEmail });
-    }
-
-    /**
-     * Changes the user's profile picture
-     * @param {object} newPicture
-     * @param {string} newPicture.url
-     * @param {number} newPicture.width
-     * @param {number} newPicture.height
-     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
-     */
-     async changePicture(newPicture) {
-        return await this.updateUserDetails({ picture: newPicture });
-    }
-
-    /**
-     * Updates settings of the currrently signed in user. Passed settings will be merged with the user's current settings
-     * @param {{ [key:string]: string|number|boolean }} settings - the settings to update
-     * @returns {Promise<{ user: AceBaseUser }>} returns a promise that resolves with the updated user details
-     */
-    async updateUserSettings(settings) {
-        return await this.updateUserDetails({ settings });
-    }
-
-    /**
-     * Creates a new user account with the given details. If successful, you will automatically be 
-     * signed into the account. Note: the request will fail if the server has disabled this option
-     * @param {object} details
-     * @param {string} [details.username] 
-     * @param {string} [details.email] 
-     * @param {string} details.password
-     * @param {string} details.displayName
-     * @param {{ [key:string]: string|number|boolean }} [details.settings] optional settings 
-     * @returns {Promise<{ user: AceBaseUser, accessToken: string }>} returns a promise that resolves with the signed in user and access token
-     */
-    async signUp(details) {
-        if (!details.username && !details.email) {
-            throw { code: 'invalid_details', message: 'No username or email set' };
-        }
-        if (!details.password) {
-            throw { code: 'invalid_details', message: 'No password given' };
-        }
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        const isAdmin = this.user && this.user.uid === 'admin';
-        if (this.user && !isAdmin) {
-            // Sign out of current account
-            let user = this.user;
-            this.user = null;
-            this.eventCallback("signout", { source: 'signup', user } );
-        }
-        const result = await this.client.api.signUp(details, !isAdmin);
-        if (isAdmin) {
-            return { user: result.user };
-        }
-        else {
-            // Sign into new account
-            this.accessToken = result.accessToken;
-            this.user = new AceBaseUser(result.user);
-            this.eventCallback("signin", { source: "signup", user: this.user, accessToken: this.accessToken });
-            return { user: this.user, accessToken: this.accessToken }; //success: true, 
-        }
-    }
-
-    /**
-     * Removes the currently signed in user account and signs out. Note: this will only
-     * remove the database user account, not any data stored in the database by this user. It is
-     * your own responsibility to remove that data.
-     * @param {string} [uid] for admin user only: remove account with uid
-     * @returns {Promise<void>}
-     */
-    async deleteAccount(uid) {
-        if (!this.client.isReady) {
-            await this.client.ready();
-        }
-        if (!this.user) {
-            throw { code: 'not_signed_in', message: 'Not signed in!' };
-        }
-        if (uid && this.user.uid !== 'admin') {
-            throw { code: 'not_admin', message: 'Cannot remove other accounts than signed into account, unless you are admin' };
-        }
-        const deleteUid = uid || this.user.uid;
-        if (deleteUid === 'admin') {
-            throw { code: 'not_allowed', message: 'Cannot remove admin user' };
-        }
-        const signOut = this.user.uid !== 'admin';
-        const result = await this.client.api.deleteAccount(deleteUid, signOut);
-        if (signOut) {
-            // Sign out of the account
-            this.accessToken = null;
-            let user = this.user;
-            this.user = null;
-            this.eventCallback("signout", { source: 'delete_account', user });
-        }
-    }
-}
-
-module.exports = { AceBaseClientAuth };
-},{"./user":18}],9:[function(require,module,exports){
-const Base64 = {
-    encode(str) {
-        return btoa(unescape(encodeURIComponent(str)));
-    },
-    decode(base64) {
-        return decodeURIComponent(escape(atob(base64)));
-    }
-};
-module.exports = Base64;
-},{}],10:[function(require,module,exports){
-/*
-    * This file is used to generate a browser bundle to use as an include
-    (re)generate it with: npm run browserify
-
-    * To use AceBaseClient in the browser:
-    <script type="text/javascript" src="dist/browser.min.js"></script>
-    <script type="text/javascript">
-        const db = new AceBaseClient({ dbname: 'dbname', host: 'localhost', port: 3000, https: false });
-        db.ready(() => {
-            // Ready to do some work
-        })
-    </script>
-*/
-
-const acebaseclient = require('./index');
-
-window.acebaseclient = acebaseclient;
-window.AceBaseClient = acebaseclient.AceBaseClient; // Shortcut to AceBaseClient
-module.exports = acebaseclient;
-},{"./index":12}],11:[function(require,module,exports){
-
-class CachedValueUnavailableError extends Error {
-    constructor(path, message) {
-        super(message || `Value for path "/${path}" is not available in cache`);
-        this.path = path;
-    }
-}
-
-module.exports = { CachedValueUnavailableError };
-},{}],12:[function(require,module,exports){
-const { DataReference, DataSnapshot, EventSubscription, PathReference, TypeMappings, ID, proxyAccess, ObjectCollection, PartialArray, Transport } = require('acebase-core');
-const { AceBaseClient } = require('./acebase-client');
-const { ServerDate } = require('./server-date');
-const { CachedValueUnavailableError } = require('./errors');
-
-module.exports = {
-    AceBaseClient,
-    DataReference, 
-    DataSnapshot, 
-    EventSubscription, 
-    PathReference, 
-    TypeMappings,
-    ID,
-    proxyAccess,
-    ServerDate,
-    ObjectCollection,
-    CachedValueUnavailableError,
-    PartialArray,
-    Transport
-};
-},{"./acebase-client":6,"./errors":11,"./server-date":17,"acebase-core":30}],13:[function(require,module,exports){
-module.exports = performance;
-},{}],14:[function(require,module,exports){
-class PromiseTimeoutError extends Error {}
-function promiseTimeout(promise, ms, comment) {
-    return new Promise((resolve, reject) => {
-        let timeout;
-        function success(result) {
-            clearTimeout(timeout);
-            resolve(result);
-        }
-        promise.then(success).catch(reject);
-        timeout = setTimeout(() => reject(new PromiseTimeoutError(`Promise ${comment ? `"${comment}" ` : ''}timed out after ${ms}ms`)), ms);
-    });
-}
-module.exports = { PromiseTimeoutError, promiseTimeout };
-},{}],15:[function(require,module,exports){
-const { AceBaseRequestError } = require('./error');
-
-/**
- * @returns {Promise<{ context: any, data: any }>} returns a promise that resolves with an object containing data and an optionally returned context
- */
-async function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, dataRequestCallback: null, context: null }) {
-    let postData = options.data;
-    if (typeof postData === 'undefined' || postData === null) {
-        postData = '';
-    }
-    else if (typeof postData === 'object') {
-        postData = JSON.stringify(postData);
-    }
-    const headers = {
-        'AceBase-Context': JSON.stringify(options.context || null)
-    };
-    const init = {
-        method,
-        headers
-    };
-    if (typeof options.dataRequestCallback === 'function') {
-        // Stream data to the server instead of posting all from memory at once
-        headers['Content-Type'] = 'text/plain'; // Prevent server middleware parsing the content as JSON
-        
-        const supportsStreaming = false;
-        if (supportsStreaming) {
-            // Streaming uploads appears not to be implemented in Chromium/Chrome yet. 
-            // Setting the body property to a ReadableStream results in the string "[object ReadableStream]"
-            // See https://bugs.chromium.org/p/chromium/issues/detail?id=688906 and https://stackoverflow.com/questions/40939857/fetch-with-readablestream-as-request-body
-            let canceled = false;
-            init.body = new ReadableStream({
-                async pull(controller) {
-                    const chunkSize = controller.desiredSize || 1024 * 16;
-                    let chunk = await options.dataRequestCallback(chunkSize);
-                    if (canceled || [null,''].includes(chunk)) {
-                        controller.close();
-                    }
-                    else {
-                        controller.enqueue(chunk);
-                    }
-                },
-                async start(controller) {},
-                cancel() {
-                    canceled = true;
-                }
-            });
-        }
-        else {
-            // Streaming not supported
-            postData = '';
-            const chunkSize = 1024 * 512; // Use large chunk size, we have to store everything in memory anyway.
-            let chunk;
-            while ((chunk = await options.dataRequestCallback(chunkSize))) {
-                postData += chunk;
-            }
-            init.body = postData;
-        }
-    }
-    else if (postData.length > 0) {
-        headers['Content-Type'] = 'application/json';
-        init.body = postData;
-    }
-    if (options.accessToken) {
-        headers['Authorization'] = `Bearer ${options.accessToken}`;
-    }
-    const request = { url, method, headers };
-    const res = await fetch(request.url, init).catch(err => {
-        // console.error(err);
-        throw new AceBaseRequestError(request, null, 'fetch_failed', err.message);
-    });
-    let data = '';
-    if (typeof options.dataReceivedCallback === 'function') {
-        // Stream response
-        const reader = res.body.getReader();
-        await new Promise((resolve, reject) => {
-            (function readNext() {
-                reader.read()
-                .then(result => {
-                    options.dataReceivedCallback(result.value);
-                    if (result.done) { return resolve(); }
-                    readNext();
-                })
-                .catch(err => {
-                    reader.cancel('error');
-                    reject(err);
-                });
-            })();
-        })
-    }
-    else {
-        data = await res.text();
-    }
-
-    const isJSON = data[0] === '{' || data[0] === '['; // || (res.headers['content-type'] || '').startsWith('application/json')
-    if (res.status === 200) {
-        let context = res.headers.get('AceBase-Context');
-        if (context && context[0] === '{') { context = JSON.parse(context); }
-        else { context = {}; }
-        if (isJSON) { data = JSON.parse(data); }
-        return { context, data };
-    }
-    else {
-        request.body = postData;
-        const response = {
-            statusCode: res.status,
-            statusMessage: res.statusText,
-            headers: res.headers,
-            body: data
-        };
-        let code = res.status, message = res.statusText;
-        if (isJSON) {
-            let err = JSON.parse(data);
-            if (err.code) { code = err.code; }
-            if (err.message) { message = err.message; }
-        }
-        throw(new AceBaseRequestError(request, response, code, message));
-    }
-
-}
-
-module.exports = request;
-},{"./error":16}],16:[function(require,module,exports){
-class AceBaseRequestError extends Error {
-    get isNetworkError() {
-        return this.response === null;
-    }
-    constructor(request, response, code, message) {
-        super(message);
-        this.code = code;
-        this.request = request;
-        this.response = response;
-    }
-}
-const NOT_CONNECTED_ERROR_MESSAGE = 'remote database is not connected'; //'AceBaseClient is not connected';
-
-module.exports = { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE };
-},{}],17:[function(require,module,exports){
-const { ID } = require('acebase-core');
-const performance = require('./performance');
-
-let time = {
-    serverBias: 0,
-    localBias: 0,
-    lastTime: Date.now(),
-    lastPerf: performance.now(),
-    get bias() { return this.serverBias + this.localBias; }
-};
-
-function biasChanged() {
-    console.log(`Bias changed. server bias = ${time.serverBias}ms, local bias = ${time.localBias}ms`);
-    ID.timeBias = time.bias; // undocumented
-}
-
-// Keep monitoring local time for changes, adjust local bias accordingly
-const interval = 10000; // 10s
-function checkLocalTime() {
-    // console.log('Checking time...');
-    const now = Date.now(), // eg 20:00:00
-        perf = performance.now(),
-        msPassed = perf - time.lastPerf, // now - time.lastTime, //
-        expected = time.lastTime + Math.round(msPassed), // 19:00:00
-        diff = expected - now; // -1h
-
-    if (Math.abs(diff) > 1) {
-        console.log(`Local time changed. diff = ${diff}ms`);
-        time.localBias += diff;
-        biasChanged();
-    }
-    time.lastTime = now;
-    time.lastPerf = perf;
-    scheduleLocalTimeCheck();
-}
-function scheduleLocalTimeCheck() {
-    const timeout = setTimeout(checkLocalTime, interval);
-    timeout.unref && timeout.unref(); // Don't delay exiting the main process when the event loop is empty
-}
-scheduleLocalTimeCheck();
-
-function setServerBias(bias) {
-    if (typeof bias === 'number') {
-        time.serverBias = bias;
-        time.localBias = 0;
-        biasChanged();
-    }
-}
-
-class ServerDate extends Date {
-    constructor() {
-        const biasedTime = Date.now() + time.bias;
-        super(biasedTime);
-    }
-}
-
-module.exports = { ServerDate, setServerBias };
-},{"./performance":13,"acebase-core":30}],18:[function(require,module,exports){
-
-class AceBaseUser {
-    /**
-     * 
-     * @param {{ uid: string, username?: string, email?: string, displayName: string, created: Date, last_signin: Date, last_signin_ip: string settings: { [key:string]: string|number|boolean } }} user
-     */
-    constructor(user) {
-        // /** @type {string} unique id */
-        // this.uid = user.uid;
-        // /** @type {string?} username */
-        // this.username = user.username;
-        // /** @type {string?} email address */
-        // this.email = user.email;
-        // /** @type {string?} display or screen name */
-        // this.displayName = user.displayName;
-        // this.settings = user.settings;
-        // this.created = user.created;
-        // this.last_signin = user.last_signin;
-        // this.last_signin_ip = user.last_signin_ip;
-        // this.prev_signin = user.prev_signin;
-        // this.prev_signin_ip = user.prev_signin_ip;
-        Object.assign(this, user);
-    }
-}
-
-class AceBaseSignInResult {
-    /**
-     * 
-     * @param {object} result 
-     * @param {boolean} result.success
-     * @param {AceBaseUser} [result.user]
-     * @param {string} [result.accessToken]
-     * @param {{ code: string, message: string }} [result.reason]
-     */
-    constructor(result) {
-        this.success = result.success;
-        if (result.success) {
-            this.user = result.user;
-            this.accessToken = result.accessToken;
-        }
-        else {
-            this.reason = result.reason;
-        }
-    }
-}
-
-class AceBaseAuthResult {
-    /**
-     * 
-     * @param {object} result 
-     * @param {boolean} result.success
-     * @param {{ code: string, message: string }} [result.reason]
-     */
-    constructor(result) {
-        this.success = result.success;
-        if (!result.success) {
-            this.reason = result.reason;
-        }
-    }
-}
-
-module.exports = { AceBaseUser, AceBaseSignInResult, AceBaseAuthResult };
 },{}],19:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -5298,6 +5325,7 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
      */
     constructor(dbname, options) {
         super();
+        this._ready = false;
         options = new AceBaseBaseSettings(options || {});
         this.name = dbname;
         // Setup console logging
@@ -5326,56 +5354,46 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
         });
     }
     /**
-     *
-     * @param {()=>void} [callback] (optional) callback function that is called when ready. You can also use the returned promise
-     * @returns {Promise<void>} returns a promise that resolves when ready
+     * Waits for the database to be ready before running your callback.
+     * @param callback (optional) callback function that is called when the database is ready to be used. You can also use the returned promise.
+     * @returns returns a promise that resolves when ready
      */
-    ready(callback = undefined) {
-        if (this._ready === true) {
-            // ready event was emitted before
-            callback && callback();
-            return Promise.resolve();
-        }
-        else {
+    async ready(callback) {
+        if (!this._ready) {
             // Wait for ready event
-            let resolve;
-            const promise = new Promise(res => resolve = res);
-            this.on('ready', () => {
-                resolve();
-                callback && callback();
-            });
-            return promise;
+            await new Promise(resolve => this.on('ready', resolve));
         }
+        callback === null || callback === void 0 ? void 0 : callback();
     }
     get isReady() {
-        return this._ready === true;
+        return this._ready;
     }
     /**
      * Allow specific observable implementation to be used
-     * @param {Observable} Observable Implementation to use
+     * @param ObservableImpl Implementation to use
      */
-    setObservable(Observable) {
-        (0, optional_observable_1.setObservable)(Observable);
+    setObservable(ObservableImpl) {
+        (0, optional_observable_1.setObservable)(ObservableImpl);
     }
     /**
      * Creates a reference to a node
-     * @param {string} path
-     * @returns {DataReference} reference to the requested node
+     * @param path
+     * @returns reference to the requested node
      */
     ref(path) {
         return new data_reference_1.DataReference(this, path);
     }
     /**
      * Get a reference to the root database node
-     * @returns {DataReference} reference to root node
+     * @returns reference to root node
      */
     get root() {
         return this.ref('');
     }
     /**
      * Creates a query on the requested node
-     * @param {string} path
-     * @returns {DataReferenceQuery} query for the requested node
+     * @param path
+     * @returns query for the requested node
      */
     query(path) {
         const ref = new data_reference_1.DataReference(this, path);
@@ -5395,14 +5413,9 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
              * will index "system/users/user1/name", "system/users/user2/name" etc.
              * You can also use wildcard paths to enable indexing and quering of fragmented data.
              * Example: path "users/*\/posts", key "title": will index all "title" keys in all posts of all users.
-             * @param {string} path path to the container node
-             * @param {string} key name of the key to index every container child node
-             * @param {object} [options] any additional options
-             * @param {string} [options.type] type of index to create, such as `fulltext`, `geo`, `array` or `normal` (default)
-             * @param {string[]} [options.include] keys to include in the index. Speeds up sorting on these columns when the index is used (and dramatically increases query speed when .take(n) is used in addition)
-             * @param {boolean} [options.rebuild] whether to rebuild the index if it exists already
-             * @param {string} [options.textLocale] If the indexed values are strings, which default locale to use
-             * @param {object} [options.config] additional index-specific configuration settings
+             * @param path path to the container node
+             * @param key name of the key to index every container child node
+             * @param options any additional options
              */
             create: (path, key, options) => {
                 return this.api.createIndex(path, key, options);
@@ -5446,7 +5459,7 @@ class NotImplementedError extends Error {
  */
 class Api {
     // eslint-disable-next-line @typescript-eslint/no-empty-function
-    constructor(dbname, settings, readyCallback) { }
+    constructor() { }
     /**
      * Provides statistics
      * @param options
@@ -5466,8 +5479,8 @@ class Api {
     exists(path) { throw new NotImplementedError('exists'); }
     query(path, query, options) { throw new NotImplementedError('query'); }
     reflect(path, type, args) { throw new NotImplementedError('reflect'); }
-    export(path, arg, options) { throw new NotImplementedError('export'); }
-    import(path, stream, options) { throw new NotImplementedError('import'); }
+    export(path, write, options) { throw new NotImplementedError('export'); }
+    import(path, read, options) { throw new NotImplementedError('import'); }
     /** Creates an index on key for all child nodes at path */
     createIndex(path, key, options) { throw new NotImplementedError('createIndex'); }
     getIndexes() { throw new NotImplementedError('getIndexes'); }
@@ -6659,6 +6672,22 @@ function removeVoidProperties(obj) {
         }
     });
 }
+/**
+ * Convenience function to access ILiveDataProxyValue methods on a proxied value
+ * @param proxiedValue The proxied value to get access to
+ * @returns Returns the same object typecasted to an ILiveDataProxyValue
+ * @example
+ * // IChatMessages is an ObjectCollection<IChatMessage>
+ * let observable: Observable<IChatMessages>;
+ *
+ * // Allows you to do this:
+ * observable = proxyAccess<IChatMessages>(chat.messages).getObservable();
+ *
+ * // Instead of:
+ * observable = (chat.messages.msg1 as any as ILiveDataProxyValue<IChatMessages>).getObservable();
+ *
+ * // Both do the exact same, but the first is less obscure
+ */
 function proxyAccess(proxiedValue) {
     if (typeof proxiedValue !== 'object' || !proxiedValue[isProxy]) {
         throw new Error('Given value is not proxied. Make sure you are referencing the value through the live data proxy.');
@@ -6901,18 +6930,13 @@ class DataReference {
      * Creates a reference to a node
      */
     constructor(db, path, vars) {
+        this.db = db;
         if (!path) {
             path = '';
         }
         path = path.replace(/^\/|\/$/g, ''); // Trim slashes
         const pathInfo = path_info_1.PathInfo.get(path);
-        const key = pathInfo.key; //path.length === 0 ? "" : path.substr(path.lastIndexOf("/") + 1); //path.match(/(?:^|\/)([a-z0-9_$]+)$/i)[1];
-        // const query = {
-        //     filters: [],
-        //     skip: 0,
-        //     take: 0,
-        //     order: []
-        // };
+        const key = pathInfo.key;
         const callbacks = [];
         this[_private] = {
             get path() { return path; },
@@ -6923,9 +6947,8 @@ class DataReference {
             pushed: false,
             cursor: null,
         };
-        this.db = db; //Object.defineProperty(this, "db", ...)
     }
-    context(context = undefined, merge = false) {
+    context(context, merge = false) {
         const currentContext = this[_private].context;
         if (typeof context === 'object') {
             const newContext = context ? merge ? currentContext || {} : context : {};
@@ -6979,7 +7002,7 @@ class DataReference {
     }
     /**
      * Contains values of the variables/wildcards used in a subscription path if this reference was
-     * created by an event ("value", "child_added" etc)
+     * created by an event ("value", "child_added" etc), or in a type mapping path when serializing / instantiating typed objects
      */
     get vars() {
         return this[_private].vars;
@@ -6998,8 +7021,8 @@ class DataReference {
     /**
      * Sets or overwrites the stored value
      * @param value value to store in database
-     * @param onComplete completion callback to use instead of returning promise
-     * @returns promise that resolves with this reference when completed (when not using onComplete callback)
+     * @param onComplete optional completion callback to use instead of returning promise
+     * @returns promise that resolves with this reference when completed
      */
     async set(value, onComplete) {
         try {
@@ -7046,8 +7069,8 @@ class DataReference {
     /**
      * Updates properties of the referenced node
      * @param updates object containing the properties to update
-     * @param onComplete completion callback to use instead of returning promise
-     * @return returns promise that resolves with this reference once completed (when not using onComplete callback)
+     * @param onComplete optional completion callback to use instead of returning promise
+     * @return returns promise that resolves with this reference once completed
      */
     async update(updates, onComplete) {
         try {
@@ -7141,18 +7164,6 @@ class DataReference {
         }
         return this;
     }
-    /**
-     * Subscribes to an event. Supported events are "value", "child_added", "child_changed", "child_removed",
-     * which will run the callback with a snapshot of the data. If you only wish to receive notifications of the
-     * event (without the data), use the "notify_value", "notify_child_added", "notify_child_changed",
-     * "notify_child_removed" events instead, which will run the callback with a DataReference to the changed
-     * data. This enables you to manually retrieve data upon changes (eg if you want to exclude certain child
-     * data from loading)
-     * @param event Name of the event to subscribe to
-     * @param callback Callback function, event settings, or whether or not to run callbacks on current values when using "value" or "child_added" events
-     * @param cancelCallback Function to call when the subscription is not allowed, or denied access later on
-     * @returns returns an EventStream
-     */
     on(event, callback, cancelCallback) {
         if (this.path === '' && ['value', 'child_changed'].includes(event)) {
             // Removed 'notify_value' and 'notify_child_changed' events from the list, they do not require additional data loading anymore.
@@ -7242,8 +7253,7 @@ class DataReference {
                 authorized.then(() => {
                     // Access granted
                     eventPublisher.start(allSubscriptionsStoppedCallback);
-                })
-                    .catch(cancelSubscription);
+                }).catch(cancelSubscription);
             }
             else {
                 // Local API, always authorized
@@ -7257,7 +7267,6 @@ class DataReference {
                 if (event === 'value') {
                     this.get(snap => {
                         eventPublisher.publish(snap);
-                        // typeof callback === 'function' && callback(snap);
                     });
                 }
                 else if (event === 'child_added') {
@@ -7269,7 +7278,6 @@ class DataReference {
                         Object.keys(val).forEach(key => {
                             const childSnap = new data_snapshot_1.DataSnapshot(this.child(key), val[key]);
                             eventPublisher.publish(childSnap);
-                            // typeof callback === 'function' && callback(childSnap);
                         });
                     });
                 }
@@ -7278,19 +7286,17 @@ class DataReference {
                     // NOTE: This does not work with AceBaseServer <= v0.9.7, only when signed in as admin
                     const step = 100, limit = step;
                     let skip = 0;
-                    const more = () => {
-                        this.db.api.reflect(this.path, 'children', { limit, skip })
-                            .then(children => {
-                            children.list.forEach(child => {
-                                const childRef = this.child(child.key);
-                                eventPublisher.publish(childRef);
-                                // typeof callback === 'function' && callback(childRef);
-                            });
-                            if (children.more) {
-                                skip += step;
-                                more();
-                            }
+                    const more = async () => {
+                        const children = await this.db.api.reflect(this.path, 'children', { limit, skip });
+                        children.list.forEach(child => {
+                            const childRef = this.child(child.key);
+                            eventPublisher.publish(childRef);
+                            // typeof callback === 'function' && callback(childRef);
                         });
+                        if (children.more) {
+                            skip += step;
+                            more();
+                        }
                     };
                     more();
                 }
@@ -7304,12 +7310,6 @@ class DataReference {
         }
         return eventStream;
     }
-    /**
-     * Unsubscribes from a previously added event
-     * @param event Name of the event
-     * @param callback callback function to remove
-     * @returns returns this `DataReference` instance
-     */
     off(event, callback) {
         const subscriptions = this[_private].callbacks;
         const stopSubs = subscriptions.filter(sub => (!event || sub.event === event) && (!callback || sub.userCallback === callback));
@@ -7421,7 +7421,7 @@ class DataReference {
     }
     /**
      * Quickly checks if this reference has a value in the database, without returning its data
-     * @returns {Promise<boolean>} | returns a promise that resolves with a boolean value
+     * @returns returns a promise that resolves with a boolean value
      */
     async exists() {
         if (this.isWildcardPath) {
@@ -7435,9 +7435,15 @@ class DataReference {
     get isWildcardPath() {
         return this.path.indexOf('*') >= 0 || this.path.indexOf('$') >= 0;
     }
+    /**
+     * Creates a query object for current node
+     */
     query() {
         return new DataReferenceQuery(this);
     }
+    /**
+     * Gets the number of children this node has, uses reflection
+     */
     async count() {
         const info = await this.reflect('info', { child_count: true });
         return info.children.count;
@@ -7458,8 +7464,15 @@ class DataReference {
         if (!this.db.isReady) {
             await this.db.ready();
         }
-        return this.db.api.export(this.path, write, options);
+        const writeFn = typeof write === 'function' ? write : write.write.bind(write);
+        return this.db.api.export(this.path, writeFn, options);
     }
+    /**
+     * Imports the value of this node and all children
+     * @param read Function that reads data from your stream
+     * @param options Only supported format currently is json
+     * @returns returns a promise that resolves once all data is imported
+     */
     async import(read, options = { format: 'json', suppress_events: false }) {
         if (this.isWildcardPath) {
             throw new Error(`Cannot import to wildcard path "/${this.path}"`);
@@ -7477,6 +7490,11 @@ class DataReference {
         }
         return data_proxy_1.LiveDataProxy.create(this, options);
     }
+    /**
+      * @param options optional initial data retrieval options.
+      * Not recommended to use yet - given includes/excludes are not applied to received mutations,
+      * or sync actions when using an AceBaseClient with cache db.
+      */
     observe(options) {
         // options should not be used yet - we can't prevent/filter mutation events on excluded paths atm
         if (options) {
@@ -7626,13 +7644,13 @@ class DataReferenceQuery {
         return this;
     }
     /**
-     * @deprecated use .filter instead
+     * @deprecated use `.filter` instead
      */
     where(key, op, compare) {
         return this.filter(key, op, compare);
     }
     /**
-     * Limits the number of query results to n
+     * Limits the number of query results
      */
     take(n) {
         this[_private].take = n;
@@ -7645,9 +7663,6 @@ class DataReferenceQuery {
         this[_private].skip = n;
         return this;
     }
-    /**
-     * Sorts the query results
-     */
     sort(key, ascending = true) {
         if (!['string', 'number'].includes(typeof key)) {
             throw 'key must be a string or number';
@@ -7656,7 +7671,7 @@ class DataReferenceQuery {
         return this;
     }
     /**
-     * @deprecated use .sort instead
+     * @deprecated use `.sort` instead
      */
     order(key, ascending = true) {
         return this.sort(key, ascending);
@@ -7822,15 +7837,6 @@ class DataReferenceQuery {
         callback && callback(results);
         return results;
     }
-    /**
-     * Subscribes to an event. Supported events are:
-     *  "stats": receive information about query performance.
-     *  "hints": receive query or index optimization hints
-     *  "add", "change", "remove": receive real-time query result changes
-     * @param event Name of the event to subscribe to
-     * @param callback Callback function
-     * @returns returns reference to this query
-     */
     on(event, callback) {
         if (!this[_private].events[event]) {
             this[_private].events[event] = [];
@@ -7839,7 +7845,7 @@ class DataReferenceQuery {
         return this;
     }
     /**
-     * Unsubscribes from a previously added event(s)
+     * Unsubscribes from (a) previously added event(s)
      * @param event Name of the event
      * @param callback callback function to remove
      * @returns returns reference to this query
@@ -7973,9 +7979,13 @@ class DataSnapshot {
         };
         this.context = () => { return context || {}; };
     }
+    /**
+     * Indicates whether the node exists in the database
+     */
     exists() { return false; }
     /**
-     * Creates a DataSnapshot instance (for internal AceBase usage only)
+     * @internal (for internal use)
+     * Creates a `DataSnapshot` instance
      */
     static for(ref, value) {
         return new DataSnapshot(ref, value);
@@ -7983,7 +7993,7 @@ class DataSnapshot {
     /**
      * Gets a new snapshot for a child node
      * @param path child key or path
-     * @returns Returns a DataSnapshot of the child
+     * @returns Returns a `DataSnapshot` of the child
      */
     child(path) {
         // Create new snapshot for child data
@@ -7993,30 +8003,27 @@ class DataSnapshot {
     }
     /**
      * Checks if the snapshot's value has a child with the given key or path
-     * @param {string} path child key or path
-     * @returns {boolean}
+     * @param path child key or path
      */
     hasChild(path) {
         return getChild(this, path) !== null;
     }
     /**
      * Indicates whether the the snapshot's value has any child nodes
-     * @returns {boolean}
      */
     hasChildren() {
         return getChildren(this).length > 0;
     }
     /**
      * The number of child nodes in this snapshot
-     * @returns {number}
      */
     numChildren() {
         return getChildren(this).length;
     }
     /**
      * Runs a callback function for each child node in this snapshot until the callback returns false
-     * @param callback function that is called with a snapshot of each child node in this snapshot. Must return a boolean value that indicates whether to continue iterating or not.
-     * @returns {void}
+     * @param callback function that is called with a snapshot of each child node in this snapshot.
+     * Must return a boolean value that indicates whether to continue iterating or not.
      */
     forEach(callback) {
         const value = this.val();
@@ -8027,7 +8034,7 @@ class DataSnapshot {
         });
     }
     /**
-     * @type {string|number}
+     * The key of the node's path
      */
     get key() { return this.ref.key; }
 }
@@ -8035,6 +8042,11 @@ exports.DataSnapshot = DataSnapshot;
 class MutationsDataSnapshot extends DataSnapshot {
     constructor(ref, mutations, context) {
         super(ref, mutations, false, undefined, context);
+        /**
+         * Don't use this to get previous values of mutated nodes.
+         * Use `.previous` properties on the individual child snapshots instead.
+         * @throws Throws an error if you do use it.
+         */
         this.previous = () => { throw new Error('Iterate values to get previous values for each mutation'); };
         this.val = (warn = true) => {
             if (warn) {
@@ -8081,12 +8093,12 @@ const process_1 = require("./process");
 const noop = () => { };
 class DebugLogger {
     constructor(level = 'log', prefix = '') {
+        this.level = level;
         this.prefix = prefix;
         this.setLevel(level);
     }
     setLevel(level) {
         const prefix = this.prefix ? this.prefix + ' %s' : '';
-        this.level = level;
         this.verbose = ['verbose'].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : noop;
         this.log = ['verbose', 'log'].includes(level) ? prefix ? console.log.bind(console, prefix) : console.log.bind(console) : noop;
         this.warn = ['verbose', 'log', 'warn'].includes(level) ? prefix ? console.warn.bind(console, prefix) : console.warn.bind(console) : noop;
@@ -8112,6 +8124,10 @@ const cuid_1 = require("./cuid");
 // const uuid62 = require('uuid62');
 let timeBias = 0;
 class ID {
+    /**
+     * (for internal use)
+     * bias in milliseconds to adjust generated cuid timestamps with
+     */
     static set timeBias(bias) {
         if (typeof bias !== 'number') {
             return;
@@ -8129,7 +8145,7 @@ exports.ID = ID;
 },{"./cuid":23}],30:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PartialArray = exports.ObjectCollection = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.proxyAccess = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
+exports.ObjectCollection = exports.PartialArray = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.OrderedCollectionProxy = exports.proxyAccess = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
 var acebase_base_1 = require("./acebase-base");
 Object.defineProperty(exports, "AceBaseBase", { enumerable: true, get: function () { return acebase_base_1.AceBaseBase; } });
 Object.defineProperty(exports, "AceBaseBaseSettings", { enumerable: true, get: function () { return acebase_base_1.AceBaseBaseSettings; } });
@@ -8145,6 +8161,9 @@ Object.defineProperty(exports, "DataReferencesArray", { enumerable: true, get: f
 var data_snapshot_1 = require("./data-snapshot");
 Object.defineProperty(exports, "DataSnapshot", { enumerable: true, get: function () { return data_snapshot_1.DataSnapshot; } });
 Object.defineProperty(exports, "MutationsDataSnapshot", { enumerable: true, get: function () { return data_snapshot_1.MutationsDataSnapshot; } });
+var data_proxy_1 = require("./data-proxy");
+Object.defineProperty(exports, "proxyAccess", { enumerable: true, get: function () { return data_proxy_1.proxyAccess; } });
+Object.defineProperty(exports, "OrderedCollectionProxy", { enumerable: true, get: function () { return data_proxy_1.OrderedCollectionProxy; } });
 var debug_1 = require("./debug");
 Object.defineProperty(exports, "DebugLogger", { enumerable: true, get: function () { return debug_1.DebugLogger; } });
 var id_1 = require("./id");
@@ -8165,8 +8184,6 @@ var ascii85_1 = require("./ascii85");
 Object.defineProperty(exports, "ascii85", { enumerable: true, get: function () { return ascii85_1.ascii85; } });
 var simple_cache_1 = require("./simple-cache");
 Object.defineProperty(exports, "SimpleCache", { enumerable: true, get: function () { return simple_cache_1.SimpleCache; } });
-var data_proxy_1 = require("./data-proxy");
-Object.defineProperty(exports, "proxyAccess", { enumerable: true, get: function () { return data_proxy_1.proxyAccess; } });
 var simple_event_emitter_1 = require("./simple-event-emitter");
 Object.defineProperty(exports, "SimpleEventEmitter", { enumerable: true, get: function () { return simple_event_emitter_1.SimpleEventEmitter; } });
 var simple_colors_1 = require("./simple-colors");
@@ -8174,17 +8191,53 @@ Object.defineProperty(exports, "ColorStyle", { enumerable: true, get: function (
 Object.defineProperty(exports, "Colorize", { enumerable: true, get: function () { return simple_colors_1.Colorize; } });
 var schema_1 = require("./schema");
 Object.defineProperty(exports, "SchemaDefinition", { enumerable: true, get: function () { return schema_1.SchemaDefinition; } });
-var object_collection_1 = require("./object-collection");
-Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: function () { return object_collection_1.ObjectCollection; } });
 var partial_array_1 = require("./partial-array");
 Object.defineProperty(exports, "PartialArray", { enumerable: true, get: function () { return partial_array_1.PartialArray; } });
+var object_collection_1 = require("./object-collection");
+Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: function () { return object_collection_1.ObjectCollection; } });
 
 },{"./acebase-base":19,"./api":20,"./ascii85":21,"./data-proxy":25,"./data-reference":26,"./data-snapshot":27,"./debug":28,"./id":29,"./object-collection":31,"./partial-array":33,"./path-info":34,"./path-reference":35,"./schema":37,"./simple-cache":38,"./simple-colors":39,"./simple-event-emitter":40,"./subscription":41,"./transport":42,"./type-mappings":43,"./utils":44}],31:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObjectCollection = void 0;
 const id_1 = require("./id");
+/**
+ * Convenience interface for defining an object collection
+ * @example
+ * type ChatMessage = {
+ *    text: string, uid: string, sent: Date
+ * }
+ * type Chat = {
+ *    title: text
+ *    messages: ObjectCollection<ChatMessage>
+ * }
+ */
 class ObjectCollection {
+    /**
+     * Converts and array of values into an object collection, generating a unique key for each item in the array
+     * @param array
+     * @example
+     * const array = [
+     *  { title: "Don't make me think!", author: "Steve Krug" },
+     *  { title: "The tipping point", author: "Malcolm Gladwell" }
+     * ];
+     *
+     * // Convert:
+     * const collection = ObjectCollection.from(array);
+     * // --> {
+     * //   kh1x3ygb000120r7ipw6biln: {
+     * //       title: "Don't make me think!",
+     * //       author: "Steve Krug"
+     * //   },
+     * //   kh1x3ygb000220r757ybpyec: {
+     * //       title: "The tipping point",
+     * //       author: "Malcolm Gladwell"
+     * //   }
+     * // }
+     *
+     * // Now it's easy to add them to the db:
+     * db.ref('books').update(collection);
+     */
     static from(array) {
         const collection = {};
         array.forEach(child => {
@@ -8197,6 +8250,9 @@ exports.ObjectCollection = ObjectCollection;
 
 },{"./id":29}],32:[function(require,module,exports){
 "use strict";
+// Optional dependency on rxjs package. If rxjs is installed into your project, you'll get the correct
+// typings for AceBase methods that use Observables, and you'll be able to use them. If you don't use
+// those methods, there is no need to install rxjs.
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObservableShim = exports.setObservable = exports.getObservable = void 0;
 let _observable;
@@ -8274,7 +8330,7 @@ class ObservableShim {
 }
 exports.ObservableShim = ObservableShim;
 
-},{"rxjs":2}],33:[function(require,module,exports){
+},{"rxjs":15}],33:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PartialArray = void 0;
@@ -8676,11 +8732,19 @@ function parse(definition) {
                 // read numeric value
                 type.typeOf = 'number';
                 let nr = '';
-                while (c = definition[pos], c === '.' || (c >= '0' && c <= '9')) {
+                while (c = definition[pos], c === '.' || c === 'n' || (c >= '0' && c <= '9')) {
                     nr += c;
                     pos++;
                 }
-                type.value = nr.includes('.') ? parseFloat(nr) : parseInt(nr);
+                if (nr.endsWith('n')) {
+                    type.value = BigInt(nr);
+                }
+                else if (nr.includes('.')) {
+                    type.value = parseFloat(nr);
+                }
+                else {
+                    type.value = parseInt(nr);
+                }
             }
             else if (definition[pos] === '{') {
                 // Read object (interface) definition
@@ -8702,7 +8766,7 @@ function parse(definition) {
                 consumeCharacter('}');
             }
             else if (definition[pos] === '/') {
-                // Read regular expression defintion
+                // Read regular expression definition
                 consumeCharacter('/');
                 let pattern = '', flags = '';
                 while (c = definition[pos], c !== '/' || pattern.endsWith('\\')) {
@@ -8721,7 +8785,7 @@ function parse(definition) {
                 throw new Error(`Expected a type definition at position ${pos}, found character '${definition[pos]}'`);
             }
         }
-        else if (['string', 'number', 'boolean', 'undefined', 'String', 'Number', 'Boolean'].includes(name)) {
+        else if (['string', 'number', 'boolean', 'bigint', 'undefined', 'String', 'Number', 'Boolean', 'BigInt'].includes(name)) {
             type.typeOf = name.toLowerCase();
         }
         else if (name === 'Object' || name === 'object') {
@@ -8888,6 +8952,7 @@ function getConstructorType(val) {
         case Number: return 'number';
         case Boolean: return 'boolean';
         case Date: return 'Date';
+        case BigInt: return 'bigint';
         case Array: throw new Error('Schema error: Array cannot be used without a type. Use string[] or Array<string> instead');
         default: throw new Error(`Schema error: unknown type used: ${val.name}`);
     }
@@ -8923,8 +8988,8 @@ class SchemaDefinition {
                     else if (typeof val === 'function') {
                         val = getConstructorType(val);
                     }
-                    else if (!['string', 'number', 'boolean'].includes(typeof val)) {
-                        throw new Error(`Type definition for key "${key}" must be a string, number, boolean, object, regular expression, or one of these classes: String, Number, Boolean, Date`);
+                    else if (!['string', 'number', 'boolean', 'bigint'].includes(typeof val)) {
+                        throw new Error(`Type definition for key "${key}" must be a string, number, boolean, bigint, object, regular expression, or one of these classes: String, Number, Boolean, Date, BigInt`);
                     }
                     return `${key}:${val}`;
                 })
@@ -9261,9 +9326,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.EventStream = exports.EventPublisher = exports.EventSubscription = void 0;
 class EventSubscription {
     /**
-     *
      * @param stop function that stops the subscription from receiving future events
-     * @param {} activated function that runs optional callback when subscription is activated, and returns a promise that resolves once activated
      */
     constructor(stop) {
         this.stop = stop;
@@ -9274,7 +9337,7 @@ class EventSubscription {
     }
     /**
      * Notifies when subscription is activated or canceled
-     * @param callback optional callback when subscription is activated or canceled
+     * @param callback optional callback to run each time activation state changes
      * @returns returns a promise that resolves once activated, or rejects when it is denied (and no callback was supplied)
      */
     activated(callback) {
@@ -9305,6 +9368,7 @@ class EventSubscription {
             });
         });
     }
+    /** (for internal use) */
     _setActivationState(activated, cancelReason) {
         this._internal.cancelReason = cancelReason;
         this._internal.state = activated ? 'active' : 'canceled';
@@ -9337,10 +9401,6 @@ class EventPublisher {
 }
 exports.EventPublisher = EventPublisher;
 class EventStream {
-    /**
-     *
-     * @param eventPublisherCallback
-     */
     constructor(eventPublisherCallback) {
         const subscribers = [];
         let noMoreSubscribersCallback;
@@ -9964,15 +10024,13 @@ function process(db, mappings, path, obj, action) {
 }
 const _mappings = Symbol('mappings');
 class TypeMappings {
-    /**
-     *
-     * @param {AceBaseBase} db
-     */
     constructor(db) {
         this.db = db;
         this[_mappings] = {};
     }
+    /** (for internal use) */
     get mappings() { return this[_mappings]; }
+    /** (for internal use) */
     map(path) {
         return map(this[_mappings], path);
     }
@@ -9981,12 +10039,34 @@ class TypeMappings {
      * serialized when stored to, and deserialized (instantiated) when loaded from the database.
      * @param path path to an object container, eg "users" or "users/*\/posts"
      * @param type class to bind all child objects of path to
+     * Best practice is to implement 2 methods for instantiation and serializing of your objects:
+     * 1) `static create(snap: DataSnapshot)` and 2) `serialize(ref: DataReference)`. See example
      * @param options (optional) You can specify the functions to use to
      * serialize and/or instantiate your class. If you do not specificy a creator (constructor) method,
-     * AceBase will call YourClass.create(obj, ref) method if it exists, or execute: new YourClass(obj, ref).
-     * If you do not specifiy a serializer method, AceBase will call YourClass.prototype.serialize(ref) if it
-     * exists, or tries storing your object's fields unaltered. NOTE: 'this' in your creator function will point
-     * to YourClass, and 'this' in your serializer function will point to the instance of YourClass.
+     * AceBase will call `YourClass.create(snapshot)` method if it exists, or create an instance of
+     * YourClass with `new YourClass(snapshot)`.
+     * If you do not specifiy a serializer method, AceBase will call `YourClass.prototype.serialize(ref)`
+     * if it exists, or tries storing your object's fields unaltered. NOTE: `this` in your creator
+     * function will point to `YourClass`, and `this` in your serializer function will point to the
+     * `instance` of `YourClass`.
+     * @example
+     * class User {
+     *    static create(snap: DataSnapshot): User {
+     *        // Deserialize (instantiate) User from plain database object
+     *        let user = new User();
+     *        Object.assign(user, snap.val()); // Copy all properties to user
+     *        user.id = snap.ref.key; // Add the key as id
+     *        return user;
+     *    }
+     *    serialize(ref: DataReference) {
+     *        // Serialize user for database storage
+     *        return {
+     *            name: this.name
+     *            email: this.email
+     *        };
+     *    }
+     * }
+     * db.types.bind('users', User); // Automatically uses serialize and static create methods
      */
     bind(path, type, options = {}) {
         // Maps objects that are stored in a specific path to a constructor method,
@@ -10061,6 +10141,7 @@ class TypeMappings {
         };
     }
     /**
+     * (for internal use)
      * Serializes any child in given object that has a type mapping
      * @param {string} path | path to the object's location
      * @param {object} obj | object to serialize
@@ -10069,6 +10150,7 @@ class TypeMappings {
         return process(this.db, this[_mappings], path, obj, 'serialize');
     }
     /**
+     * (for internal use)
      * Deserialzes any child in given object that has a type mapping
      * @param {string} path | path to the object's location
      * @param {object} obj | object to deserialize
@@ -10095,7 +10177,8 @@ function numberToBytes(number) {
 }
 exports.numberToBytes = numberToBytes;
 function bytesToNumber(bytes) {
-    if (bytes.length !== 8) {
+    const length = Array.isArray(bytes) ? bytes.length : bytes.byteLength;
+    if (length !== 8) {
         throw new TypeError('must be 8 bytes');
     }
     const bin = new Uint8Array(bytes);
@@ -10230,7 +10313,8 @@ function decodeString(buffer) {
             buffer = Uint8Array.from(buffer); // convert to typed array
         }
         if (!(buffer instanceof Buffer) && 'buffer' in buffer && buffer.buffer instanceof ArrayBuffer) {
-            buffer = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength); // Convert typed array to node.js Buffer
+            const typedArray = buffer;
+            buffer = Buffer.from(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength); // Convert typed array to node.js Buffer
         }
         if (!(buffer instanceof Buffer)) {
             throw new Error('Unsupported buffer argument');
@@ -10241,7 +10325,8 @@ function decodeString(buffer) {
         // Older browsers. Manually decode!
         if (!(buffer instanceof Uint8Array) && 'buffer' in buffer && buffer['buffer'] instanceof ArrayBuffer) {
             // Convert TypedArray to Uint8Array
-            buffer = new Uint8Array(buffer['buffer'], buffer.byteOffset, buffer.byteLength);
+            const typedArray = buffer;
+            buffer = new Uint8Array(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
         }
         if (buffer instanceof Buffer || buffer instanceof Array || buffer instanceof Uint8Array) {
             let str = '';
@@ -10508,5 +10593,5 @@ function defer(fn) {
 exports.defer = defer;
 
 }).call(this)}).call(this,require("buffer").Buffer)
-},{"./partial-array":33,"./path-reference":35,"./process":36,"buffer":3}]},{},[10])(10)
+},{"./partial-array":33,"./path-reference":35,"./process":36,"buffer":16}]},{},[5])(5)
 });

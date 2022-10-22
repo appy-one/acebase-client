@@ -587,7 +587,7 @@ class WebApi extends acebase_core_1.Api {
                     pathSubs.splice(pathSubs.indexOf(subscr), 1);
                     if (this.hasCache) {
                         // Events are also handled by cache db, also remove those
-                        if (typeof subscr.cacheCallback !== 'undefined') {
+                        if (typeof subscr.cacheCallback !== 'function') {
                             throw new Error('DEV ERROR: When subscription was added, cacheCallback must have been set');
                         }
                         this.cache.db.api.unsubscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);

@@ -884,7 +884,7 @@ class WebApi extends acebase_core_1.Api {
                     pathSubs.splice(pathSubs.indexOf(subscr), 1);
                     if (this.hasCache) {
                         // Events are also handled by cache db, also remove those
-                        if (typeof subscr.cacheCallback !== 'undefined') {
+                        if (typeof subscr.cacheCallback !== 'function') {
                             throw new Error('DEV ERROR: When subscription was added, cacheCallback must have been set');
                         }
                         this.cache.db.api.unsubscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);
@@ -5313,13 +5313,39 @@ const debug_1 = require("./debug");
 const simple_colors_1 = require("./simple-colors");
 class AceBaseBaseSettings {
     constructor(options) {
+        /**
+         * What level to use for console logging.
+         * @default 'log'
+         */
+        this.logLevel = 'log';
+        /**
+         * Whether to use colors in the console logs output
+         * @default true
+         */
+        this.logColors = true;
+        /**
+         * @internal (for internal use)
+         */
+        this.info = 'realtime database';
+        /**
+         * You can turn this on if you are a sponsor. See https://github.com/appy-one/acebase/discussions/100 for more info
+         */
+        this.sponsor = false;
         if (typeof options !== 'object') {
             options = {};
         }
-        this.logLevel = options.logLevel || 'log';
-        this.logColors = typeof options.logColors === 'boolean' ? options.logColors : true;
-        this.info = typeof options.info === 'string' ? options.info : undefined;
-        this.sponsor = typeof options.sponsor === 'boolean' ? options.sponsor : false;
+        if (typeof options.logLevel === 'string') {
+            this.logLevel = options.logLevel;
+        }
+        if (typeof options.logColors === 'boolean') {
+            this.logColors = options.logColors;
+        }
+        if (typeof options.info === 'string') {
+            this.info = options.info;
+        }
+        if (typeof options.sponsor === 'boolean') {
+            this.sponsor = options.sponsor;
+        }
     }
 }
 exports.AceBaseBaseSettings = AceBaseBaseSettings;
@@ -5327,10 +5353,10 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
     /**
      * @param dbname Name of the database to open or create
      */
-    constructor(dbname, options) {
+    constructor(dbname, options = {}) {
         super();
         this._ready = false;
-        options = new AceBaseBaseSettings(options || {});
+        options = new AceBaseBaseSettings(options);
         this.name = dbname;
         // Setup console logging
         this.debug = new debug_1.DebugLogger(options.logLevel, `[${dbname}]`);
@@ -6992,7 +7018,20 @@ class DataReference {
     /**
      * The key or index of this node
      */
-    get key() { return this[_private].key; }
+    get key() {
+        const key = this[_private].key;
+        return typeof key === 'number' ? `[${key}]` : key;
+    }
+    /**
+     * If the "key" is a number, it is an index!
+     */
+    get index() {
+        const key = this[_private].key;
+        if (typeof key !== 'number') {
+            throw new Error(`"${key}" is not a number`);
+        }
+        return key;
+    }
     /**
      * Returns a new reference to this node's parent
      */
@@ -9779,33 +9818,34 @@ const deserialize2 = (data) => {
         // primitive value, not serialized
         return data;
     }
-    switch (data['.type']) {
-        case undefined: {
-            // No type given: this is a plain object or array
-            if (data instanceof Array) {
-                // Plain array, deserialize items into a copy
-                const copy = [];
-                const arr = data;
-                for (let i = 0; i < arr.length; i++) {
-                    copy.push((0, exports.deserialize2)(arr[i]));
-                }
-                return copy;
+    if (typeof data['.type'] === 'undefined') {
+        // No type given: this is a plain object or array
+        if (data instanceof Array) {
+            // Plain array, deserialize items into a copy
+            const copy = [];
+            const arr = data;
+            for (let i = 0; i < arr.length; i++) {
+                copy.push((0, exports.deserialize2)(arr[i]));
             }
-            else {
-                // Plain object, deserialize properties into a copy
-                const copy = {};
-                const obj = data;
-                for (const prop in obj) {
-                    copy[prop] = (0, exports.deserialize2)(obj[prop]);
-                }
-                return copy;
-            }
+            return copy;
         }
-        case 'bigint': {
+        else {
+            // Plain object, deserialize properties into a copy
+            const copy = {};
+            const obj = data;
+            for (const prop in obj) {
+                copy[prop] = (0, exports.deserialize2)(obj[prop]);
+            }
+            return copy;
+        }
+    }
+    else if (typeof data['.type'] === 'string') {
+        const dataType = data['.type'].toLowerCase();
+        if (dataType === 'bigint') {
             const val = data['.val'];
             return BigInt(val);
         }
-        case 'array': {
+        else if (dataType === 'array') {
             // partial ("sparse") array, deserialize children into a copy
             const copy = {};
             for (const index in data) {
@@ -9814,21 +9854,21 @@ const deserialize2 = (data) => {
             delete copy['.type'];
             return new partial_array_1.PartialArray(copy);
         }
-        case 'date': {
+        else if (dataType === 'date') {
             // Date was serialized as a string (UTC)
             const val = data['.val'];
             return new Date(val);
         }
-        case 'binary': {
+        else if (dataType === 'binary') {
             // ascii85 encoded binary data
             const val = data['.val'];
             return ascii85_1.ascii85.decode(val);
         }
-        case 'reference': {
+        else if (dataType === 'reference') {
             const val = data['.val'];
             return new path_reference_1.PathReference(val);
         }
-        case 'regexp': {
+        else if (dataType === 'regexp') {
             const val = data['.val'];
             if (typeof val === 'string') {
                 // serialized as '/(pattern)/flags'

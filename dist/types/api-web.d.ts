@@ -1,6 +1,5 @@
-import { Api, EventSubscriptionCallback, DebugLogger, Query, QueryOptions } from 'acebase-core';
+import { Api, EventSubscriptionCallback, DebugLogger, Query, QueryOptions, ValueChange, ValueMutation } from 'acebase-core';
 import { AceBaseUser } from './user';
-import { ValueChange, ValueMutation } from 'acebase-core/src/api';
 import { AceBaseClientConnectionSettings } from './acebase-client';
 export interface IAceBaseAuthProviderSignInResult {
     user: AceBaseUser;

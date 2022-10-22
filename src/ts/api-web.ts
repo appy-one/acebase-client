@@ -1,4 +1,5 @@
-import { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition, SimpleEventEmitter, EventSubscriptionCallback, AceBaseBase, DebugLogger, Query, QueryOptions } from 'acebase-core';
+import { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition, SimpleEventEmitter, EventSubscriptionCallback,
+    AceBaseBase, DebugLogger, Query, QueryOptions, ValueChange, ValueMutation, IDataMutationsArray } from 'acebase-core';
 import { connect as connectSocket } from 'socket.io-client';
 import * as Base64 from './base64';
 import { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } from './request/error';
@@ -6,9 +7,7 @@ import { CachedValueUnavailableError } from './errors';
 import { promiseTimeout } from './promise-timeout';
 import _request from './request';
 import { AceBaseUser } from './user';
-import { ValueChange, ValueMutation } from 'acebase-core/src/api';
 import { AceBaseClientConnectionSettings } from './acebase-client';
-import { IDataMutationsArray } from 'acebase-core/dist/types/data-snapshot';
 
 type IOWebSocket = ReturnType<typeof connectSocket>;
 export interface IAceBaseAuthProviderSignInResult {
@@ -668,7 +667,7 @@ export class WebApi extends Api {
                 pathSubs.splice(pathSubs.indexOf(subscr), 1);
                 if (this.hasCache) {
                     // Events are also handled by cache db, also remove those
-                    if (typeof subscr.cacheCallback !== 'undefined') { throw new Error('DEV ERROR: When subscription was added, cacheCallback must have been set'); }
+                    if (typeof subscr.cacheCallback !== 'function') { throw new Error('DEV ERROR: When subscription was added, cacheCallback must have been set'); }
                     this.cache.db.api.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);
                 }
             });

@@ -208,7 +208,7 @@ export declare class AceBaseClient extends AceBaseBase {
      */
     get cache(): {
         clear: (path?: string) => Promise<void>;
-        update: (path: string | undefined, cursor: string | null) => Promise<{
+        update: (path?: string, cursor?: string | null) => Promise<{
             path: string;
             used_cursor: string | null;
             new_cursor: string;
@@ -220,7 +220,7 @@ export declare class AceBaseClient extends AceBaseBase {
                 context: any;
             }[];
         }>;
-        get: (path: string, cursor: string | null) => Promise<DataSnapshot>;
+        get: (path: string, cursor?: string | null) => Promise<DataSnapshot>;
     };
 }
 //# sourceMappingURL=acebase-client.d.ts.map

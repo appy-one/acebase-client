@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "listEmittedFiles": true,
-    "rootDir": "./src/ts",
+    "rootDir": "./src",
     "target": "es2020",
     "module": "es2020",
     "moduleResolution": "node",
@@ -15,5 +15,6 @@
     "noImplicitAny": true,
     "skipLibCheck": true,
   },
-  "exclude": ["node_modules"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist/**/*"]
 }

@@ -24,7 +24,7 @@
     "./dist/cjs/performance/index.js": "./dist/cjs/performance/browser.js",
     "./dist/cjs/base64/index.js": "./dist/cjs/base64/browser.js"
   },
-  "types": "./dist/index.d.ts",
+  "types": "./dist/types/index.d.ts",
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {

@@ -295,7 +295,7 @@ export class AceBaseClientAuth {
             return { user: null };
         }
         for (const key of Object.keys(result.user)) {
-            this.user[key as keyof AceBaseUser] = result.user[key];
+            (this.user as any)[key] = result.user[key as keyof AceBaseUser];
         }
         return { user: this.user };
     }

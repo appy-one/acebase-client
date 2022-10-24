@@ -548,6 +548,10 @@ purchase({ id: 'sword', name: 'Massive shiny sword', price: 2 })
 
 ```
 
+## ESM and CJS bundles
+
+The TypeScript sources are transpiled to both CommonJS and ESM module systems, but the CommonJS bundle is still used for both `require` and `import` statements. This prevents a possible "Dual package hazard". See https://github.com/appy-one/acebase/discussions/98 for more info.
+
 ## More information
 
 See *acebase-server* for more information about running an AceBase server ([npm](https://www.npmjs.com/package/acebase-server), [github](https://github.com/appy-one/acebase-server)) 

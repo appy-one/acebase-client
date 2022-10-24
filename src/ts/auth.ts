@@ -1,14 +1,25 @@
 import { AceBaseUser } from './user';
 import type { AceBaseClient } from './acebase-client';
+import { IAceBaseAuthProviderSignInResult } from './api-web';
 
+/**
+ * User authentication methods
+ */
 export class AceBaseClientAuth {
+    /**
+     * Currently signed in user
+     */
     public user: AceBaseUser | null = null;
+
+    /**
+     * Access token of currently signed in user
+     */
     public accessToken: string | null = null;
 
     constructor(private client: AceBaseClient, private eventCallback: (event: string, data: any) => void) {}
 
     /**
-     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * Sign into a user account using a username and password
      * @param username A database username
      * @param password The password
      * @returns returns a promise that resolves with the signed in user and access token
@@ -26,7 +37,7 @@ export class AceBaseClientAuth {
     }
 
     /**
-     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * Sign into a user account using a username and password
      * @param email An email address
      * @param password The password
      * @returns returns a promise that resolves with the signed in user and access token
@@ -93,7 +104,7 @@ export class AceBaseClientAuth {
      * Use this method to finish OAuth flow from your callbackUrl.
      * @param callbackResult result received in your.callback/url?result
      */
-    async finishAuthProviderSignIn(callbackResult: string): Promise<{ user: AceBaseUser, accessToken: string, provider: { name: string, access_token: string, refresh_token: string, expires_in: number } }> {
+    async finishAuthProviderSignIn(callbackResult: string): Promise<IAceBaseAuthProviderSignInResult> {
         if (!this.client.isReady) {
             await this.client.ready();
         }
@@ -130,6 +141,9 @@ export class AceBaseClientAuth {
         window.location.href = redirectUrl;
     }
 
+    // TODO:
+    // signInWithPopup(providerName: string): Promise<IAceBaseAuthProviderSignInResult>;
+
     /**
      * Checks if the user authentication with an auth provider.
      */
@@ -157,9 +171,13 @@ export class AceBaseClientAuth {
         everywhere?: boolean;
 
         /**
-         * whether to clear the cache database (if used)
+         * if cache database is used: whether to clear cached data
+         * (recommended, currently not enabled by default, might change in next major version)
          */
         clearCache?: boolean;
+    } = {
+        everywhere: false,
+        clearCache: false,
     }): Promise<void> {
         if (!this.client.isReady) {
             await this.client.ready();
@@ -208,9 +226,9 @@ export class AceBaseClientAuth {
     }
 
     /**
-     * Requests a password to be changed using a previously acquired reset code, sent to the email address with forgotPassword
-     * @param resetCode
-     * @param newPassword
+     * Requests a password to be changed using a previously acquired reset code, sent to the email address with `forgotPassword`
+     * @param resetCode code sent to the user
+     * @param newPassword new password chosen by the user
      * @returns returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
      */
     async resetPassword(resetCode: string, newPassword: string): Promise<void> {

@@ -421,7 +421,7 @@ export class AceBaseClient extends AceBaseBase {
      * @param path path of your extension
      * @param data data to post (put/post methods) or to add to querystring
      */
-    callExtension(method: HttpMethod | Uppercase<HttpMethod>, path: string, data: any) {
+    callExtension(method: HttpMethod | Uppercase<HttpMethod>, path: string, data?: any) {
         return this.api.callExtension(method, path, data);
     }
 

@@ -7,7 +7,7 @@ import { CachedValueUnavailableError } from './errors';
 import { promiseTimeout } from './promise-timeout';
 import _request from './request';
 import { AceBaseUser } from './user';
-import { AceBaseClientConnectionSettings } from './acebase-client';
+import { ConnectionSettings } from './acebase-client';
 
 type IOWebSocket = ReturnType<typeof connectSocket>;
 export interface IAceBaseAuthProviderSignInResult {
@@ -112,6 +112,8 @@ const CONNECTION_STATE_CONNECTING = 'connecting';
 const CONNECTION_STATE_CONNECTED = 'connected';
 const CONNECTION_STATE_DISCONNECTING = 'disconnecting';
 
+export type HttpMethod = 'get' | 'post'| 'put' | 'delete';
+
 // eslint-disable-next-line @typescript-eslint/no-empty-function
 const NOOP = () => {};
 
@@ -200,7 +202,7 @@ export class WebApi extends Api {
     constructor(
         private dbname = 'default',
         private settings:
-            Pick<AceBaseClientConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache'>
+            Pick<ConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache'>
             & { debug: DebugLogger, url: string },
         callback: (event: string, ...args: any[]) => void,
     ) {
@@ -899,7 +901,7 @@ export class WebApi extends Api {
         },
     }, emitEvent = true) {
         this._eventTimeline.signIn = Date.now();
-        const details = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
+        const details: IAceBaseAuthProviderSignInResult = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
         this.accessToken = details.accessToken;
         this.socket?.emit('signin', details.accessToken); // Make sure the connected websocket server knows who we are as well.
         emitEvent && this.eventCallback('signin', details);
@@ -970,9 +972,6 @@ export class WebApi extends Api {
     async signOut(options: boolean | {
         everywhere?: boolean;
         clearCache?: boolean;
-    } = {
-        everywhere: false,
-        clearCache: false,
     }) {
         if (typeof options === 'boolean') {
             // Old signature signOut(everywhere:boolean = false)
@@ -1060,7 +1059,7 @@ export class WebApi extends Api {
         return this._connectionState;
     }
 
-    stats(options = undefined) {
+    stats(options?: any) {
         return this._request({ url: `${this.url}/stats/${this.dbname}` });
     }
 
@@ -2131,11 +2130,11 @@ export class WebApi extends Api {
     }
 
     callExtension(
-        method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+        method: HttpMethod | Uppercase<HttpMethod>,
         path: string,
         data: any,
     ) {
-        method = method.toUpperCase() as typeof method;
+        method = method.toUpperCase() as Uppercase<HttpMethod>;
         const postData = ['PUT','POST'].includes(method) ? data : null;
         let url = `${this.url}/ext/${this.dbname}/${path}`;
         if (data && !['PUT','POST'].includes(method)) {
@@ -2374,6 +2373,7 @@ export class WebApi extends Api {
         return this._request({ url: `${this.url}/schema/${this.dbname}` });
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     async validateSchema(path: string, value: any, isUpdate: boolean): ReturnType<Api['validateSchema']> {
         throw new Error(`Manual schema validation can only be used on standalone databases`);
     }

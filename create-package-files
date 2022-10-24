@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Create CommonJS package.json
+cat >dist/cjs/package.json <<JSON
+{
+    "type": "commonjs",
+    "browser": {
+        "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
+        "./request/index.js": "./request/browser.js",
+        "./performance/index.js": "./performance/browser.js",
+        "./base64/index.js": "./base64/browser.js"
+    }
+}
+JSON
+
+# Write typings to support Node16 module resolution 
+cat >dist/cjs/index.d.ts <<TYPESCRIPT
+export * from '../types';
+TYPESCRIPT
+
+# Create ESM package.json
+cat >dist/esm/package.json <<JSON
+{
+    "type": "module",
+    "browser": {
+        "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
+        "./request/index.js": "./request/browser.js",
+        "./performance/index.js": "./performance/browser.js",
+        "./base64/index.js": "./base64/browser.js"
+    }
+}
+JSON
+
+# Write typings to support Node16 module resolution 
+cat >dist/esm/index.d.ts <<TYPESCRIPT
+export * from '../types';
+TYPESCRIPT

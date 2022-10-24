@@ -2,19 +2,40 @@
   "name": "acebase-client",
   "version": "1.17.2",
   "description": "Client to connect to an AceBase realtime database server",
-  "main": "./src/index.js",
+  "comments": {
+    "browser": "webpack/browserify file replacements have moved to package.json in dist/cjs and dist/esm. See README.md for more info",
+    "exports": "See README.md for more info about exported and used ESM and CommonJS distributions"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/cjs/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./esm": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/esm/index.js"
+    }
+  },
   "browser": {
     "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
-    "./src/request/index.js": "./src/request/browser.js",
-    "./src/performance/index.js": "./src/performance/browser.js",
-    "./src/base64/index.js": "./src/base64/browser.js"
+    "./dist/cjs/request/index.js": "./dist/cjs/request/browser.js",
+    "./dist/cjs/performance/index.js": "./dist/cjs/performance/browser.js",
+    "./dist/cjs/base64/index.js": "./dist/cjs/base64/browser.js"
   },
-  "types": "./index.d.ts",
+  "types": "./dist/index.d.ts",
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {
-    "build": "npm run browserify",
-    "browserify": "browserify src/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "build": "npm run build:clean && npm run build:esm && npm run build:cjs && npm run build:packages && npm run browserify && echo Done!",
+    "build:clean": "rm -fr dist/*",
+    "build:esm": "tsc -p tsconfig.json && npx tsc-esm-fix ---target='dist/esm'",
+    "build:cjs": "tsc -p tsconfig-cjs.json",
+    "build:packages": "bash ./create-package-files",
+    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js && cp src/browser.html dist",
     "test": "echo \"Error: no test specified\" && exit 1",
     "npmfix": "npm i --package-lock-only"
   },
@@ -55,11 +76,18 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "^1.22.4",
-    "socket.io-client": "^2.4.0"
+    "acebase-core": "^1.23.0",
+    "socket.io-client": "^2.5.0"
   },
   "devDependencies": {
+    "@types/node": "^18.11.0",
+    "@types/socket.io-client": "^1.4.36",
+    "@typescript-eslint/eslint-plugin": "^5.40.0",
+    "@typescript-eslint/parser": "^5.40.0",
     "browserify": "^17.0.0",
-    "terser": "^5.15.0"
+    "eslint": "^8.25.0",
+    "terser": "^5.15.1",
+    "tsc-esm-fix": "^2.20.5",
+    "typescript": "^4.8.4"
   }
 }

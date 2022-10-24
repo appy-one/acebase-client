@@ -35,28 +35,4 @@ export declare class AceBaseUser {
     };
     constructor(user: Partial<AceBaseUser>);
 }
-export declare type AceBaseSignInSuccess = {
-    success: true;
-    user: AceBaseUser;
-    accessToken: string;
-    provider: string;
-};
-export declare type AceBaseSignInFailure = {
-    success: false;
-    reason: {
-        code: string;
-        message: string;
-    };
-};
-export declare type AceBaseSignInResult = AceBaseSignInSuccess | AceBaseSignInFailure;
-export declare type AceBaseAuthSuccess = {
-    success: true;
-};
-export declare type AceBaseAuthFailure = {
-    success: false;
-    reason: {
-        code: string;
-        message: string;
-    };
-};
-export declare type AceBaseAuthResult = AceBaseAuthSuccess | AceBaseAuthFailure;
+//# sourceMappingURL=user.d.ts.map

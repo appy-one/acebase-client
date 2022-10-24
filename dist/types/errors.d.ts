@@ -3,3 +3,4 @@ export declare class CachedValueUnavailableError extends Error {
     serverError?: any;
     constructor(path: string, message?: string);
 }
+//# sourceMappingURL=errors.d.ts.map

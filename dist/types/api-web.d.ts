@@ -1,6 +1,6 @@
 import { Api, EventSubscriptionCallback, DebugLogger, Query, QueryOptions, ValueChange, ValueMutation } from 'acebase-core';
 import { AceBaseUser } from './user';
-import { AceBaseClientConnectionSettings } from './acebase-client';
+import { ConnectionSettings } from './acebase-client';
 export interface IAceBaseAuthProviderSignInResult {
     user: AceBaseUser;
     accessToken: string;
@@ -17,6 +17,7 @@ declare type EventSubscriptionSettings = {
     cancelCallback: (reason: Error) => any;
     syncFallback: 'reload' | (() => any | Promise<any>);
 };
+export declare type HttpMethod = 'get' | 'post' | 'put' | 'delete';
 /**
  * Api to connect to a remote AceBase server over http(s)
  */
@@ -47,7 +48,7 @@ export declare class WebApi extends Api {
     private accessToken;
     private manualConnectionMonitor;
     private eventCallback;
-    constructor(dbname: string, settings: Pick<AceBaseClientConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache'> & {
+    constructor(dbname: string, settings: Pick<ConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache'> & {
         debug: DebugLogger;
         url: string;
     }, callback: (event: string, ...args: any[]) => void);
@@ -67,54 +68,18 @@ export declare class WebApi extends Api {
      */
     private _request;
     private handleSignInResult;
-    signIn(username: string, password: string): Promise<{
-        user: AceBaseUser;
-        accessToken: string;
-        provider: {
-            name: string;
-            access_token: string;
-            refresh_token: string;
-            expires_in: number;
-        };
-    }>;
-    signInWithEmail(email: string, password: string): Promise<{
-        user: AceBaseUser;
-        accessToken: string;
-        provider: {
-            name: string;
-            access_token: string;
-            refresh_token: string;
-            expires_in: number;
-        };
-    }>;
-    signInWithToken(token: string, emitEvent?: boolean): Promise<{
-        user: AceBaseUser;
-        accessToken: string;
-        provider: {
-            name: string;
-            access_token: string;
-            refresh_token: string;
-            expires_in: number;
-        };
-    }>;
+    signIn(username: string, password: string): Promise<IAceBaseAuthProviderSignInResult>;
+    signInWithEmail(email: string, password: string): Promise<IAceBaseAuthProviderSignInResult>;
+    signInWithToken(token: string, emitEvent?: boolean): Promise<IAceBaseAuthProviderSignInResult>;
     setAccessToken(token: string): void;
     startAuthProviderSignIn(providerName: string, callbackUrl: string, options: any): Promise<{
         redirectUrl: any;
     }>;
-    finishAuthProviderSignIn(callbackResult: string): Promise<{
-        user: AceBaseUser;
-        accessToken: string;
-        provider: {
-            name: string;
-            access_token: string;
-            refresh_token: string;
-            expires_in: number;
-        };
-    }>;
+    finishAuthProviderSignIn(callbackResult: string): Promise<IAceBaseAuthProviderSignInResult>;
     refreshAuthProviderToken(providerName: string, refreshToken: string): Promise<{
         provider: IAceBaseAuthProviderTokens;
     }>;
-    signOut(options?: boolean | {
+    signOut(options: boolean | {
         everywhere?: boolean;
         clearCache?: boolean;
     }): Promise<void>;
@@ -124,16 +89,7 @@ export declare class WebApi extends Api {
     forgotPassword(email: string): Promise<any>;
     verifyEmailAddress(verificationCode: string): Promise<any>;
     resetPassword(resetCode: string, newPassword: string): Promise<any>;
-    signUp(details: any, signIn?: boolean): Promise<{
-        user: AceBaseUser;
-        accessToken: string;
-        provider: {
-            name: string;
-            access_token: string;
-            refresh_token: string;
-            expires_in: number;
-        };
-    } | {
+    signUp(details: any, signIn?: boolean): Promise<IAceBaseAuthProviderSignInResult | {
         user: any;
         accessToken: string | null;
     }>;
@@ -144,7 +100,7 @@ export declare class WebApi extends Api {
     get isConnected(): boolean;
     get isConnecting(): boolean;
     get connectionState(): "disconnected" | "connecting" | "connected" | "disconnecting";
-    stats(options?: undefined): Promise<any>;
+    stats(options?: any): Promise<any>;
     sync(options?: {
         firstSync?: boolean;
         fetchFreshData?: boolean;
@@ -256,7 +212,7 @@ export declare class WebApi extends Api {
     exists(path: string, options?: {
         allow_cache: boolean;
     }): Promise<boolean>;
-    callExtension(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, data: any): Promise<any>;
+    callExtension(method: HttpMethod | Uppercase<HttpMethod>, path: string, data: any): Promise<any>;
     /**
      * Clears the entire cache, or a specific path without raising any events
      */
@@ -318,3 +274,4 @@ export declare class WebApi extends Api {
     validateSchema(path: string, value: any, isUpdate: boolean): ReturnType<Api['validateSchema']>;
 }
 export {};
+//# sourceMappingURL=api-web.d.ts.map

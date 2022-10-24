@@ -15,14 +15,4 @@ class AceBaseUser {
     }
 }
 exports.AceBaseUser = AceBaseUser;
-// export class AceBaseAuthResult {
-//     success: boolean;
-//     reason?: { code: string, message: string };
-//     constructor(result: { success: boolean; reason?: { code: string, message: string }}) {
-//         this.success = result.success;
-//         if (!result.success) {
-//             this.reason = result.reason;
-//         }
-//     }
-// }
 //# sourceMappingURL=user.js.map

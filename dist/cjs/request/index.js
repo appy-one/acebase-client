@@ -1,13 +1,4 @@
 "use strict";
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 const http = require("http");
 const https = require("https");
@@ -17,7 +8,7 @@ const error_1 = require("./error");
  * @returns returns a promise that resolves with an object containing data and an optionally returned context
  */
 function request(method, url, options = { accessToken: null, data: null, dataReceivedCallback: null, dataRequestCallback: null, context: null }) {
-    return new Promise((resolve, reject) => __awaiter(this, void 0, void 0, function* () {
+    return new Promise(async (resolve, reject) => {
         const endpoint = new url_1.URL(url); // URL.parse(url);
         let postData = options.data;
         if (typeof postData === 'undefined' || postData === null) {
@@ -101,10 +92,10 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
             // Stream data to the server instead of posting all from memory at once
             const chunkSize = req.writableHighWaterMark || 1024 * 16;
             let chunk;
-            while (![null, ''].includes(chunk = yield options.dataRequestCallback(chunkSize))) {
+            while (![null, ''].includes(chunk = await options.dataRequestCallback(chunkSize))) {
                 const ok = req.write(chunk);
                 if (!ok) {
-                    yield new Promise(resolve => req.once('drain', resolve));
+                    await new Promise(resolve => req.once('drain', resolve));
                 }
             }
         }
@@ -112,7 +103,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
             req.write(postData);
         }
         req.end();
-    }));
+    });
 }
 exports.default = request;
 //# sourceMappingURL=index.js.map

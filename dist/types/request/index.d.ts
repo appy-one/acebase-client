@@ -11,3 +11,4 @@ export default function request(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: 
     context: any;
     data: any;
 }>;
+//# sourceMappingURL=index.d.ts.map

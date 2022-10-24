@@ -1,13 +1,23 @@
 import { AceBaseUser } from './user';
 import type { AceBaseClient } from './acebase-client';
+import { IAceBaseAuthProviderSignInResult } from './api-web';
+/**
+ * User authentication methods
+ */
 export declare class AceBaseClientAuth {
     private client;
     private eventCallback;
+    /**
+     * Currently signed in user
+     */
     user: AceBaseUser | null;
+    /**
+     * Access token of currently signed in user
+     */
     accessToken: string | null;
     constructor(client: AceBaseClient, eventCallback: (event: string, data: any) => void);
     /**
-     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * Sign into a user account using a username and password
      * @param username A database username
      * @param password The password
      * @returns returns a promise that resolves with the signed in user and access token
@@ -17,7 +27,7 @@ export declare class AceBaseClientAuth {
         accessToken: string;
     }>;
     /**
-     * Sign into a user account using a username and password. Note that the server must have authentication enabled.
+     * Sign into a user account using a username and password
      * @param email An email address
      * @param password The password
      * @returns returns a promise that resolves with the signed in user and access token
@@ -58,16 +68,7 @@ export declare class AceBaseClientAuth {
      * Use this method to finish OAuth flow from your callbackUrl.
      * @param callbackResult result received in your.callback/url?result
      */
-    finishAuthProviderSignIn(callbackResult: string): Promise<{
-        user: AceBaseUser;
-        accessToken: string;
-        provider: {
-            name: string;
-            access_token: string;
-            refresh_token: string;
-            expires_in: number;
-        };
-    }>;
+    finishAuthProviderSignIn(callbackResult: string): Promise<IAceBaseAuthProviderSignInResult>;
     /**
      * Refreshes an expiring access token with the refresh token returned from finishAuthProviderSignIn
      */
@@ -83,28 +84,20 @@ export declare class AceBaseClientAuth {
     /**
      * Checks if the user authentication with an auth provider.
      */
-    getRedirectResult(): Promise<{
-        user: AceBaseUser;
-        accessToken: string;
-        provider: {
-            name: string;
-            access_token: string;
-            refresh_token: string;
-            expires_in: number;
-        };
-    } | null>;
+    getRedirectResult(): Promise<IAceBaseAuthProviderSignInResult | null>;
     /**
      * Signs out of the current account
      * @param options options object, or boolean specifying whether to signout everywhere
      * @returnsreturns a promise that resolves when user was signed out successfully
      */
-    signOut(options: boolean | {
+    signOut(options?: boolean | {
         /**
          * whether to sign out all clients, or only this one
          */
         everywhere?: boolean;
         /**
-         * whether to clear the cache database (if used)
+         * if cache database is used: whether to clear cached data
+         * (recommended, currently not enabled by default, might change in next major version)
          */
         clearCache?: boolean;
     }): Promise<void>;
@@ -124,9 +117,9 @@ export declare class AceBaseClientAuth {
      */
     forgotPassword(email: string): Promise<void>;
     /**
-     * Requests a password to be changed using a previously acquired reset code, sent to the email address with forgotPassword
-     * @param resetCode
-     * @param newPassword
+     * Requests a password to be changed using a previously acquired reset code, sent to the email address with `forgotPassword`
+     * @param resetCode code sent to the user
+     * @param newPassword new password chosen by the user
      * @returns returns a promise that resolves once the password has been changed. The user is now able to sign in with the new password
      */
     resetPassword(resetCode: string, newPassword: string): Promise<void>;
@@ -252,3 +245,4 @@ export declare class AceBaseClientAuth {
      */
     deleteAccount(uid?: string): Promise<void>;
 }
+//# sourceMappingURL=auth.d.ts.map

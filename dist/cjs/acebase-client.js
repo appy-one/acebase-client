@@ -1,23 +1,15 @@
 "use strict";
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AceBaseClient = exports.AceBaseClientConnectionSettings = void 0;
+exports.AceBaseClient = exports.ConnectionSettings = void 0;
 const acebase_core_1 = require("acebase-core");
 const api_web_1 = require("./api-web");
 const auth_1 = require("./auth");
 const server_date_1 = require("./server-date");
 /**
  * Settings to connect to a remote AceBase server
+ * @internal (for internal use only)
  */
-class AceBaseClientConnectionSettings {
+class ConnectionSettings {
     constructor(settings) {
         var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
         /**
@@ -68,7 +60,7 @@ class AceBaseClientConnectionSettings {
         };
     }
 }
-exports.AceBaseClientConnectionSettings = AceBaseClientConnectionSettings;
+exports.ConnectionSettings = ConnectionSettings;
 /**
  * AceBaseClient lets you connect to a remote (or local) AceBase server over http(s)
  */
@@ -84,7 +76,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
             const [host, port, dbname, https] = arguments;
             init = { host, port, dbname, https };
         }
-        const settings = init instanceof AceBaseClientConnectionSettings ? init : new AceBaseClientConnectionSettings(init);
+        const settings = new ConnectionSettings(init); // init instanceof ConnectionSettings ? init : new ConnectionSettings(init);
         super(settings.dbname, { info: 'realtime database client', sponsor: settings.sponsor });
         /*
             TODO: improve init flow with await/async (requires Node 7.6+)
@@ -94,17 +86,17 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
         let ready = false;
         this.on('ready', () => { ready = true; });
         this.debug = new acebase_core_1.DebugLogger(settings.logLevel, `[${settings.dbname}]`.colorize(acebase_core_1.ColorStyle.blue)); // `[ ${settings.dbname} ]`
-        const synchronizeClocks = () => __awaiter(this, void 0, void 0, function* () {
+        const synchronizeClocks = async () => {
             // Synchronize date/time
             // const start = Date.now(); // performance.now();
-            const info = yield this.api.getServerInfo();
+            const info = await this.api.getServerInfo();
             const now = Date.now(), 
             // roundtrip = now - start, //performance.now() - start,
             // expectedTime = now - Math.floor(roundtrip / 2),
             // bias = info.time - expectedTime;
             bias = info.time - now;
             (0, server_date_1.setServerBias)(bias);
-        });
+        };
         this.on('connect', () => {
             // Disable cache db's ipc events, we are already notified of data changes by the server (prevents double event callbacks)
             if (cacheDb && 'settings' in cacheDb) {
@@ -118,12 +110,12 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
                 cacheDb.settings.ipcEvents = true;
             }
         });
-        this.sync = () => __awaiter(this, void 0, void 0, function* () {
-            const result = yield syncPendingChanges(true);
+        this.sync = async () => {
+            const result = await syncPendingChanges(true);
             return result;
-        });
+        };
         let syncRunning = false, firstSync = true;
-        const syncPendingChanges = (throwErrors = false) => __awaiter(this, void 0, void 0, function* () {
+        const syncPendingChanges = async (throwErrors = false) => {
             if (syncRunning) {
                 // Already syncing
                 if (throwErrors) {
@@ -144,8 +136,8 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
             }
             syncRunning = true;
             try {
-                yield cacheReadyPromise;
-                return yield this.api.sync({
+                await cacheReadyPromise;
+                return await this.api.sync({
                     firstSync,
                     fetchFreshData: !firstSync,
                     eventCallback: (eventName, args) => {
@@ -167,7 +159,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
                 syncRunning = false;
                 firstSync = false;
             }
-        });
+        };
         let syncTimeout;
         this.on('connect', () => {
             if (settings.sync.timing === 'connect' || (settings.sync.timing === 'signin' && this.auth.accessToken)) {
@@ -186,12 +178,12 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
                 syncPendingChanges();
             }
         });
-        const emitClientReady = () => __awaiter(this, void 0, void 0, function* () {
+        const emitClientReady = async () => {
             if (cacheDb) {
-                yield cacheDb.ready();
+                await cacheDb.ready();
             }
             this.emit('ready');
-        });
+        };
         this.api = new api_web_1.WebApi(settings.dbname, {
             network: settings.network,
             sync: settings.sync,
@@ -222,26 +214,48 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
             this.emit(event, arg);
         });
     }
-    sync() {
-        return __awaiter(this, void 0, void 0, function* () {
-            throw new Error('Must be set by constructor');
-        });
+    /**
+     * Initiates manual synchronization with the server of any paths with active event subscriptions. Use this if you have set the `sync.timing` connection setting to 'manual'
+     */
+    async sync() {
+        throw new Error('Must be set by constructor');
     }
+    /**
+     * Whether the client is connected to the server
+     */
     get connected() {
         return this.api.isConnected;
     }
+    /**
+     * Current connection state
+     */
     get connectionState() {
         return this.api.connectionState;
     }
+    /**
+     * Connects to the server
+     */
     connect() {
         return this.api.connect();
     }
+    /**
+     * Disconnects from the server
+     */
     disconnect() {
         this.api.disconnect();
     }
+    /**
+     * Disconnects from the server
+     */
     close() {
         this.disconnect();
     }
+    /**
+     * Calls an extension method that was added to the connected server with the .extend method and returns the result
+     * @param method method of your extension
+     * @param path path of your extension
+     * @param data data to post (put/post methods) or to add to querystring
+     */
     callExtension(method, path, data) {
         return this.api.callExtension(method, path, data);
     }
@@ -257,18 +271,22 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
     setCursor(cursor) {
         this.api.setSyncCursor(cursor);
     }
+    /**
+     * Cache specific operations
+     */
     get cache() {
         /**
          * Clears the entire cache, or a specific path without raising any events
          */
-        const clear = (path = '') => __awaiter(this, void 0, void 0, function* () {
-            yield this.api.clearCache(path);
-        });
+        const clear = async (path = '') => {
+            await this.api.clearCache(path);
+        };
         /**
-         * Updates the local cache with remote changes by retrieving all changes to `path` since given `cursor` and applying them to the local cache database.
+         * Updates the local cache with remote changes by retrieving all mutations to `path` since given `cursor` and applying them to the local cache database.
          * If the local path does not exist or no cursor is given, its entire value will be loaded from the server and stored in cache. If no cache database is used, an error will be thrown.
+         * All relevant event listeners will be triggered upon data changes.
          * @param path Path to update. The root path will be used if not given, synchronizing the entire database.
-         * @param cursor A previously achieved cursor to update with. Path's entire value will be loaded from the server if not given.
+         * @param cursor A previously acquired cursor to update the cache with. If not specified or null, `path`'s entire value will be loaded from the server.
          */
         const update = (path = '', cursor) => {
             return this.api.updateCache(path, cursor);
@@ -282,12 +300,12 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
          * @param cursor A previously acquired cursor
          * @returns Returns a Promise that resolves with a snapshot of the value
          */
-        const get = (path, cursor) => __awaiter(this, void 0, void 0, function* () {
+        const get = async (path, cursor) => {
             // Update the cache with provided cursor
             const options = Object.freeze(cursor ? { cache_mode: 'allow', cache_cursor: cursor } : { cache_mode: 'force' });
-            const snap = yield this.ref(path).get(options);
+            const snap = await this.ref(path).get(options);
             return snap;
-        });
+        };
         return { clear, update, get };
     }
 }

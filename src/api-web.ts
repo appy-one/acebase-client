@@ -901,7 +901,7 @@ export class WebApi extends Api {
         },
     }, emitEvent = true) {
         this._eventTimeline.signIn = Date.now();
-        const details: IAceBaseAuthProviderSignInResult = { user: result.user, accessToken: result.access_token, provider: result.provider || 'acebase' };
+        const details: IAceBaseAuthProviderSignInResult = { user: result.user as AceBaseUser, accessToken: result.access_token, provider: result.provider || 'acebase' };
         this.accessToken = details.accessToken;
         this.socket?.emit('signin', details.accessToken); // Make sure the connected websocket server knows who we are as well.
         emitEvent && this.eventCallback('signin', details);
@@ -958,7 +958,7 @@ export class WebApi extends Api {
                 this.accessToken = null;
                 throw new Error(`Invalid access token received: not signed in`);
             }
-            result.user = authState.user;
+            result.user = authState.user as AceBaseUser;
         }
         return this.handleSignInResult(result);
     }
@@ -1029,13 +1029,13 @@ export class WebApi extends Api {
         if (signIn) {
             return this.handleSignInResult(result);
         }
-        return { user: result.user, accessToken: this.accessToken };
+        return { user: result.user as AceBaseUser, accessToken: this.accessToken };
     }
 
     async updateUserDetails(details: any) {
         if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
         const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/update`, data: details });
-        return { user: result.user };
+        return { user: result.user as AceBaseUser };
     }
 
     async deleteAccount(uid: string, signOut = true) {
@@ -2132,7 +2132,7 @@ export class WebApi extends Api {
     callExtension(
         method: HttpMethod | Uppercase<HttpMethod>,
         path: string,
-        data: any,
+        data?: any,
     ) {
         method = method.toUpperCase() as Uppercase<HttpMethod>;
         const postData = ['PUT','POST'].includes(method) ? data : null;

@@ -194,7 +194,7 @@ export declare class AceBaseClient extends AceBaseBase {
      * @param path path of your extension
      * @param data data to post (put/post methods) or to add to querystring
      */
-    callExtension(method: HttpMethod | Uppercase<HttpMethod>, path: string, data: any): Promise<any>;
+    callExtension(method: HttpMethod | Uppercase<HttpMethod>, path: string, data?: any): Promise<any>;
     /**
      * Gets the current sync cursor
      */

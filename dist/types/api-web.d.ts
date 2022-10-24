@@ -90,11 +90,11 @@ export declare class WebApi extends Api {
     verifyEmailAddress(verificationCode: string): Promise<any>;
     resetPassword(resetCode: string, newPassword: string): Promise<any>;
     signUp(details: any, signIn?: boolean): Promise<IAceBaseAuthProviderSignInResult | {
-        user: any;
+        user: AceBaseUser;
         accessToken: string | null;
     }>;
     updateUserDetails(details: any): Promise<{
-        user: any;
+        user: AceBaseUser;
     }>;
     deleteAccount(uid: string, signOut?: boolean): Promise<boolean>;
     get isConnected(): boolean;
@@ -212,7 +212,7 @@ export declare class WebApi extends Api {
     exists(path: string, options?: {
         allow_cache: boolean;
     }): Promise<boolean>;
-    callExtension(method: HttpMethod | Uppercase<HttpMethod>, path: string, data: any): Promise<any>;
+    callExtension(method: HttpMethod | Uppercase<HttpMethod>, path: string, data?: any): Promise<any>;
     /**
      * Clears the entire cache, or a specific path without raising any events
      */

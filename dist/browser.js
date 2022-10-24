@@ -289,11 +289,11 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
          * @param path Path to update. The root path will be used if not given, synchronizing the entire database.
          * @param cursor A previously acquired cursor to update the cache with. If not specified or null, `path`'s entire value will be loaded from the server.
          */
-        const update = (path = '', cursor) => {
+        const update = (path = '', cursor = null) => {
             return this.api.updateCache(path, cursor);
         };
         /**
-         * Loads a value from cache database.If a cursor is provided, the cache will be updated with remote changes
+         * Loads a value from cache database. If a cursor is provided, the cache will be updated with remote changes
          * first. If the value is not available in cache, it will be loaded from the server and stored in cache.
          * This method is a shortcut for common cache logic provided by `db.ref(path).get` with the `cache_mode`
          * and `cache_cursor` options.
@@ -301,7 +301,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
          * @param cursor A previously acquired cursor
          * @returns Returns a Promise that resolves with a snapshot of the value
          */
-        const get = async (path, cursor) => {
+        const get = async (path, cursor = null) => {
             // Update the cache with provided cursor
             const options = Object.freeze(cursor ? { cache_mode: 'allow', cache_cursor: cursor } : { cache_mode: 'force' });
             const snap = await this.ref(path).get(options);

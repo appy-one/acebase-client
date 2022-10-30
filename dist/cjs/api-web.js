@@ -1547,22 +1547,32 @@ class WebApi extends acebase_core_1.Api {
         }
         const cacheApi = (_a = this._cache) === null || _a === void 0 ? void 0 : _a.db.api;
         const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
-        let rollbackUpdates;
+        let rollbackValue;
         const updateCache = async () => {
             const properties = Object.keys(updates);
             const result = await cacheApi.get(cachePath, { include: properties });
-            rollbackUpdates = result.value;
-            properties.forEach(prop => {
-                if (!(prop in rollbackUpdates) && updates[prop] !== null) {
-                    // Property being updated doesn't exist in current value, set to null
-                    rollbackUpdates[prop] = null;
-                }
-            });
+            rollbackValue = result.value;
+            if (typeof rollbackValue === 'object' && rollbackValue !== null) {
+                // current cache value is an object, set properties being created now to null so they'll be deleted upon rollback
+                properties.forEach(prop => {
+                    if (!(prop in rollbackValue) && updates[prop] !== null) {
+                        // Property being updated doesn't exist in current value, set to null
+                        rollbackValue[prop] = null;
+                    }
+                });
+            }
             return cacheApi.update(cachePath, updates, { context: options.context });
         };
         const rollbackCache = async () => {
             await cachePromise; // Must be ready first before we can rollback to previous value
-            return cacheApi.update(cachePath, rollbackUpdates, { context: options.context });
+            if (typeof rollbackValue === 'object' && rollbackValue !== null && Object.keys(rollbackValue).length > 0) {
+                // previous cache value is an object with at least 1 property
+                return cacheApi.update(cachePath, rollbackValue, { context: options.context });
+            }
+            else {
+                // previous cache value was not an object or did not have any properties
+                return cacheApi.set(cachePath, rollbackValue, { context: options.context });
+            }
         };
         const addPendingTransaction = async () => {
             /*

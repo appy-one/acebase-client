@@ -1,4 +1,4 @@
-import { Api, EventSubscriptionCallback, DebugLogger, Query, QueryOptions, ValueChange, ValueMutation } from 'acebase-core';
+import { Api, EventSubscriptionCallback, DebugLogger, Query, QueryOptions, ValueChange, ValueMutation, Utils } from 'acebase-core';
 import { AceBaseUser } from './user';
 import { ConnectionSettings } from './acebase-client';
 export interface IAceBaseAuthProviderSignInResult {
@@ -262,7 +262,7 @@ export declare class WebApi extends Api {
         format: string;
         type_safe: boolean;
     }): ReturnType<Api['export']>;
-    import(path: string, read: (length: number) => string | ArrayBufferView | Promise<string | ArrayBufferView>, options?: {
+    import(path: string, read: (length: number) => string | Utils.TypedArrayLike | Promise<string | Utils.TypedArrayLike>, options?: {
         format: string;
         suppress_events: boolean;
     }): Promise<any>;

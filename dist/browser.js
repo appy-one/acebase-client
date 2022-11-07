@@ -3852,7 +3852,7 @@ class LiveDataProxy {
         };
         const localMutationsEmitter = new simple_event_emitter_1.SimpleEventEmitter();
         const addOnChangeHandler = (target, callback) => {
-            const isObject = val => val !== null && typeof val === 'object';
+            const isObject = (val) => val !== null && typeof val === 'object';
             const mutationsHandler = async (details) => {
                 var _a;
                 const { snap, origin } = details;
@@ -3936,7 +3936,7 @@ class LiveDataProxy {
                 return addOnChangeHandler(target, args.callback);
             }
             else if (flag === 'subscribe' || flag === 'observe') {
-                const subscribe = subscriber => {
+                const subscribe = (subscriber) => {
                     const currentValue = getTargetValue(cache, target);
                     subscriber.next(currentValue);
                     const subscription = addOnChangeHandler(target, (value /*, previous, isRemote, context */) => {
@@ -4377,7 +4377,7 @@ function createProxy(context) {
                         context.flag('write', context.target);
                         return action();
                     };
-                    const cleanArrayValues = values => values.map(value => {
+                    const cleanArrayValues = (values) => values.map((value) => {
                         value = unproxyValue(value);
                         removeVoidProperties(value);
                         return value;
@@ -4664,7 +4664,7 @@ class OrderedCollectionProxy {
      */
     getArrayObservable() {
         const Observable = (0, optional_observable_1.getObservable)();
-        return new Observable(subscriber => {
+        return new Observable((subscriber => {
             const subscription = this.getObservable().subscribe(( /*value*/) => {
                 const newArray = this.getArray();
                 subscriber.next(newArray);
@@ -4672,7 +4672,7 @@ class OrderedCollectionProxy {
             return function unsubscribe() {
                 subscription.unsubscribe();
             };
-        });
+        }));
     }
     /**
      * Gets an ordered array representation of the items in your object collection. The items in the array
@@ -4690,7 +4690,8 @@ class OrderedCollectionProxy {
         // };
         return arr;
     }
-    add(item, index, from) {
+    add(newItem, index, from) {
+        const item = newItem;
         const arr = this.getArray();
         let minOrder = Number.POSITIVE_INFINITY, maxOrder = Number.NEGATIVE_INFINITY;
         for (let i = 0; i < arr.length; i++) {
@@ -5441,7 +5442,7 @@ class DataReference {
             throw new Error(`Cannot observe wildcard path "/${this.path}"`);
         }
         const Observable = (0, optional_observable_1.getObservable)();
-        return new Observable(observer => {
+        return new Observable((observer => {
             let cache, resolved = false;
             let promise = this.get(options).then(snap => {
                 resolved = true;
@@ -5486,7 +5487,7 @@ class DataReference {
             return () => {
                 this.off('mutated', updateCache);
             };
-        });
+        }));
     }
     async forEach(callbackOrOptions, callback) {
         let options;
@@ -6909,7 +6910,7 @@ class SchemaDefinition {
             //     }
             // };
             // Resulting ts: "{name:string,born:Date,instrument:'guitar'|'piano',address?:{street:string}}"
-            const toTS = obj => {
+            const toTS = (obj) => {
                 return '{' + Object.keys(obj)
                     .map(key => {
                     let val = obj[key];
@@ -7151,7 +7152,7 @@ function Colorize(str, style) {
         return str;
     }
     const openCodes = [], closeCodes = [];
-    const addStyle = style => {
+    const addStyle = (style) => {
         if (style === ColorStyle.reset) {
             openCodes.push(ResetCode.all);
         }
@@ -7341,19 +7342,19 @@ class EventStream {
     constructor(eventPublisherCallback) {
         const subscribers = [];
         let noMoreSubscribersCallback;
-        let activationState;
-        const _stoppedState = 'stopped (no more subscribers)';
+        let activationState; // TODO: refactor to string only: STATE_INIT, STATE_STOPPED, STATE_ACTIVATED, STATE_CANCELED
+        const STATE_STOPPED = 'stopped (no more subscribers)';
         this.subscribe = (callback, activationCallback) => {
             if (typeof callback !== 'function') {
                 throw new TypeError('callback must be a function');
             }
-            else if (activationState === _stoppedState) {
+            else if (activationState === STATE_STOPPED) {
                 throw new Error('stream can\'t be used anymore because all subscribers were stopped');
             }
             const sub = {
                 callback,
                 activationCallback: function (activated, cancelReason) {
-                    activationCallback && activationCallback(activated, cancelReason);
+                    activationCallback === null || activationCallback === void 0 ? void 0 : activationCallback(activated, cancelReason);
                     this.subscription._setActivationState(activated, cancelReason);
                 },
                 subscription: new EventSubscription(function stop() {
@@ -7364,11 +7365,11 @@ class EventStream {
             subscribers.push(sub);
             if (typeof activationState !== 'undefined') {
                 if (activationState === true) {
-                    activationCallback && activationCallback(true);
+                    activationCallback === null || activationCallback === void 0 ? void 0 : activationCallback(true);
                     sub.subscription._setActivationState(true);
                 }
                 else if (typeof activationState === 'string') {
-                    activationCallback && activationCallback(false, activationState);
+                    activationCallback === null || activationCallback === void 0 ? void 0 : activationCallback(false, activationState);
                     sub.subscription._setActivationState(false, activationState);
                 }
             }
@@ -7377,8 +7378,8 @@ class EventStream {
         const checkActiveSubscribers = () => {
             let ret;
             if (subscribers.length === 0) {
-                ret = noMoreSubscribersCallback && noMoreSubscribersCallback();
-                activationState = _stoppedState;
+                ret = noMoreSubscribersCallback === null || noMoreSubscribersCallback === void 0 ? void 0 : noMoreSubscribersCallback();
+                activationState = STATE_STOPPED;
             }
             return Promise.resolve(ret);
         };
@@ -7399,8 +7400,8 @@ class EventStream {
         };
         /**
          * For publishing side: adds a value that will trigger callbacks to all subscribers
-         * @param {any} val
-         * @returns {boolean} returns whether there are subscribers left
+         * @param val
+         * @returns returns whether there are subscribers left
          */
         const publish = (val) => {
             subscribers.forEach(sub => {
@@ -7423,7 +7424,8 @@ class EventStream {
             activationState = true;
             noMoreSubscribersCallback = allSubscriptionsStoppedCallback;
             subscribers.forEach(sub => {
-                sub.activationCallback && sub.activationCallback(true);
+                var _a;
+                (_a = sub.activationCallback) === null || _a === void 0 ? void 0 : _a.call(sub, true);
             });
         };
         /**
@@ -7432,7 +7434,8 @@ class EventStream {
         const cancel = (reason) => {
             activationState = reason;
             subscribers.forEach(sub => {
-                sub.activationCallback && sub.activationCallback(false, reason || new Error('unknown reason'));
+                var _a;
+                (_a = sub.activationCallback) === null || _a === void 0 ? void 0 : _a.call(sub, false, reason || new Error('unknown reason'));
             });
             subscribers.splice(0); // Clear all
         };
@@ -7741,9 +7744,10 @@ const deserialize2 = (data) => {
         }
         else if (dataType === 'array') {
             // partial ("sparse") array, deserialize children into a copy
+            const arr = data;
             const copy = {};
-            for (const index in data) {
-                copy[index] = (0, exports.deserialize2)(data[index]);
+            for (const index in arr) {
+                copy[index] = (0, exports.deserialize2)(arr[index]);
             }
             delete copy['.type'];
             return new partial_array_1.PartialArray(copy);
@@ -7798,7 +7802,7 @@ function get(mappings, path) {
             return false; // Can't be a match
         }
         return mkeys.every((mkey, index) => {
-            if (mkey === '*' || mkey[0] === '$') {
+            if (mkey === '*' || (typeof mkey === 'string' && mkey[0] === '$')) {
                 return true; // wildcard
             }
             return mkey === keys[index];
@@ -7843,14 +7847,14 @@ function mapDeep(mappings, entryPath) {
         let isMatch = true;
         if (keys.length === 0 && startPath !== null) {
             // Only match first node's children if mapping pattern is "*" or "$variable"
-            isMatch = mkeys.length === 1 && (mkeys[0] === '*' || mkeys[0][0] === '$');
+            isMatch = mkeys.length === 1 && (mkeys[0] === '*' || (typeof mkeys[0] === 'string' && mkeys[0][0] === '$'));
         }
         else {
             mkeys.every((mkey, index) => {
                 if (index >= keys.length) {
                     return false; // stop .every loop
                 }
-                else if (mkey === '*' || mkey[0] === '$' || mkey === keys[index]) {
+                else if ((mkey === '*' || (typeof mkey === 'string' && mkey[0] === '$')) || mkey === keys[index]) {
                     return true; // continue .every loop
                 }
                 else {
@@ -7904,7 +7908,7 @@ function process(db, mappings, path, obj, action) {
             }
             const key = keys[0];
             let children = [];
-            if (key === '*' || key[0] === '$') {
+            if (key === '*' || (typeof key === 'string' && key[0] === '$')) {
                 // Include all children
                 if (parent instanceof Array) {
                     children = parent.map((val, index) => ({ key: index, val }));
@@ -8079,19 +8083,19 @@ class TypeMappings {
         };
     }
     /**
-     * (for internal use)
+     * @internal (for internal use)
      * Serializes any child in given object that has a type mapping
-     * @param {string} path | path to the object's location
-     * @param {object} obj | object to serialize
+     * @param path | path to the object's location
+     * @param obj object to serialize
      */
     serialize(path, obj) {
         return process(this.db, this[_mappings], path, obj, 'serialize');
     }
     /**
-     * (for internal use)
+     * @internal (for internal use)
      * Deserialzes any child in given object that has a type mapping
-     * @param {string} path | path to the object's location
-     * @param {object} obj | object to deserialize
+     * @param path path to the object's location
+     * @param obj object to deserialize
      */
     deserialize(path, obj) {
         return process(this.db, this[_mappings], path, obj, 'deserialize');
@@ -8326,7 +8330,7 @@ function cloneObject(original, stack) {
     if (((_a = original === null || original === void 0 ? void 0 : original.constructor) === null || _a === void 0 ? void 0 : _a.name) === 'DataSnapshot') {
         throw new TypeError(`Object to clone is a DataSnapshot (path "${original.ref.path}")`);
     }
-    const checkAndFixTypedArray = obj => {
+    const checkAndFixTypedArray = (obj) => {
         if (obj !== null && typeof obj === 'object'
             && typeof obj.constructor === 'function' && typeof obj.constructor.name === 'string'
             && ['Buffer', 'Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'BigUint64Array', 'BigInt64Array'].includes(obj.constructor.name)) {
@@ -8372,7 +8376,7 @@ function cloneObject(original, stack) {
     return clone;
 }
 exports.cloneObject = cloneObject;
-const isTypedArray = val => typeof val === 'object' && ['ArrayBuffer', 'Buffer', 'Uint8Array', 'Uint16Array', 'Uint32Array', 'Int8Array', 'Int16Array', 'Int32Array'].includes(val.constructor.name);
+const isTypedArray = (val) => typeof val === 'object' && ['ArrayBuffer', 'Buffer', 'Uint8Array', 'Uint16Array', 'Uint32Array', 'Int8Array', 'Int16Array', 'Int32Array'].includes(val.constructor.name);
 // CONSIDER: updating isTypedArray to: const isTypedArray = val => typeof val === 'object' && 'buffer' in val && 'byteOffset' in val && 'byteLength' in val;
 function valuesAreEqual(val1, val2) {
     if (val1 === val2) {
@@ -8458,7 +8462,7 @@ function compareValues(oldVal, newVal, sortedResults = false) {
     else if (typeof oldVal === 'object') {
         // Do key-by-key comparison of objects
         const isArray = oldVal instanceof Array;
-        const getKeys = obj => {
+        const getKeys = (obj) => {
             let keys = Object.keys(obj).filter(key => !voids.includes(obj[key]));
             if (isArray) {
                 keys = keys.map((v) => parseInt(v));

@@ -8,23 +8,23 @@
   },
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/cjs/index.js",
-      "require": "./dist/cjs/index.js"
-    },
-    "./esm": {
       "import": "./dist/esm/index.js",
-      "require": "./dist/esm/index.js"
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/types/index.d.ts"
     }
   },
   "browser": {
     "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
     "./dist/cjs/request/index.js": "./dist/cjs/request/browser.js",
+    "./dist/esm/request/index.js": "./dist/esm/request/browser.js",
     "./dist/cjs/performance/index.js": "./dist/cjs/performance/browser.js",
-    "./dist/cjs/base64/index.js": "./dist/cjs/base64/browser.js"
+    "./dist/esm/performance/index.js": "./dist/esm/performance/browser.js",
+    "./dist/cjs/base64/index.js": "./dist/cjs/base64/browser.js",
+    "./dist/esm/base64/index.js": "./dist/esm/base64/browser.js"
   },
-  "types": "./dist/types/index.d.ts",
   "private": false,
   "repository": "github:appy-one/acebase-client",
   "scripts": {

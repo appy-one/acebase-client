@@ -1,5 +1,5 @@
 import { Api, Transport, ID, PathInfo, ColorStyle, SchemaDefinition, SimpleEventEmitter, EventSubscriptionCallback,
-    AceBaseBase, DebugLogger, Query, QueryOptions, ValueChange, ValueMutation, IDataMutationsArray } from 'acebase-core';
+    AceBaseBase, DebugLogger, Query, QueryOptions, ValueChange, ValueMutation, IDataMutationsArray, Utils } from 'acebase-core';
 import { connect as connectSocket } from 'socket.io-client';
 import * as Base64 from './base64';
 import { AceBaseRequestError, NOT_CONNECTED_ERROR_MESSAGE } from './request/error';
@@ -829,7 +829,7 @@ export class WebApi extends Api {
         /**
          * A method that overrides the default data send handler. Override for streaming.
          */
-        dataRequestCallback?: (length: number) => string | ArrayBufferView | Promise<string | ArrayBufferView>;
+        dataRequestCallback?: (length: number) => string | Utils.TypedArrayLike | Promise<string | Utils.TypedArrayLike>;
         /**
          * Whether to try the request even if there is no connection
          * @default false
@@ -2342,7 +2342,7 @@ export class WebApi extends Api {
 
     import(
         path: string,
-        read: (length: number) => string | ArrayBufferView | Promise<string | ArrayBufferView>,
+        read: (length: number) => string | Utils.TypedArrayLike | Promise<string | Utils.TypedArrayLike>,
         options = { format: 'json', suppress_events: false },
     ) {
         options.format = 'json';

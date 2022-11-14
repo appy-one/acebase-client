@@ -6083,7 +6083,7 @@ exports.ID = ID;
 },{"./cuid":18}],25:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ObjectCollection = exports.PartialArray = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.OrderedCollectionProxy = exports.proxyAccess = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
+exports.ObjectCollection = exports.PartialArray = exports.SimpleObservable = exports.SchemaDefinition = exports.Colorize = exports.ColorStyle = exports.SimpleEventEmitter = exports.SimpleCache = exports.ascii85 = exports.PathInfo = exports.Utils = exports.TypeMappings = exports.Transport = exports.EventSubscription = exports.EventPublisher = exports.EventStream = exports.PathReference = exports.ID = exports.DebugLogger = exports.OrderedCollectionProxy = exports.proxyAccess = exports.MutationsDataSnapshot = exports.DataSnapshot = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.QueryDataRetrievalOptions = exports.DataRetrievalOptions = exports.DataReferenceQuery = exports.DataReference = exports.Api = exports.AceBaseBaseSettings = exports.AceBaseBase = void 0;
 var acebase_base_1 = require("./acebase-base");
 Object.defineProperty(exports, "AceBaseBase", { enumerable: true, get: function () { return acebase_base_1.AceBaseBase; } });
 Object.defineProperty(exports, "AceBaseBaseSettings", { enumerable: true, get: function () { return acebase_base_1.AceBaseBaseSettings; } });
@@ -6129,12 +6129,14 @@ Object.defineProperty(exports, "ColorStyle", { enumerable: true, get: function (
 Object.defineProperty(exports, "Colorize", { enumerable: true, get: function () { return simple_colors_1.Colorize; } });
 var schema_1 = require("./schema");
 Object.defineProperty(exports, "SchemaDefinition", { enumerable: true, get: function () { return schema_1.SchemaDefinition; } });
+var optional_observable_1 = require("./optional-observable");
+Object.defineProperty(exports, "SimpleObservable", { enumerable: true, get: function () { return optional_observable_1.SimpleObservable; } });
 var partial_array_1 = require("./partial-array");
 Object.defineProperty(exports, "PartialArray", { enumerable: true, get: function () { return partial_array_1.PartialArray; } });
 const object_collection_1 = require("./object-collection");
 Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: function () { return object_collection_1.ObjectCollection; } });
 
-},{"./acebase-base":14,"./api":15,"./ascii85":16,"./data-proxy":20,"./data-reference":21,"./data-snapshot":22,"./debug":23,"./id":24,"./object-collection":26,"./partial-array":28,"./path-info":29,"./path-reference":30,"./schema":32,"./simple-cache":33,"./simple-colors":34,"./simple-event-emitter":35,"./subscription":36,"./transport":37,"./type-mappings":38,"./utils":39}],26:[function(require,module,exports){
+},{"./acebase-base":14,"./api":15,"./ascii85":16,"./data-proxy":20,"./data-reference":21,"./data-snapshot":22,"./debug":23,"./id":24,"./object-collection":26,"./optional-observable":27,"./partial-array":28,"./path-info":29,"./path-reference":30,"./schema":32,"./simple-cache":33,"./simple-colors":34,"./simple-event-emitter":35,"./subscription":36,"./transport":37,"./type-mappings":38,"./utils":39}],26:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ObjectCollection = void 0;
@@ -6188,40 +6190,48 @@ exports.ObjectCollection = ObjectCollection;
 
 },{"./id":24}],27:[function(require,module,exports){
 "use strict";
-// Optional dependency on rxjs package. If rxjs is installed into your project, you'll get the correct
-// typings for AceBase methods that use Observables, and you'll be able to use them. If you don't use
-// those methods, there is no need to install rxjs.
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ObservableShim = exports.setObservable = exports.getObservable = void 0;
+exports.SimpleObservable = exports.setObservable = exports.getObservable = void 0;
+const utils_1 = require("./utils");
+let _shimRequested = false;
 let _observable;
+(async () => {
+    // Try pre-loading rxjs Observable
+    // Test availability in global scope first
+    const global = (0, utils_1.getGlobalObject)();
+    if (typeof global.Observable !== 'undefined') {
+        _observable = global.Observable;
+        return;
+    }
+    // Try importing it from dependencies
+    try {
+        _observable = await Promise.resolve().then(() => require('rxjs/internal/Observable'));
+    }
+    catch (_a) {
+        // rxjs Observable not available, setObservable must be used if usage of SimpleObservable is not desired
+        _observable = SimpleObservable;
+    }
+})();
 function getObservable() {
+    if (_observable === SimpleObservable && !_shimRequested) {
+        console.warn('Using AceBase\'s simple Observable implementation because rxjs is not available. ' +
+            'Add it to your project with "npm install rxjs", add it to AceBase using db.setObservable(Observable), ' +
+            'or call db.setObservable("shim") to suppress this warning');
+    }
     if (_observable) {
         return _observable;
     }
-    if (typeof window !== 'undefined' && window.Observable) {
-        _observable = window.Observable;
-        return _observable;
-    }
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { Observable } = require('rxjs'); // fails in ESM module, need an elegant way to handle this. Can't use dynamic import() because it 1) requires Node 12+ and 2) causes Webpack build to fail if rxjs is not installed
-        if (!Observable) {
-            throw new Error('not loaded');
-        }
-        _observable = Observable;
-        return Observable;
-    }
-    catch (err) {
-        throw new Error('RxJS Observable could not be loaded. If you are using a browser build, add it to AceBase using db.setObservable. For node.js builds, add it to your project with: npm i rxjs');
-    }
+    throw new Error('RxJS Observable could not be loaded. ');
 }
 exports.getObservable = getObservable;
 function setObservable(Observable) {
     if (Observable === 'shim') {
-        console.warn('Using AceBase\'s simple Observable shim. Only use this if you know what you\'re doing.');
-        Observable = ObservableShim;
+        _observable = SimpleObservable;
+        _shimRequested = true;
     }
-    _observable = Observable;
+    else {
+        _observable = Observable;
+    }
 }
 exports.setObservable = setObservable;
 /**
@@ -6229,7 +6239,7 @@ exports.setObservable = setObservable;
  * If for some reason rxjs is not available (eg in test suite), we can provide a shim. This class is used when
  * `db.setObservable("shim")` is called
  */
-class ObservableShim {
+class SimpleObservable {
     constructor(create) {
         this._active = false;
         this._subscribers = [];
@@ -6266,9 +6276,9 @@ class ObservableShim {
         return subscription;
     }
 }
-exports.ObservableShim = ObservableShim;
+exports.SimpleObservable = SimpleObservable;
 
-},{"rxjs":41}],28:[function(require,module,exports){
+},{"./utils":39,"rxjs/internal/Observable":41}],28:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PartialArray = void 0;
@@ -8104,10 +8114,10 @@ class TypeMappings {
 exports.TypeMappings = TypeMappings;
 
 },{"./data-reference":21,"./data-snapshot":22,"./path-info":29,"./utils":39}],39:[function(require,module,exports){
-(function (Buffer){(function (){
+(function (global,Buffer){(function (){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.defer = exports.getChildValues = exports.getMutations = exports.compareValues = exports.ObjectDifferences = exports.valuesAreEqual = exports.cloneObject = exports.concatTypedArrays = exports.decodeString = exports.encodeString = exports.bytesToBigint = exports.bigintToBytes = exports.bytesToNumber = exports.numberToBytes = void 0;
+exports.getGlobalObject = exports.defer = exports.getChildValues = exports.getMutations = exports.compareValues = exports.ObjectDifferences = exports.valuesAreEqual = exports.cloneObject = exports.concatTypedArrays = exports.decodeString = exports.encodeString = exports.bytesToBigint = exports.bigintToBytes = exports.bytesToNumber = exports.numberToBytes = void 0;
 const path_reference_1 = require("./path-reference");
 const process_1 = require("./process");
 const partial_array_1 = require("./partial-array");
@@ -8533,8 +8543,25 @@ function defer(fn) {
     process_1.default.nextTick(fn);
 }
 exports.defer = defer;
+function getGlobalObject() {
+    var _a;
+    if (typeof globalThis !== 'undefined') {
+        return globalThis;
+    }
+    if (typeof global !== 'undefined') {
+        return global;
+    }
+    if (typeof window !== 'undefined') {
+        return window;
+    }
+    if (typeof self !== 'undefined') {
+        return self;
+    }
+    return (_a = (function () { return this; }())) !== null && _a !== void 0 ? _a : Function('return this')();
+}
+exports.getGlobalObject = getGlobalObject;
 
-}).call(this)}).call(this,require("buffer").Buffer)
+}).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
 },{"./partial-array":28,"./path-reference":30,"./process":31,"buffer":42}],40:[function(require,module,exports){
 'use strict'
 

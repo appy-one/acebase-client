@@ -76,7 +76,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "^1.24.0",
+    "acebase-core": "github:appy-one/acebase-core#improvement/optional-rxjs-observable",
     "socket.io-client": "^2.5.0"
   },
   "devDependencies": {

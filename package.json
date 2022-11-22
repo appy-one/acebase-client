@@ -35,9 +35,8 @@
     "build:esm": "tsc -p tsconfig.json && npx tsc-esm-fix ---target='dist/esm'",
     "build:cjs": "tsc -p tsconfig-cjs.json",
     "build:packages": "bash ./create-package-files",
-    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs/internal/Observable && terser dist/browser.js -o dist/browser.min.js && cp src/browser.html dist",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "npmfix": "npm i --package-lock-only"
+    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs && terser dist/browser.js -o dist/browser.min.js && cp src/browser.html dist",
+    "test": "node test/cjs && node test/esm"
   },
   "keywords": [
     "database",
@@ -76,7 +75,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "github:appy-one/acebase-core#improvement/optional-rxjs-observable",
+    "acebase-core": "github:appy-one/acebase-core",
     "socket.io-client": "^2.5.0"
   },
   "devDependencies": {

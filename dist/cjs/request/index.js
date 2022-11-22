@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const http = require("http");
-const https = require("https");
+const http_1 = require("http");
+const https_1 = require("https");
 const url_1 = require("url");
 const error_1 = require("./error");
 /**
@@ -37,7 +37,7 @@ function request(method, url, options = { accessToken: null, data: null, dataRec
         if (options.accessToken) {
             request.headers['Authorization'] = `Bearer ${options.accessToken}`;
         }
-        const client = request.protocol === 'https:' ? https : http;
+        const client = { request: request.protocol === 'https:' ? https_1.request : http_1.request };
         const req = client.request(request, res => {
             res.setEncoding('utf8');
             let data = '';

@@ -184,6 +184,14 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
             }
             this.emit('ready');
         };
+        if (typeof process !== 'undefined') {
+            // Enable graceful process exits, fixes #32
+            process.on('SIGINT', () => {
+                if (this.connected) {
+                    this.disconnect(); // Should be enough to exit process
+                }
+            });
+        }
         this.api = new api_web_1.WebApi(settings.dbname, {
             network: settings.network,
             sync: settings.sync,

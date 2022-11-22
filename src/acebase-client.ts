@@ -342,6 +342,15 @@ export class AceBaseClient extends AceBaseBase {
             this.emit('ready');
         };
 
+        if (typeof process !== 'undefined') {
+            // Enable graceful process exits, fixes #32
+            process.on('SIGINT', () => {
+                if (this.connected) {
+                    this.disconnect(); // Should be enough to exit process
+                }
+            });
+        }
+
         this.api = new WebApi(settings.dbname, {
             network: settings.network,
             sync: settings.sync,

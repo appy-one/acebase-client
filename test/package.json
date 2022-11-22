@@ -1,0 +1,14 @@
+{
+    "scripts": {
+        "build": "npm run build:esm && npm run build:cjs",
+        "build:esm": "tsc -p tsconfig.esm.json",
+        "build:cjs": "tsc -p tsconfig.cjs.json",        
+        "test": "node cjs && node esm"
+    },
+    "dependencies": {
+        "acebase-server": "^1.15.2"
+    },
+    "devDependencies": {
+        "typescript": "^4.9.3"
+    }
+}

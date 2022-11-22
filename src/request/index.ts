@@ -1,5 +1,5 @@
-import * as http from 'http';
-import * as https from 'https';
+import { request as httpRequest } from 'http';
+import { request as httpsRequest } from 'https';
 import { URL } from 'url';
 import { AceBaseRequestError } from './error';
 
@@ -47,7 +47,7 @@ export default function request(
         if (options.accessToken) {
             request.headers['Authorization'] = `Bearer ${options.accessToken}`;
         }
-        const client = request.protocol === 'https:' ? https : http;
+        const client = { request: request.protocol === 'https:' ? httpsRequest : httpRequest };
         const req = client.request(request, res => {
             res.setEncoding('utf8');
             let data = '';

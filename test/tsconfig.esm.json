@@ -1,0 +1,14 @@
+{
+    "compilerOptions": {
+        "rootDir": "src",
+        "listEmittedFiles": true,
+        "moduleResolution": "node",
+        "strict": true,
+        "noImplicitAny": true,
+        "skipLibCheck": true,
+        "outDir": "esm",
+        "target": "es2020",
+        "module": "es2020",
+    },
+    "include": ["src/**/*"]
+}

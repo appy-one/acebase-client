@@ -52,11 +52,24 @@ export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClien
         text: `Storing this text from ${modules} tests`,
     });
 
+    // Pause to optionally test SIGINT handling
+    console.log(`Disconnecting in 5s... Press Ctrl+C to manually test graceful exiting`);
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
     // Disconnect
     db.disconnect();
 
     // Stop server
     server.shutdown();
 
-    // TODO: Expect automatic app exit now
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Create another client that does not connect automatically
+    const db2 = new Client({ dbname, host: 'localhost', port: settings.port, https: false, autoConnect: false });
+
+    // Pause to optionally test SIGINT handling
+    console.log(`Exit in 5s... Press Ctrl+C to manually test idle exit`);
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    console.log('Tests done');
 }

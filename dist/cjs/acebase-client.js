@@ -188,6 +188,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
             // Enable graceful process exits, fixes #32
             process.on('SIGINT', () => {
                 if (this.connected) {
+                    this.debug.log('Received SIGINT, closing connection');
                     this.disconnect(); // Should be enough to exit process
                 }
             });

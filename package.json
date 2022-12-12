@@ -35,7 +35,7 @@
     "build:esm": "tsc -p tsconfig.json && npx tsc-esm-fix ---target='dist/esm'",
     "build:cjs": "tsc -p tsconfig-cjs.json",
     "build:packages": "bash ./create-package-files",
-    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs --ignore buffer && terser dist/browser.js -o dist/browser.min.js && cp src/browser.html dist",
+    "browserify": "browserify dist/cjs/browser.js -o dist/browser.js --standalone acebaseclient --ignore rxjs --ignore process --ignore buffer && terser dist/browser.js -o dist/browser.min.js && cp src/browser.html dist",
     "test": "node test/cjs && node test/esm"
   },
   "keywords": [

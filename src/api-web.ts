@@ -172,7 +172,8 @@ export class WebApi extends Api {
 
     private _eventTimeline = { init: Date.now(), connect: 0, signIn: 0, sync: 0, disconnect: 0 };
 
-    public get url() { return this.settings.url; }
+    public get host() { return this.settings.url; }
+    public get url() { return `${this.settings.url}${this.settings.rootPath ? `/${this.settings.rootPath}` : ''}`; }
 
     private async _updateCursor (cursor: string | null) {
         if (!cursor || (this._cursor.current && cursor < this._cursor.current)) {
@@ -346,9 +347,9 @@ export class WebApi extends Api {
                 return setTimeout(() => this.checkConnection(), 0);
             }
 
-            const socket = this.socket = connectSocket(this.url, {
+            const socket = this.socket = connectSocket(this.host, {
                 // Use default socket.io connection settings:
-                path: this.settings.rootPath + '/socket.io',
+                path: `/${this.settings.rootPath ? `${this.settings.rootPath}/` : ''}socket.io`,
                 autoConnect: true,
                 reconnection: retry,
                 reconnectionAttempts: retry ? Infinity : 0,

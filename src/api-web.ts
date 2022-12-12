@@ -613,9 +613,11 @@ export class WebApi extends Api {
             this.manualConnectionMonitor.emit('disconnect');
         }
         else if (this.socket !== null && typeof this.socket === 'object') {
+            if (this._connectionState === CONNECTION_STATE_CONNECTED) {
+                this._eventTimeline.disconnect = Date.now();
+            }
             this._connectionState = CONNECTION_STATE_DISCONNECTING;
-            this._eventTimeline.disconnect = Date.now();
-            this.socket.disconnect();
+            this.socket.close();
             this.socket = null;
         }
     }

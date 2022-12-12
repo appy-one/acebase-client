@@ -406,6 +406,7 @@ export class AceBaseClient extends AceBaseBase {
 
     /**
      * Manually connects to the server: use this if you have `autoConnect` disabled in your client config
+     * @param retry Whether to keep retrying to connect if the connection fails. Default is `true`
      */
     connect(retry = true) {
         return this.api.connect(retry);

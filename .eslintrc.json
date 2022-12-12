@@ -36,7 +36,8 @@
             "functions": "only-multiline"
         }],
         "no-trailing-spaces": "error",
-        "eol-last": "error"
+        "eol-last": "error",
+        "curly": "error"
     },
     "overrides": [{
         "files": "*.js",

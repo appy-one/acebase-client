@@ -342,7 +342,7 @@ export class AceBaseClient extends AceBaseBase {
             this.emit('ready');
         };
 
-        if (typeof process !== 'undefined') {
+        if (typeof process === 'object' && typeof process?.on === 'function') {
             // Enable graceful process exits, fixes #32
             process.on('SIGINT', () => {
                 if (this.connected) {

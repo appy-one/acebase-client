@@ -202,7 +202,7 @@ export class WebApi extends Api {
     constructor(
         private dbname = 'default',
         private settings:
-            Pick<ConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache'>
+            Pick<ConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache' | 'rootPath'>
             & { debug: DebugLogger, url: string },
         callback: (event: string, ...args: any[]) => void,
     ) {
@@ -348,6 +348,7 @@ export class WebApi extends Api {
 
             const socket = this.socket = connectSocket(this.url, {
                 // Use default socket.io connection settings:
+                path: this.settings.rootPath + '/socket.io',
                 autoConnect: true,
                 reconnection: retry,
                 reconnectionAttempts: retry ? Infinity : 0,

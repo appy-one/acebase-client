@@ -31,6 +31,12 @@ export class ConnectionSettings {
     https = true;
 
     /**
+     * Root path of the AceBase server instance. Specify this if the server's `rootPath` has been configured.
+     * @default ''
+     */
+    rootPath = '';
+
+    /**
      * Automatically connect to the server, or wait until `db.connect()` is called
      * @default true
      */
@@ -157,6 +163,7 @@ export class ConnectionSettings {
         this.host = settings.host;
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
+        if (typeof settings.rootPath === 'string') { this.rootPath = settings.rootPath; }
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
@@ -361,6 +368,7 @@ export class AceBaseClient extends AceBaseBase {
             cache: settings.cache,
             debug: this.debug,
             url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`,
+            rootPath: settings.rootPath,
         }, (evt, data) => {
             if (evt === 'connect') {
                 this.emit('connect');

@@ -58,5 +58,5 @@ export {
     ID,
     proxyAccess,
     PartialArray,
-    // Transport, // No longer export, has never been publically typed
+    Transport,
 } from 'acebase-core';

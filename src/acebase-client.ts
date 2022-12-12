@@ -163,7 +163,7 @@ export class ConnectionSettings {
         this.host = settings.host;
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
-        if (typeof settings.rootPath === 'string') { this.rootPath = settings.rootPath; }
+        if (typeof settings.rootPath === 'string') { this.rootPath = settings.rootPath.replace(/^\/|\/$/g, ''); }
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';

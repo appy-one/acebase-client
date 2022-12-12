@@ -283,7 +283,7 @@ export class WebApi extends Api {
         }
     }
 
-    public connect() {
+    public connect(retry = true) {
         if (this.socket !== null && typeof this.socket === 'object') {
             this.disconnect();
         }
@@ -349,8 +349,8 @@ export class WebApi extends Api {
             const socket = this.socket = connectSocket(this.url, {
                 // Use default socket.io connection settings:
                 autoConnect: true,
-                reconnection: true,
-                reconnectionAttempts: Infinity,
+                reconnection: retry,
+                reconnectionAttempts: retry ? Infinity : 0,
                 reconnectionDelay: 1000,
                 reconnectionDelayMax: 5000,
                 timeout: 20000,

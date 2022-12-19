@@ -75,7 +75,7 @@
   "author": "Ewout Stortenbeker <me@appy.one> (http://appy.one)",
   "license": "MIT",
   "dependencies": {
-    "acebase-core": "github:appy-one/acebase-core",
+    "acebase-core": "^1.25.0",
     "socket.io-client": "^2.5.0"
   },
   "devDependencies": {

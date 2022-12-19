@@ -14,6 +14,11 @@ export class ConnectionSettings {
          */
         this.https = true;
         /**
+         * Root path of the AceBase server instance. Specify this if the server's `rootPath` has been configured.
+         * @default ''
+         */
+        this.rootPath = '';
+        /**
          * Automatically connect to the server, or wait until `db.connect()` is called
          * @default true
          */
@@ -31,6 +36,9 @@ export class ConnectionSettings {
         this.host = settings.host;
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
+        if (typeof settings.rootPath === 'string') {
+            this.rootPath = settings.rootPath.replace(/^\/|\/$/g, '');
+        }
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
@@ -178,7 +186,7 @@ export class AceBaseClient extends AceBaseBase {
             }
             this.emit('ready');
         };
-        if (typeof process !== 'undefined') {
+        if (typeof process === 'object' && typeof process?.on === 'function') {
             // Enable graceful process exits, fixes #32
             process.on('SIGINT', () => {
                 if (this.connected) {
@@ -196,6 +204,7 @@ export class AceBaseClient extends AceBaseBase {
             cache: settings.cache,
             debug: this.debug,
             url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`,
+            rootPath: settings.rootPath,
         }, (evt, data) => {
             if (evt === 'connect') {
                 this.emit('connect');
@@ -236,10 +245,11 @@ export class AceBaseClient extends AceBaseBase {
         return this.api.connectionState;
     }
     /**
-     * Connects to the server
+     * Manually connects to the server: use this if you have `autoConnect` disabled in your client config
+     * @param retry Whether to keep retrying to connect if the connection fails. Default is `true`
      */
-    connect() {
-        return this.api.connect();
+    connect(retry = true) {
+        return this.api.connect(retry);
     }
     /**
      * Disconnects from the server

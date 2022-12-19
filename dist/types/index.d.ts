@@ -27,5 +27,5 @@ export { AceBaseClientAuth } from './auth';
 export { AceBaseUser } from './user';
 export { ServerDate } from './server-date';
 export { CachedValueUnavailableError } from './errors';
-export { DataReference, DataSnapshot, DataSnapshotsArray, DataReferencesArray, EventStream, EventSubscription, PathReference, TypeMappings, TypeMappingOptions, IReflectionNodeInfo, IReflectionChildrenInfo, IStreamLike, ILiveDataProxy, ILiveDataProxyValue, IObjectCollection, ObjectCollection, ID, proxyAccess, PartialArray, } from 'acebase-core';
+export { DataReference, DataSnapshot, DataSnapshotsArray, DataReferencesArray, EventStream, EventSubscription, PathReference, TypeMappings, TypeMappingOptions, IReflectionNodeInfo, IReflectionChildrenInfo, IStreamLike, ILiveDataProxy, ILiveDataProxyValue, IObjectCollection, ObjectCollection, ID, proxyAccess, PartialArray, Transport, } from 'acebase-core';
 //# sourceMappingURL=index.d.ts.map

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PartialArray = exports.proxyAccess = exports.ID = exports.ObjectCollection = exports.TypeMappings = exports.PathReference = exports.EventSubscription = exports.EventStream = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataSnapshot = exports.DataReference = exports.CachedValueUnavailableError = exports.ServerDate = exports.AceBaseUser = exports.AceBaseClientAuth = exports.AceBaseClient = void 0;
+exports.Transport = exports.PartialArray = exports.proxyAccess = exports.ID = exports.ObjectCollection = exports.TypeMappings = exports.PathReference = exports.EventSubscription = exports.EventStream = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataSnapshot = exports.DataReference = exports.CachedValueUnavailableError = exports.ServerDate = exports.AceBaseUser = exports.AceBaseClientAuth = exports.AceBaseClient = void 0;
 /**
    ________________________________________________________________________________
 
@@ -47,4 +47,5 @@ Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: func
 Object.defineProperty(exports, "ID", { enumerable: true, get: function () { return acebase_core_1.ID; } });
 Object.defineProperty(exports, "proxyAccess", { enumerable: true, get: function () { return acebase_core_1.proxyAccess; } });
 Object.defineProperty(exports, "PartialArray", { enumerable: true, get: function () { return acebase_core_1.PartialArray; } });
+Object.defineProperty(exports, "Transport", { enumerable: true, get: function () { return acebase_core_1.Transport; } });
 //# sourceMappingURL=index.js.map

@@ -26,7 +26,5 @@ export { AceBaseClientAuth } from './auth.js';
 export { AceBaseUser } from './user.js';
 export { ServerDate } from './server-date.js';
 export { CachedValueUnavailableError } from './errors.js';
-export { DataReference, DataSnapshot, DataSnapshotsArray, DataReferencesArray, EventStream, EventSubscription, PathReference, TypeMappings, ObjectCollection, ID, proxyAccess, PartialArray,
-// Transport, // No longer export, has never been publically typed
- } from 'acebase-core';
+export { DataReference, DataSnapshot, DataSnapshotsArray, DataReferencesArray, EventStream, EventSubscription, PathReference, TypeMappings, ObjectCollection, ID, proxyAccess, PartialArray, Transport, } from 'acebase-core';
 //# sourceMappingURL=index.js.map

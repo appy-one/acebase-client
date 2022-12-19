@@ -20,6 +20,11 @@ class ConnectionSettings {
          */
         this.https = true;
         /**
+         * Root path of the AceBase server instance. Specify this if the server's `rootPath` has been configured.
+         * @default ''
+         */
+        this.rootPath = '';
+        /**
          * Automatically connect to the server, or wait until `db.connect()` is called
          * @default true
          */
@@ -37,6 +42,9 @@ class ConnectionSettings {
         this.host = settings.host;
         this.port = settings.port;
         this.https = typeof settings.https === 'boolean' ? settings.https : true;
+        if (typeof settings.rootPath === 'string') {
+            this.rootPath = settings.rootPath.replace(/^\/|\/$/g, '');
+        }
         this.autoConnect = typeof settings.autoConnect === 'boolean' ? settings.autoConnect : true;
         this.autoConnectDelay = typeof settings.autoConnectDelay === 'number' ? settings.autoConnectDelay : 0;
         this.logLevel = typeof settings.logLevel === 'string' ? settings.logLevel : 'log';
@@ -186,7 +194,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
             }
             this.emit('ready');
         };
-        if (typeof process !== 'undefined') {
+        if (typeof process === 'object' && typeof (process === null || process === void 0 ? void 0 : process.on) === 'function') {
             // Enable graceful process exits, fixes #32
             process.on('SIGINT', () => {
                 if (this.connected) {
@@ -204,6 +212,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
             cache: settings.cache,
             debug: this.debug,
             url: `http${settings.https ? 's' : ''}://${settings.host}:${settings.port}`,
+            rootPath: settings.rootPath,
         }, (evt, data) => {
             if (evt === 'connect') {
                 this.emit('connect');
@@ -244,10 +253,11 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
         return this.api.connectionState;
     }
     /**
-     * Connects to the server
+     * Manually connects to the server: use this if you have `autoConnect` disabled in your client config
+     * @param retry Whether to keep retrying to connect if the connection fails. Default is `true`
      */
-    connect() {
-        return this.api.connect();
+    connect(retry = true) {
+        return this.api.connect(retry);
     }
     /**
      * Disconnects from the server
@@ -323,7 +333,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
 exports.AceBaseClient = AceBaseClient;
 
 }).call(this)}).call(this,require('_process'))
-},{"./api-web":2,"./auth":3,"./server-date":12,"_process":41,"acebase-core":25}],2:[function(require,module,exports){
+},{"./api-web":2,"./auth":3,"./server-date":12,"_process":40,"acebase-core":25}],2:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.WebApi = void 0;
@@ -477,7 +487,8 @@ class WebApi extends acebase_core_1.Api {
     getSyncCursor() {
         return this._cursor.sync;
     }
-    get url() { return this.settings.url; }
+    get host() { return this.settings.url; }
+    get url() { return `${this.settings.url}${this.settings.rootPath ? `/${this.settings.rootPath}` : ''}`; }
     async _updateCursor(cursor) {
         if (!cursor || (this._cursor.current && cursor < this._cursor.current)) {
             return; // Just in case this ever happens, ignore events with earlier cursors.
@@ -531,7 +542,7 @@ class WebApi extends acebase_core_1.Api {
             }
         }
     }
-    connect() {
+    connect(retry = true) {
         var _a;
         if (this.socket !== null && typeof this.socket === 'object') {
             this.disconnect();
@@ -591,11 +602,12 @@ class WebApi extends acebase_core_1.Api {
                 this._connectionState = CONNECTION_STATE_CONNECTING;
                 return setTimeout(() => this.checkConnection(), 0);
             }
-            const socket = this.socket = (0, socket_io_client_1.connect)(this.url, {
+            const socket = this.socket = (0, socket_io_client_1.connect)(this.host, {
                 // Use default socket.io connection settings:
+                path: `/${this.settings.rootPath ? `${this.settings.rootPath}/` : ''}socket.io`,
                 autoConnect: true,
-                reconnection: true,
-                reconnectionAttempts: Infinity,
+                reconnection: retry,
+                reconnectionAttempts: retry ? Infinity : 0,
                 reconnectionDelay: 1000,
                 reconnectionDelayMax: 5000,
                 timeout: 20000,
@@ -843,9 +855,11 @@ class WebApi extends acebase_core_1.Api {
             this.manualConnectionMonitor.emit('disconnect');
         }
         else if (this.socket !== null && typeof this.socket === 'object') {
+            if (this._connectionState === CONNECTION_STATE_CONNECTED) {
+                this._eventTimeline.disconnect = Date.now();
+            }
             this._connectionState = CONNECTION_STATE_DISCONNECTING;
-            this._eventTimeline.disconnect = Date.now();
-            this.socket.disconnect();
+            this.socket.close();
             this.socket = null;
         }
     }
@@ -2877,7 +2891,7 @@ exports.CachedValueUnavailableError = CachedValueUnavailableError;
 },{}],7:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PartialArray = exports.proxyAccess = exports.ID = exports.ObjectCollection = exports.TypeMappings = exports.PathReference = exports.EventSubscription = exports.EventStream = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataSnapshot = exports.DataReference = exports.CachedValueUnavailableError = exports.ServerDate = exports.AceBaseUser = exports.AceBaseClientAuth = exports.AceBaseClient = void 0;
+exports.Transport = exports.PartialArray = exports.proxyAccess = exports.ID = exports.ObjectCollection = exports.TypeMappings = exports.PathReference = exports.EventSubscription = exports.EventStream = exports.DataReferencesArray = exports.DataSnapshotsArray = exports.DataSnapshot = exports.DataReference = exports.CachedValueUnavailableError = exports.ServerDate = exports.AceBaseUser = exports.AceBaseClientAuth = exports.AceBaseClient = void 0;
 /**
    ________________________________________________________________________________
 
@@ -2924,6 +2938,7 @@ Object.defineProperty(exports, "ObjectCollection", { enumerable: true, get: func
 Object.defineProperty(exports, "ID", { enumerable: true, get: function () { return acebase_core_1.ID; } });
 Object.defineProperty(exports, "proxyAccess", { enumerable: true, get: function () { return acebase_core_1.proxyAccess; } });
 Object.defineProperty(exports, "PartialArray", { enumerable: true, get: function () { return acebase_core_1.PartialArray; } });
+Object.defineProperty(exports, "Transport", { enumerable: true, get: function () { return acebase_core_1.Transport; } });
 
 },{"./acebase-client":1,"./auth":3,"./errors":6,"./server-date":12,"./user":13,"acebase-core":25}],8:[function(require,module,exports){
 "use strict";
@@ -3441,8 +3456,7 @@ function c(input, length, result) {
             result.push('z');
         }
         else {
-            for (let j = 0; j < 5; b[j++] = n % 85 + 33, n = Math.floor(n / 85))
-                ;
+            for (let j = 0; j < 5; b[j++] = n % 85 + 33, n = Math.floor(n / 85)) { }
             result.push(String.fromCharCode(b[4], b[3], b[2], b[1], b[0]));
         }
     }
@@ -3492,8 +3506,7 @@ exports.ascii85 = {
             }
             d = n - i;
             if (d < 5) {
-                for (let j = d; j < 4; b[++j] = 0)
-                    ;
+                for (let j = d; j < 4; b[++j] = 0) { }
                 b[d] = 85;
             }
             t = (((b[0] * 85 + b[1]) * 85 + b[2]) * 85 + b[3]) * 85 + b[4];
@@ -3502,8 +3515,7 @@ exports.ascii85 = {
             y = t & 255;
             t >>>= 8;
             r.push(t >>> 8, t & 255, y, x);
-            for (let j = d; j < 5; ++j, r.pop())
-                ;
+            for (let j = d; j < 5; ++j, r.pop()) { }
             i += 4;
         }
         const data = new Uint8Array(r);
@@ -6367,7 +6379,29 @@ class PathInfo {
     }
     child(childKey) {
         if (typeof childKey === 'string') {
-            childKey = getPathKeys(childKey);
+            if (childKey.length === 0) {
+                throw new Error(`child key for path "${this.path}" cannot be empty`);
+            }
+            // Allow expansion of a child path (eg "user/name") into equivalent `child('user').child('name')`
+            const keys = getPathKeys(childKey);
+            keys.forEach(key => {
+                // Check AceBase key rules here so they will be enforced regardless of storage target.
+                // This prevents specific keys to be allowed in one environment (eg browser), but then
+                // refused upon syncing to a binary AceBase db. Fixes https://github.com/appy-one/acebase/issues/172
+                if (typeof key !== 'string') {
+                    return;
+                }
+                if (/[\x00-\x08\x0b\x0c\x0e-\x1f/[\]\\]/.test(key)) {
+                    throw new Error(`Invalid child key "${key}" for path "${this.path}". Keys cannot contain control characters or any of the following characters: \\ / [ ]`);
+                }
+                if (key.length > 128) {
+                    throw new Error(`child key "${key}" for path "${this.path}" is too long. Max key length is 128`);
+                }
+                if (key.length === 0) {
+                    throw new Error(`child key for path "${this.path}" cannot be empty`);
+                }
+            });
+            childKey = keys;
         }
         return new PathInfo(this.keys.concat(childKey));
     }

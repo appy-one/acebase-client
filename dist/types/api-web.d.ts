@@ -37,6 +37,7 @@ export declare class WebApi extends Api {
     setSyncCursor(cursor: string | null): void;
     getSyncCursor(): string | null;
     private _eventTimeline;
+    get host(): string;
     get url(): string;
     private _updateCursor;
     private _cache?;
@@ -48,13 +49,13 @@ export declare class WebApi extends Api {
     private accessToken;
     private manualConnectionMonitor;
     private eventCallback;
-    constructor(dbname: string, settings: Pick<ConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache'> & {
+    constructor(dbname: string, settings: Pick<ConnectionSettings, 'network' | 'sync' | 'logLevel' | 'autoConnect' | 'autoConnectDelay' | 'cache' | 'rootPath'> & {
         debug: DebugLogger;
         url: string;
     }, callback: (event: string, ...args: any[]) => void);
     private checkConnection;
     private _handleDetectedDisconnect;
-    connect(): Promise<void>;
+    connect(retry?: boolean): Promise<void>;
     disconnect(): void;
     subscribe(path: string, event: string, callback: EventSubscriptionCallback, settings: EventSubscriptionSettings): Promise<void>;
     unsubscribe(path: string, event?: string, callback?: EventSubscriptionCallback): Promise<void>;

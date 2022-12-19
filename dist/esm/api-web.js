@@ -148,7 +148,8 @@ export class WebApi extends Api {
     getSyncCursor() {
         return this._cursor.sync;
     }
-    get url() { return this.settings.url; }
+    get host() { return this.settings.url; }
+    get url() { return `${this.settings.url}${this.settings.rootPath ? `/${this.settings.rootPath}` : ''}`; }
     async _updateCursor(cursor) {
         if (!cursor || (this._cursor.current && cursor < this._cursor.current)) {
             return; // Just in case this ever happens, ignore events with earlier cursors.
@@ -200,7 +201,7 @@ export class WebApi extends Api {
             }
         }
     }
-    connect() {
+    connect(retry = true) {
         if (this.socket !== null && typeof this.socket === 'object') {
             this.disconnect();
         }
@@ -258,11 +259,12 @@ export class WebApi extends Api {
                 this._connectionState = CONNECTION_STATE_CONNECTING;
                 return setTimeout(() => this.checkConnection(), 0);
             }
-            const socket = this.socket = connectSocket(this.url, {
+            const socket = this.socket = connectSocket(this.host, {
                 // Use default socket.io connection settings:
+                path: `/${this.settings.rootPath ? `${this.settings.rootPath}/` : ''}socket.io`,
                 autoConnect: true,
-                reconnection: true,
-                reconnectionAttempts: Infinity,
+                reconnection: retry,
+                reconnectionAttempts: retry ? Infinity : 0,
                 reconnectionDelay: 1000,
                 reconnectionDelayMax: 5000,
                 timeout: 20000,
@@ -508,9 +510,11 @@ export class WebApi extends Api {
             this.manualConnectionMonitor.emit('disconnect');
         }
         else if (this.socket !== null && typeof this.socket === 'object') {
+            if (this._connectionState === CONNECTION_STATE_CONNECTED) {
+                this._eventTimeline.disconnect = Date.now();
+            }
             this._connectionState = CONNECTION_STATE_DISCONNECTING;
-            this._eventTimeline.disconnect = Date.now();
-            this.socket.disconnect();
+            this.socket.close();
             this.socket = null;
         }
     }

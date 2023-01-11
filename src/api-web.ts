@@ -39,12 +39,16 @@ const _websocketRequest = <ResponseType = Record<string, any>>(socket: IOWebSock
         reason?: string | { code: string; message: string };
     };
     return new Promise<T>((resolve, reject) => {
-        if (!socket) {
-            return reject(new AceBaseRequestError(request, null, 'websocket', 'No open websocket connection'));
-        }
+        const checkConnection = () => {
+            if (!socket?.connected) {
+                return reject(new AceBaseRequestError(request, null, 'websocket', 'No open websocket connection'));
+            }
+        };
+        checkConnection();
 
         let timeout: NodeJS.Timeout;
         const send = (retry = 0) => {
+            checkConnection();
             socket.emit(event, request);
             timeout = setTimeout(() => {
                 if (retry < 2) { return send(retry+1); }
@@ -282,6 +286,11 @@ export class WebApi extends Api {
                 this.manualConnectionMonitor.emit('disconnect');
             }
         }
+    }
+
+    private getCachePath(childPath?: string) {
+        const cacheRoot = `${this.dbname}/cache`;
+        return childPath ? PathInfo.getChildPath(cacheRoot, childPath) : cacheRoot;
     }
 
     public connect(retry = true) {
@@ -551,18 +560,18 @@ export class WebApi extends Api {
                         // Apply all mutations
                         const mutations = val.current as IDataMutationsArray;
                         mutations.forEach(m => {
-                            const path = m.target.reduce(
-                                (path: string, key) => PathInfo.getChildPath(path, key),
-                                PathInfo.getChildPath(`${this.dbname}/cache`, data.path as string) as string,
+                            const pathInfo = m.target.reduce(
+                                (pathInfo, key) => pathInfo.child(key),
+                                PathInfo.get(this.getCachePath())
                             );
-                            this.cache.db.api.set(path, m.val, { suppress_events: !fireCacheEvents, context });
+                            this.cache.db.api.set(pathInfo.path, m.val, { suppress_events: !fireCacheEvents, context });
                         });
                     }
                     else if (data.event === 'notify_child_removed') {
-                        this.cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
+                        this.cache.db.api.set(this.getCachePath(data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
                     }
                     else if (!data.event.startsWith('notify_')) {
-                        this.cache.db.api.set(PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
+                        this.cache.db.api.set(this.getCachePath(data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
                     }
                 }
                 if (!fireThisEvent) {
@@ -638,8 +647,9 @@ export class WebApi extends Api {
 
         if (this.hasCache) {
             // Events are also handled by cache db
-            subscr.cacheCallback = (err, path, newValue, oldValue, context) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue, context);
-            this.cache.db.api.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
+            const cacheRootPath = this.getCachePath();
+            subscr.cacheCallback = (err, path, newValue, oldValue, context) => subscr.callback(err, path.slice(cacheRootPath.length + 1), newValue, oldValue, context);
+            this.cache.db.api.subscribe(this.getCachePath(path), event, subscr.cacheCallback);
         }
 
         if (serverAlreadyNotifying || !this.isConnected) {
@@ -674,7 +684,7 @@ export class WebApi extends Api {
                 if (this.hasCache) {
                     // Events are also handled by cache db, also remove those
                     if (typeof subscr.cacheCallback !== 'function') { throw new Error('DEV ERROR: When subscription was added, cacheCallback must have been set'); }
-                    this.cache.db.api.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);
+                    this.cache.db.api.unsubscribe(this.getCachePath(path), subscr.event, subscr.cacheCallback);
                 }
             });
         };
@@ -732,7 +742,7 @@ export class WebApi extends Api {
             path,
             flow: 'server',
         };
-        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
 
         return new Promise<{ cursor?: string }>(async (resolve, reject) => {
             let cacheUpdateVal: any;
@@ -1278,7 +1288,7 @@ export class WebApi extends Api {
                     sub.tempCallback = () => { //(err, path, newValue, oldValue, context) => {
                         totalRemoteChanges++;
                     };
-                    cacheApi.subscribe(PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                    cacheApi.subscribe(this.getCachePath(sub.path), sub.event, sub.tempCallback);
                 });
 
                 const strategy = {
@@ -1467,7 +1477,7 @@ export class WebApi extends Api {
                     if (typeof sub.tempCallback !== 'function') {
                         throw new Error('DEV ERROR: tempCallback must be a function');
                     }
-                    cacheApi.unsubscribe(PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                    cacheApi.unsubscribe(this.getCachePath(sub.path), sub.event, sub.tempCallback);
                     delete sub.tempCallback;
                 });
             }
@@ -1639,7 +1649,7 @@ export class WebApi extends Api {
             return updateServer();
         }
 
-        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
         let rollbackValue: any;
         const updateCache = () => {
             return this.cache.db.api.transaction(cachePath, (currentValue) => {
@@ -1745,7 +1755,7 @@ export class WebApi extends Api {
         }
 
         const cacheApi = this._cache?.db.api as Api;
-        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
         let rollbackValue: any;
         const updateCache = async () => {
             const properties = Object.keys(updates);
@@ -1943,7 +1953,7 @@ export class WebApi extends Api {
                 //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
                 // }
                 if (!filtered) {
-                    const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+                    const cachePath = this.getCachePath(path);
                     this._cache.db.api.set(cachePath, value, { context: { acebase_operation: 'update_cache', acebase_server_context: context } })
                         .catch(err => {
                             this.debug.error(`Error caching data for "/${path}"`, err);
@@ -1954,7 +1964,7 @@ export class WebApi extends Api {
         };
         const getCacheValue = async (throwOnNull = false) => {
             if (!this._cache) { throw new Error(`DEV ERROR: cannot get cached value if no cache is used!`); }
-            const result = await this._cache.db.api.get(PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
+            const result = await this._cache.db.api.get(this.getCachePath(path), options);
             let { value, context } = result;
             if (!('value' in result && 'context' in result)) {
                 console.warn(`Missing context from cache results. Update your acebase package`);
@@ -2084,7 +2094,7 @@ export class WebApi extends Api {
         const useCache = this._cache && options.allow_cache !== false;
         const getCacheExists = () => {
             if (!this._cache) { throw new Error('DEV ERROR: no cache db available to check exists'); }
-            return this._cache.db.api.exists(PathInfo.getChildPath(`${this.dbname}/cache`, path));
+            return this._cache.db.api.exists(this.getCachePath(path));
         };
         const getServerExists = () => {
             return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
@@ -2174,7 +2184,7 @@ export class WebApi extends Api {
     async clearCache(path = '') {
         if (this._cache) {
             const value = path === '' ? {} : null;
-            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+            const cachePath = this.getCachePath(path);
             return this._cache.db.api.set(cachePath, value, { suppress_events: true });
         }
     }
@@ -2205,7 +2215,7 @@ export class WebApi extends Api {
         }>,
     }> {
         if (!this._cache) { throw new Error(`No cache database used`); }
-        const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
         const cacheApi = this._cache.db.api;
         const loadValue = cursor === null || typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
         if (loadValue) {
@@ -2217,7 +2227,7 @@ export class WebApi extends Api {
         const { changes, new_cursor } = await this.getChanges({ path, cursor });
         for (const ch of changes) {
             // Apply to local cache
-            const cachePath = PathInfo.getChildPath(`${this.dbname}/cache`, ch.path);
+            const cachePath = this.getCachePath(ch.path);
             const options = { context: ch.context, suppress_events: false };
             if (ch.type === 'update') {
                 await cacheApi.update(cachePath, ch.value, options);
@@ -2244,7 +2254,7 @@ export class WebApi extends Api {
         const useCache = this.hasCache && (options.cache_mode === 'force' || (options.cache_mode === 'allow' && !this.isConnected));
         if (useCache) {
             // Not connected, or "force" cache_mode: query cache db
-            const data = await this.cache.db.api.query(PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
+            const data = await this.cache.db.api.query(this.getCachePath(path), query, options);
             let { results, context } = data;
             const { stop } = data;
             if (!('results' in data && 'context' in data)) {

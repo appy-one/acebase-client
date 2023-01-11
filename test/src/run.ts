@@ -1,40 +1,42 @@
+import { AceBase } from 'acebase';
 import { AceBaseServer } from 'acebase-server';
 import { AceBaseClient } from '../../dist/types';
+import { cacheTest } from './cache.js';
 import { settings } from './settings.js';
 
-async function startServer(dbname: string) {
+export async function startServer(dbname: string) {
     const server = new AceBaseServer(dbname, { port: settings.port, authentication: { enabled: true, defaultAdminPassword: settings.password } });
     await server.ready();
     return server;
 }
 
-export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClient) {
+export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClient, Database: typeof AceBase) {
     const dbname = `test-${modules}`;
 
     // Start server
     const server = await startServer(dbname);
 
     // Connect
-    const db = new Client({ dbname, host: 'localhost', port: settings.port, https: false });
+    const client = new Client({ dbname, host: 'localhost', port: settings.port, https: false });
     console.log(`${modules} module load test succeeded`);
-    await db.ready();
+    await client.ready();
     console.log('Connected');
 
     // Disconnect
-    db.disconnect();
+    client.disconnect();
 
     // Reconnect
-    await db.connect();
+    await client.connect();
 
     // Sign in as admin
-    let user = await db.auth.signIn('admin', settings.password);
+    let user = await client.auth.signIn('admin', settings.password);
     console.log('Signed in as admin', user);
 
     // Sign out
-    await db.auth.signOut();
+    await client.auth.signOut();
 
     // Sign in with token
-    user = await db.auth.signInWithToken(user.accessToken);
+    user = await client.auth.signInWithToken(user.accessToken);
     console.log('Signed in with token', user);
 
     // Pause server
@@ -48,7 +50,7 @@ export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClien
     // TODO: Expect to reconnect
 
     // Store test data
-    await db.ref('test').set({
+    await client.ref('test').set({
         text: `Storing this text from ${modules} tests`,
     });
 
@@ -57,7 +59,9 @@ export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClien
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     // Disconnect
-    db.disconnect();
+    client.disconnect();
+
+    await cacheTest(modules, server, Client, Database);
 
     // Stop server
     server.shutdown();

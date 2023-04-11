@@ -6,8 +6,8 @@
         "test": "node esm && node cjs"
     },
     "dependencies": {
-        "acebase": "^1.27.0",
-        "acebase-core": "file:../node_modules/acebase-core",
+        "acebase": "^1.28.0",
+        "acebase-core": "^1.26.1",
         "acebase-server": "^1.16.2"
     },
     "devDependencies": {

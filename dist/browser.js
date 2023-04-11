@@ -79,7 +79,6 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
      * Create a client to access an AceBase server
      */
     constructor(init) {
-        var _a;
         if (typeof init !== 'object') {
             // Use old constructor signature: host, port, dbname, https = true
             // eslint-disable-next-line prefer-rest-params
@@ -91,7 +90,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
         /*
             TODO: improve init flow with await/async (requires Node 7.6+)
         */
-        const cacheDb = (_a = settings.cache) === null || _a === void 0 ? void 0 : _a.db;
+        const cacheDb = settings.cache.enabled && settings.cache.db;
         const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
         let ready = false;
         this.on('ready', () => { ready = true; });
@@ -354,11 +353,15 @@ const _websocketRequest = (socket, event, data, accessToken) => {
     // request.access_token = accessToken;
     const request = Object.assign(Object.assign({}, data), { req_id: requestId, access_token: accessToken });
     return new Promise((resolve, reject) => {
-        if (!socket) {
-            return reject(new error_1.AceBaseRequestError(request, null, 'websocket', 'No open websocket connection'));
-        }
+        const checkConnection = () => {
+            if (!(socket === null || socket === void 0 ? void 0 : socket.connected)) {
+                return reject(new error_1.AceBaseRequestError(request, null, 'websocket', 'No open websocket connection'));
+            }
+        };
+        checkConnection();
         let timeout;
         const send = (retry = 0) => {
+            checkConnection();
             socket.emit(event, request);
             timeout = setTimeout(() => {
                 if (retry < 2) {
@@ -541,6 +544,10 @@ class WebApi extends acebase_core_1.Api {
                 this.manualConnectionMonitor.emit('disconnect');
             }
         }
+    }
+    getCachePath(childPath) {
+        const cacheRoot = `${this.dbname}/cache`;
+        return childPath ? acebase_core_1.PathInfo.getChildPath(cacheRoot, childPath) : cacheRoot;
     }
     connect(retry = true) {
         var _a;
@@ -796,15 +803,15 @@ class WebApi extends acebase_core_1.Api {
                         // Apply all mutations
                         const mutations = val.current;
                         mutations.forEach(m => {
-                            const path = m.target.reduce((path, key) => acebase_core_1.PathInfo.getChildPath(path, key), acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, data.path));
-                            this.cache.db.api.set(path, m.val, { suppress_events: !fireCacheEvents, context });
+                            const pathInfo = m.target.reduce((pathInfo, key) => pathInfo.child(key), acebase_core_1.PathInfo.get(this.getCachePath()));
+                            this.cache.db.api.set(pathInfo.path, m.val, { suppress_events: !fireCacheEvents, context });
                         });
                     }
                     else if (data.event === 'notify_child_removed') {
-                        this.cache.db.api.set(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
+                        this.cache.db.api.set(this.getCachePath(data.path), null, { suppress_events: !fireCacheEvents, context }); // Remove cached value
                     }
                     else if (!data.event.startsWith('notify_')) {
-                        this.cache.db.api.set(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
+                        this.cache.db.api.set(this.getCachePath(data.path), val.current, { suppress_events: !fireCacheEvents, context }); // Update cached value
                     }
                 }
                 if (!fireThisEvent) {
@@ -879,8 +886,9 @@ class WebApi extends acebase_core_1.Api {
         pathSubs.push(subscr);
         if (this.hasCache) {
             // Events are also handled by cache db
-            subscr.cacheCallback = (err, path, newValue, oldValue, context) => subscr.callback(err, path.slice(`${this.dbname}/cache/`.length), newValue, oldValue, context);
-            this.cache.db.api.subscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), event, subscr.cacheCallback);
+            const cacheRootPath = this.getCachePath();
+            subscr.cacheCallback = (err, path, newValue, oldValue, context) => subscr.callback(err, path.slice(cacheRootPath.length + 1), newValue, oldValue, context);
+            this.cache.db.api.subscribe(this.getCachePath(path), event, subscr.cacheCallback);
         }
         if (serverAlreadyNotifying || !this.isConnected) {
             // If we're offline, the event will be subscribed once connected
@@ -915,7 +923,7 @@ class WebApi extends acebase_core_1.Api {
                     if (typeof subscr.cacheCallback !== 'function') {
                         throw new Error('DEV ERROR: When subscription was added, cacheCallback must have been set');
                     }
-                    this.cache.db.api.unsubscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), subscr.event, subscr.cacheCallback);
+                    this.cache.db.api.unsubscribe(this.getCachePath(path), subscr.event, subscr.cacheCallback);
                 }
             });
         };
@@ -970,7 +978,7 @@ class WebApi extends acebase_core_1.Api {
             path,
             flow: 'server',
         };
-        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
         return new Promise(async (resolve, reject) => {
             var _a;
             let cacheUpdateVal;
@@ -1461,7 +1469,7 @@ class WebApi extends acebase_core_1.Api {
                     sub.tempCallback = () => {
                         totalRemoteChanges++;
                     };
-                    cacheApi.subscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                    cacheApi.subscribe(this.getCachePath(sub.path), sub.event, sub.tempCallback);
                 });
                 const strategy = {
                     /** Data paths to reload */
@@ -1658,7 +1666,7 @@ class WebApi extends acebase_core_1.Api {
                     if (typeof sub.tempCallback !== 'function') {
                         throw new Error('DEV ERROR: tempCallback must be a function');
                     }
-                    cacheApi.unsubscribe(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, sub.path), sub.event, sub.tempCallback);
+                    cacheApi.unsubscribe(this.getCachePath(sub.path), sub.event, sub.tempCallback);
                     delete sub.tempCallback;
                 });
             }
@@ -1794,7 +1802,7 @@ class WebApi extends acebase_core_1.Api {
         if (!useCache) {
             return updateServer();
         }
-        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
         let rollbackValue;
         const updateCache = () => {
             return this.cache.db.api.transaction(cachePath, (currentValue) => {
@@ -1886,7 +1894,7 @@ class WebApi extends acebase_core_1.Api {
             return updateServer();
         }
         const cacheApi = (_a = this._cache) === null || _a === void 0 ? void 0 : _a.db.api;
-        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
         let rollbackValue;
         const updateCache = async () => {
             const properties = Object.keys(updates);
@@ -2058,7 +2066,7 @@ class WebApi extends acebase_core_1.Api {
                 //     this._cache.db.api.update(`${this.dbname}/cache/${path}`, val);
                 // }
                 if (!filtered) {
-                    const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+                    const cachePath = this.getCachePath(path);
                     this._cache.db.api.set(cachePath, value, { context: { acebase_operation: 'update_cache', acebase_server_context: context } })
                         .catch(err => {
                         this.debug.error(`Error caching data for "/${path}"`, err);
@@ -2071,7 +2079,7 @@ class WebApi extends acebase_core_1.Api {
             if (!this._cache) {
                 throw new Error(`DEV ERROR: cannot get cached value if no cache is used!`);
             }
-            const result = await this._cache.db.api.get(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), options);
+            const result = await this._cache.db.api.get(this.getCachePath(path), options);
             let { value, context } = result;
             if (!('value' in result && 'context' in result)) {
                 console.warn(`Missing context from cache results. Update your acebase package`);
@@ -2201,7 +2209,7 @@ class WebApi extends acebase_core_1.Api {
             if (!this._cache) {
                 throw new Error('DEV ERROR: no cache db available to check exists');
             }
-            return this._cache.db.api.exists(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path));
+            return this._cache.db.api.exists(this.getCachePath(path));
         };
         const getServerExists = () => {
             return this._request({ url: `${this.url}/exists/${this.dbname}/${path}` })
@@ -2287,7 +2295,7 @@ class WebApi extends acebase_core_1.Api {
     async clearCache(path = '') {
         if (this._cache) {
             const value = path === '' ? {} : null;
-            const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+            const cachePath = this.getCachePath(path);
             return this._cache.db.api.set(cachePath, value, { suppress_events: true });
         }
     }
@@ -2307,7 +2315,7 @@ class WebApi extends acebase_core_1.Api {
         if (!this._cache) {
             throw new Error(`No cache database used`);
         }
-        const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path);
+        const cachePath = this.getCachePath(path);
         const cacheApi = this._cache.db.api;
         const loadValue = cursor === null || typeof cursor === 'undefined' || !(await cacheApi.exists(cachePath));
         if (loadValue) {
@@ -2319,7 +2327,7 @@ class WebApi extends acebase_core_1.Api {
         const { changes, new_cursor } = await this.getChanges({ path, cursor });
         for (const ch of changes) {
             // Apply to local cache
-            const cachePath = acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, ch.path);
+            const cachePath = this.getCachePath(ch.path);
             const options = { context: ch.context, suppress_events: false };
             if (ch.type === 'update') {
                 await cacheApi.update(cachePath, ch.value, options);
@@ -2337,7 +2345,7 @@ class WebApi extends acebase_core_1.Api {
         const useCache = this.hasCache && (options.cache_mode === 'force' || (options.cache_mode === 'allow' && !this.isConnected));
         if (useCache) {
             // Not connected, or "force" cache_mode: query cache db
-            const data = await this.cache.db.api.query(acebase_core_1.PathInfo.getChildPath(`${this.dbname}/cache`, path), query, options);
+            const data = await this.cache.db.api.query(this.getCachePath(path), query, options);
             let { results, context } = data;
             const { stop } = data;
             if (!('results' in data && 'context' in data)) {
@@ -3401,15 +3409,18 @@ exports.AceBaseBase = AceBaseBase;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Api = void 0;
+/* eslint-disable @typescript-eslint/no-unused-vars */
+const simple_event_emitter_1 = require("./simple-event-emitter");
 class NotImplementedError extends Error {
     constructor(name) { super(`${name} is not implemented`); }
 }
 /**
  * Refactor to type/interface once acebase and acebase-client have been ported to TS
  */
-class Api {
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    constructor() { }
+class Api extends simple_event_emitter_1.SimpleEventEmitter {
+    constructor() {
+        super();
+    }
     /**
      * Provides statistics
      * @param options
@@ -3444,7 +3455,7 @@ class Api {
 }
 exports.Api = Api;
 
-},{}],16:[function(require,module,exports){
+},{"./simple-event-emitter":35}],16:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ascii85 = void 0;
@@ -3945,7 +3956,7 @@ class LiveDataProxy {
             };
             localMutationsEmitter.on('mutations', mutationsHandler);
             const stop = () => {
-                localMutationsEmitter.off('mutations').off('mutations', mutationsHandler);
+                localMutationsEmitter.off('mutations', mutationsHandler);
                 clientSubscriptions.splice(clientSubscriptions.findIndex(cs => cs.stop === stop), 1);
             };
             clientSubscriptions.push({ target, stop });
@@ -5035,7 +5046,7 @@ class DataReference {
     }
     /**
      * Updates properties of the referenced node
-     * @param updates object containing the properties to update
+     * @param updates containing the properties to update
      * @param onComplete optional completion callback to use instead of returning promise
      * @return returns promise that resolves with this reference once completed
      */
@@ -5956,11 +5967,6 @@ class DataSnapshot {
     static for(ref, value) {
         return new DataSnapshot(ref, value);
     }
-    /**
-     * Gets a new snapshot for a child node
-     * @param path child key or path
-     * @returns Returns a `DataSnapshot` of the child
-     */
     child(path) {
         // Create new snapshot for child data
         const val = getChild(this, path, false);
@@ -6027,23 +6033,18 @@ class MutationsDataSnapshot extends DataSnapshot {
      * @returns Returns whether every child was interated
      */
     forEach(callback) {
-        const mutations = this.val();
+        const mutations = this.val(false);
         return mutations.every(mutation => {
             const ref = mutation.target.reduce((ref, key) => ref.child(key), this.ref);
             const snap = new DataSnapshot(ref, mutation.val, false, mutation.prev);
             return callback(snap);
         });
     }
-    /**
-     * Gets a snapshot of a mutated node
-     * @param index index of the mutation
-     * @returns Returns a DataSnapshot of the mutated node
-     */
     child(index) {
         if (typeof index !== 'number') {
             throw new Error('child index must be a number');
         }
-        const mutation = this.val()[index];
+        const mutation = this.val(false)[index];
         const ref = mutation.target.reduce((ref, key) => ref.child(key), this.ref);
         return new DataSnapshot(ref, mutation.val, false, mutation.prev);
     }
@@ -6757,10 +6758,13 @@ function parse(definition) {
                     const types = readTypes();
                     type.children.push({ name: prop.name, optional: prop.optional, wildcard: prop.wildcard, types });
                     consumeSpaces();
+                    if (definition[pos] === ';' || definition[pos] === ',') {
+                        consumeCharacter(definition[pos]);
+                        consumeSpaces();
+                    }
                     if (definition[pos] === '}') {
                         break;
                     }
-                    consumeCharacter(',');
                 }
                 consumeCharacter('}');
             }
@@ -7260,20 +7264,22 @@ function runCallback(callback, data) {
         console.error('Error in subscription callback', err);
     }
 }
+const _subscriptions = Symbol('subscriptions');
+const _oneTimeEvents = Symbol('oneTimeEvents');
 class SimpleEventEmitter {
     constructor() {
-        this._subscriptions = [];
-        this._oneTimeEvents = new Map();
+        this[_subscriptions] = [];
+        this[_oneTimeEvents] = new Map();
     }
     on(event, callback) {
-        if (this._oneTimeEvents.has(event)) {
-            return runCallback(callback, this._oneTimeEvents.get(event));
+        if (this[_oneTimeEvents].has(event)) {
+            return runCallback(callback, this[_oneTimeEvents].get(event));
         }
-        this._subscriptions.push({ event, callback, once: false });
+        this[_subscriptions].push({ event, callback, once: false });
         return this;
     }
     off(event, callback) {
-        this._subscriptions = this._subscriptions.filter(s => s.event !== event || (callback && s.callback !== callback));
+        this[_subscriptions] = this[_subscriptions].filter(s => s.event !== event || (callback && s.callback !== callback));
         return this;
     }
     once(event, callback) {
@@ -7282,39 +7288,49 @@ class SimpleEventEmitter {
                 resolve(data);
                 callback === null || callback === void 0 ? void 0 : callback(data);
             };
-            if (this._oneTimeEvents.has(event)) {
-                runCallback(ourCallback, this._oneTimeEvents.get(event));
+            if (this[_oneTimeEvents].has(event)) {
+                runCallback(ourCallback, this[_oneTimeEvents].get(event));
             }
             else {
-                this._subscriptions.push({ event, callback: ourCallback, once: true });
+                this[_subscriptions].push({ event, callback: ourCallback, once: true });
             }
         });
     }
     emit(event, data) {
-        if (this._oneTimeEvents.has(event)) {
+        if (this[_oneTimeEvents].has(event)) {
             throw new Error(`Event "${event}" was supposed to be emitted only once`);
         }
-        for (let i = 0; i < this._subscriptions.length; i++) {
-            const s = this._subscriptions[i];
+        for (let i = 0; i < this[_subscriptions].length; i++) {
+            const s = this[_subscriptions][i];
             if (s.event !== event) {
                 continue;
             }
             runCallback(s.callback, data);
             if (s.once) {
-                this._subscriptions.splice(i, 1);
+                this[_subscriptions].splice(i, 1);
                 i--;
             }
         }
         return this;
     }
     emitOnce(event, data) {
-        if (this._oneTimeEvents.has(event)) {
+        if (this[_oneTimeEvents].has(event)) {
             throw new Error(`Event "${event}" was supposed to be emitted only once`);
         }
         this.emit(event, data);
-        this._oneTimeEvents.set(event, data); // Mark event as being emitted once for future subscribers
+        this[_oneTimeEvents].set(event, data); // Mark event as being emitted once for future subscribers
         this.off(event); // Remove all listeners for this event, they won't fire again
         return this;
+    }
+    pipe(event, eventEmitter) {
+        this.on(event, (data) => {
+            eventEmitter.emit(event, data);
+        });
+    }
+    pipeOnce(event, eventEmitter) {
+        this.once(event, (data) => {
+            eventEmitter.emitOnce(event, data);
+        });
     }
 }
 exports.SimpleEventEmitter = SimpleEventEmitter;

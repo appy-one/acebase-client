@@ -83,7 +83,7 @@ export class AceBaseClient extends AceBaseBase {
         /*
             TODO: improve init flow with await/async (requires Node 7.6+)
         */
-        const cacheDb = settings.cache?.db;
+        const cacheDb = settings.cache.enabled && settings.cache.db;
         const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
         let ready = false;
         this.on('ready', () => { ready = true; });

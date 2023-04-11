@@ -77,7 +77,6 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
      * Create a client to access an AceBase server
      */
     constructor(init) {
-        var _a;
         if (typeof init !== 'object') {
             // Use old constructor signature: host, port, dbname, https = true
             // eslint-disable-next-line prefer-rest-params
@@ -89,7 +88,7 @@ class AceBaseClient extends acebase_core_1.AceBaseBase {
         /*
             TODO: improve init flow with await/async (requires Node 7.6+)
         */
-        const cacheDb = (_a = settings.cache) === null || _a === void 0 ? void 0 : _a.db;
+        const cacheDb = settings.cache.enabled && settings.cache.db;
         const cacheReadyPromise = cacheDb ? cacheDb.ready() : Promise.resolve();
         let ready = false;
         this.on('ready', () => { ready = true; });

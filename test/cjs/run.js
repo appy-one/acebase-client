@@ -1,33 +1,35 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.run = void 0;
+exports.run = exports.startServer = void 0;
 const acebase_server_1 = require("acebase-server");
+const cache_js_1 = require("./cache.js");
 const settings_js_1 = require("./settings.js");
 async function startServer(dbname) {
     const server = new acebase_server_1.AceBaseServer(dbname, { port: settings_js_1.settings.port, authentication: { enabled: true, defaultAdminPassword: settings_js_1.settings.password } });
     await server.ready();
     return server;
 }
-async function run(modules, Client) {
+exports.startServer = startServer;
+async function run(modules, Client, Database) {
     const dbname = `test-${modules}`;
     // Start server
     const server = await startServer(dbname);
     // Connect
-    const db = new Client({ dbname, host: 'localhost', port: settings_js_1.settings.port, https: false });
+    const client = new Client({ dbname, host: 'localhost', port: settings_js_1.settings.port, https: false });
     console.log(`${modules} module load test succeeded`);
-    await db.ready();
+    await client.ready();
     console.log('Connected');
     // Disconnect
-    db.disconnect();
+    client.disconnect();
     // Reconnect
-    await db.connect();
+    await client.connect();
     // Sign in as admin
-    let user = await db.auth.signIn('admin', settings_js_1.settings.password);
+    let user = await client.auth.signIn('admin', settings_js_1.settings.password);
     console.log('Signed in as admin', user);
     // Sign out
-    await db.auth.signOut();
+    await client.auth.signOut();
     // Sign in with token
-    user = await db.auth.signInWithToken(user.accessToken);
+    user = await client.auth.signInWithToken(user.accessToken);
     console.log('Signed in with token', user);
     // Pause server
     await server.pause();
@@ -36,14 +38,15 @@ async function run(modules, Client) {
     await server.resume();
     // TODO: Expect to reconnect
     // Store test data
-    await db.ref('test').set({
+    await client.ref('test').set({
         text: `Storing this text from ${modules} tests`,
     });
     // Pause to optionally test SIGINT handling
     console.log(`Disconnecting in 5s... Press Ctrl+C to manually test graceful exiting`);
     await new Promise(resolve => setTimeout(resolve, 5000));
     // Disconnect
-    db.disconnect();
+    client.disconnect();
+    await (0, cache_js_1.cacheTest)(modules, server, Client, Database);
     // Stop server
     server.shutdown();
     await new Promise(resolve => setTimeout(resolve, 1000));

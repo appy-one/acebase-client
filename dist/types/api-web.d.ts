@@ -55,6 +55,7 @@ export declare class WebApi extends Api {
     }, callback: (event: string, ...args: any[]) => void);
     private checkConnection;
     private _handleDetectedDisconnect;
+    private getCachePath;
     connect(retry?: boolean): Promise<void>;
     disconnect(): void;
     subscribe(path: string, event: string, callback: EventSubscriptionCallback, settings: EventSubscriptionSettings): Promise<void>;

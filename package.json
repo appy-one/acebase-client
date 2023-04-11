@@ -1,6 +1,6 @@
 {
   "name": "acebase-client",
-  "version": "1.20.0",
+  "version": "1.20.1",
   "description": "Client to connect to an AceBase realtime database server",
   "comments": {
     "browser": "webpack/browserify file replacements have moved to package.json in dist/cjs and dist/esm. See README.md for more info",

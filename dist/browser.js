@@ -2454,11 +2454,11 @@ class WebApi extends acebase_core_1.Api {
         this._serverVersion = info.version;
         return info;
     }
-    setSchema(path, schema) {
+    setSchema(path, schema, warnOnly = false) {
         if (schema !== null) {
             schema = (new acebase_core_1.SchemaDefinition(schema)).text;
         }
-        const data = JSON.stringify({ action: 'set', path, schema });
+        const data = JSON.stringify({ action: 'set', path, schema, warnOnly });
         return this._request({ method: 'POST', url: `${this.url}/schema/${this.dbname}`, data });
     }
     getSchema(path) {
@@ -3391,8 +3391,8 @@ class AceBaseBase extends simple_event_emitter_1.SimpleEventEmitter {
             get: (path) => {
                 return this.api.getSchema(path);
             },
-            set: (path, schema) => {
-                return this.api.setSchema(path, schema);
+            set: (path, schema, warnOnly = false) => {
+                return this.api.setSchema(path, schema, warnOnly);
             },
             all: () => {
                 return this.api.getSchemas();
@@ -3446,7 +3446,7 @@ class Api extends simple_event_emitter_1.SimpleEventEmitter {
     createIndex(path, key, options) { throw new NotImplementedError('createIndex'); }
     getIndexes() { throw new NotImplementedError('getIndexes'); }
     deleteIndex(filePath) { throw new NotImplementedError('deleteIndex'); }
-    setSchema(path, schema) { throw new NotImplementedError('setSchema'); }
+    setSchema(path, schema, warnOnly) { throw new NotImplementedError('setSchema'); }
     getSchema(path) { throw new NotImplementedError('getSchema'); }
     getSchemas() { throw new NotImplementedError('getSchemas'); }
     validateSchema(path, value, isUpdate) { throw new NotImplementedError('validateSchema'); }
@@ -5687,10 +5687,15 @@ class DataReferenceQuery {
                 }
                 ev = eventData;
             }
-            listeners.forEach(callback => { try {
-                callback(ev);
-            }
-            catch (e) { } });
+            listeners.forEach(callback => {
+                var _a, _b;
+                try {
+                    callback(ev);
+                }
+                catch (err) {
+                    this.ref.db.debug.error(`Error executing "${ev.name}" event handler of realtime query on path "${this.ref.path}": ${(_b = (_a = err === null || err === void 0 ? void 0 : err.stack) !== null && _a !== void 0 ? _a : err === null || err === void 0 ? void 0 : err.message) !== null && _b !== void 0 ? _b : err}`);
+                }
+            });
         };
         // Check if there are event listeners set for realtime changes
         options.monitor = { add: false, change: false, remove: false };
@@ -5942,6 +5947,10 @@ function getChildren(snapshot) {
 }
 class DataSnapshot {
     /**
+     * Indicates whether the node exists in the database
+     */
+    exists() { return false; }
+    /**
      * Creates a new DataSnapshot instance
      */
     constructor(ref, value, isRemoved = false, prevValue, context) {
@@ -5956,10 +5965,6 @@ class DataSnapshot {
         };
         this.context = () => { return context || {}; };
     }
-    /**
-     * Indicates whether the node exists in the database
-     */
-    exists() { return false; }
     /**
      * Creates a `DataSnapshot` instance
      * @internal (for internal use)
@@ -6346,15 +6351,6 @@ function getPathKeys(path) {
     });
 }
 class PathInfo {
-    constructor(path) {
-        if (typeof path === 'string') {
-            this.keys = getPathKeys(path);
-        }
-        else if (path instanceof Array) {
-            this.keys = path;
-        }
-        this.path = this.keys.reduce((path, key, i) => i === 0 ? `${key}` : typeof key === 'string' ? `${path}/${key}` : `${path}[${key}]`, '');
-    }
     static get(path) {
         return new PathInfo(path);
     }
@@ -6364,6 +6360,15 @@ class PathInfo {
     }
     static getPathKeys(path) {
         return getPathKeys(path);
+    }
+    constructor(path) {
+        if (typeof path === 'string') {
+            this.keys = getPathKeys(path);
+        }
+        else if (path instanceof Array) {
+            this.keys = path;
+        }
+        this.path = this.keys.reduce((path, key, i) => i === 0 ? `${key}` : typeof key === 'string' ? `${path}/${key}` : `${path}[${key}]`, '');
     }
     get key() {
         return this.keys.length === 0 ? null : this.keys.slice(-1)[0];
@@ -6961,7 +6966,8 @@ function getConstructorType(val) {
     }
 }
 class SchemaDefinition {
-    constructor(definition) {
+    constructor(definition, handling = { warnOnly: false }) {
+        this.handling = handling;
         this.source = definition;
         if (typeof definition === 'object') {
             // Turn object into typescript definitions
@@ -7009,7 +7015,14 @@ class SchemaDefinition {
         this.type = parse(this.text);
     }
     check(path, value, partial, trailKeys) {
-        return checkType(path, this.type, value, partial, trailKeys);
+        const result = checkType(path, this.type, value, partial, trailKeys);
+        if (!result.ok && this.handling.warnOnly) {
+            // Only issue a warning, allows schema definitions to be added to a production db to monitor if they are accurate before enforcing them.
+            result.warning = `${partial ? 'Partial schema' : 'Schema'} check on path "${path}"${trailKeys ? ` for child "${trailKeys.join('/')}"` : ''} failed: ${result.reason}`;
+            result.ok = true;
+            this.handling.warnCallback(result.warning);
+        }
+        return result;
     }
 }
 exports.SchemaDefinition = SchemaDefinition;
@@ -7025,6 +7038,7 @@ const calculateExpiryTime = (expirySeconds) => expirySeconds > 0 ? Date.now() + 
  * Immutability is enforced by cloning the stored and retrieved values. To change a cached value, it will have to be `set` again with the new value.
  */
 class SimpleCache {
+    get size() { return this.cache.size; }
     constructor(options) {
         var _a;
         this.enabled = true;
@@ -7042,7 +7056,6 @@ class SimpleCache {
         const interval = setInterval(() => { this.cleanUp(); }, 60 * 1000);
         (_a = interval.unref) === null || _a === void 0 ? void 0 : _a.call(interval);
     }
-    get size() { return this.cache.size; }
     has(key) {
         if (!this.enabled) {
             return false;

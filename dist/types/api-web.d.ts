@@ -270,7 +270,7 @@ export declare class WebApi extends Api {
     }): Promise<any>;
     get serverPingUrl(): string;
     getServerInfo(): Promise<any>;
-    setSchema(path: string, schema: string | Record<string, any>): Promise<any>;
+    setSchema(path: string, schema: string | Record<string, any>, warnOnly?: boolean): Promise<any>;
     getSchema(path: string): Promise<any>;
     getSchemas(): Promise<any>;
     validateSchema(path: string, value: any, isUpdate: boolean): ReturnType<Api['validateSchema']>;

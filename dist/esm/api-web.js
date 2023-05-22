@@ -2097,11 +2097,11 @@ export class WebApi extends Api {
         this._serverVersion = info.version;
         return info;
     }
-    setSchema(path, schema) {
+    setSchema(path, schema, warnOnly = false) {
         if (schema !== null) {
             schema = (new SchemaDefinition(schema)).text;
         }
-        const data = JSON.stringify({ action: 'set', path, schema });
+        const data = JSON.stringify({ action: 'set', path, schema, warnOnly });
         return this._request({ method: 'POST', url: `${this.url}/schema/${this.dbname}`, data });
     }
     getSchema(path) {

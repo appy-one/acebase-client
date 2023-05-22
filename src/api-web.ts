@@ -2381,11 +2381,11 @@ export class WebApi extends Api {
         return info;
     }
 
-    setSchema(path: string, schema: string | Record<string, any>) {
+    setSchema(path: string, schema: string | Record<string, any>, warnOnly = false) {
         if (schema !== null) {
             schema = (new SchemaDefinition(schema)).text;
         }
-        const data = JSON.stringify({ action: 'set', path, schema });
+        const data = JSON.stringify({ action: 'set', path, schema, warnOnly });
         return this._request({ method: 'POST', url: `${this.url}/schema/${this.dbname}`, data });
     }
 

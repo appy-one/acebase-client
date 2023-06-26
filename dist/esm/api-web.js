@@ -1922,7 +1922,7 @@ export class WebApi extends Api {
                 // Convert object to querystring
                 data = Object.keys(data)
                     .filter(key => typeof data[key] !== 'undefined')
-                    .map(key => key + '=' + encodeURIComponent(JSON.stringify(data[key])))
+                    .map(key => key + '=' + encodeURIComponent(data[key] !== null && typeof data[key] === 'object' ? JSON.stringify(data[key]) : data[key]))
                     .join('&');
             }
             else if (typeof data !== 'string' || !data.includes('=')) {

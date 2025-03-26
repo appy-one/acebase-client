@@ -1,6 +1,11 @@
 export class AceBaseRequestError extends Error {
     get isNetworkError() {
-        return this.response === null;
+        // 408: Request Timeout, 429: Too Many Requests, 500: Internal Server Error, 502: Bad Gateway, 503: Service Unavailable, 504: Gateway Timeout
+        return this.response === null || [408, 429, 500, 502, 503, 504].includes(this.code as number);
+    }
+    get isPermissionError() {
+        // 401: Unauthorized, 403: Forbidden
+        return this.response !== null && ([401, 403] as typeof this.code[]).includes(this.code);
     }
     constructor(public request: any, public response: any, public code?: number | string, public message: string = 'unknown error') {
         super(message);

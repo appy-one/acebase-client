@@ -1,1 +1,0 @@
-{"version":3,"file":"browser.js","sourceRoot":"","sources":["../../../src/base64/browser.ts"],"names":[],"mappings":"AAAA,MAAM,UAAU,MAAM,CAAC,GAAW;IAC9B,OAAO,IAAI,CAAC,QAAQ,CAAC,kBAAkB,CAAC,GAAG,CAAC,CAAC,CAAC,CAAC;AACnD,CAAC;AAED,MAAM,UAAU,MAAM,CAAC,MAAc;IACjC,OAAO,kBAAkB,CAAC,MAAM,CAAC,IAAI,CAAC,MAAM,CAAC,CAAC,CAAC,CAAC;AACpD,CAAC"}

@@ -43,6 +43,7 @@ export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClien
     await server.pause();
 
     // TODO: Expect to be disconnected
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
     // Resume server
     await server.resume();

@@ -36,7 +36,7 @@ export {
 export { AceBaseClientAuth } from './auth';
 export { AceBaseUser } from './user';
 export { ServerDate } from './server-date';
-export { CachedValueUnavailableError } from './errors';
+export { CachedValueUnavailableError, AceBaseRequestError } from './errors';
 
 export {
     DataReference,

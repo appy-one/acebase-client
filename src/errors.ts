@@ -5,3 +5,5 @@ export class CachedValueUnavailableError extends Error {
         super(message || `Value for path "/${path}" is not available in cache`);
     }
 }
+
+export { AceBaseRequestError } from './request/error';

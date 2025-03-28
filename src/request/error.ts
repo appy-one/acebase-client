@@ -5,7 +5,7 @@ export class AceBaseRequestError extends Error {
     }
     get isPermissionError() {
         // 401: Unauthorized, 403: Forbidden
-        return this.response !== null && ([401, 403] as typeof this.code[]).includes(this.code);
+        return this.response !== null && ([401, 403]).some((code) => [this.response?.statusCode, this.code].includes(code));
     }
     constructor(public request: any, public response: any, public code?: number | string, public message: string = 'unknown error') {
         super(message);

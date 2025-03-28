@@ -1,7 +1,11 @@
 export class AceBaseRequestError extends Error {
     get isNetworkError() {
+        // No response: network error, or blocked by the browser because of incorrect CORS settings
+        return this.response === null;
+    }
+    get isServerError() {
         // 408: Request Timeout, 429: Too Many Requests, 500: Internal Server Error, 502: Bad Gateway, 503: Service Unavailable, 504: Gateway Timeout
-        return this.response === null || [408, 429, 500, 502, 503, 504].some((code) => [this.response?.statusCode, this.code].includes(code));
+        return this.response !== null && [408, 429, 500, 502, 503, 504].some((code) => [this.response?.statusCode, this.code].includes(code));
     }
     get isPermissionError() {
         // 401: Unauthorized, 403: Forbidden

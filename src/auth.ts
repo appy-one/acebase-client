@@ -133,11 +133,11 @@ export class AceBaseClientAuth {
      * After signing in, the user will be redirected to the current browser url. Execute
      * getRedirectResult() when your page is loaded again to check if the user was authenticated.
      */
-    async signInWithRedirect(providerName: string) {
+    async signInWithRedirect(providerName: string, options?: { callbackUrl?: string }) {
         if (typeof window === 'undefined') {
             throw new Error(`signInWithRedirect can only be used within a browser context`);
         }
-        const redirectUrl = await this.startAuthProviderSignIn(providerName, window.location.href);
+        const redirectUrl = await this.startAuthProviderSignIn(providerName, options?.callbackUrl ?? window.location.href);
         window.location.href = redirectUrl;
     }
 

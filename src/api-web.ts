@@ -1507,7 +1507,7 @@ export class WebApi extends Api {
                     const valueSubscriptions = subs.filter(sub => sub.event === 'value');
                     if (valueSubscriptions.length > 0) {
                         const p = this.get(path, { allow_cache: false }).then(value => {
-                            valueSubscriptions.forEach(subscr => subscr.callback(null, path, value)); // No previous value!
+                            valueSubscriptions.forEach(subscr => subscr.callback(null, path, value.value, null, value.context)); // No previous value!
                         });
                         syncPromises.push(p);
                     }

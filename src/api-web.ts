@@ -1677,9 +1677,9 @@ export class WebApi extends Api {
 
         Promise.all([ tryCachePromise, tryServerPromise ])
             .then(([ cacheResult, serverResult ]) => {
-                const networkError = serverPromise && !serverResult?.success && serverResult?.error?.isNetworkError === true;
-                if (serverPromise && !networkError) {
-                    // Server update succeeded, or failed with a non-network related reason
+                const retryableError = serverPromise && !serverResult?.success && (serverResult?.error?.isNetworkError === true || serverResult?.error?.isServerError === true);
+                if (serverPromise && !retryableError) {
+                    // Server update succeeded, or failed with a non-network/server related reason
 
                     if (serverResult?.success) {
                         // Server update success
@@ -1849,9 +1849,9 @@ export class WebApi extends Api {
 
         Promise.all([ tryCachePromise, tryServerPromise ])
             .then(([ cacheResult, serverResult ]) => {
-                const networkError = serverResult.executed && !serverResult.success && serverResult.error.isNetworkError === true;
-                if (serverResult.executed && !networkError) {
-                    // Server update succeeded, or failed with a non-network related reason
+                const retryableError = serverPromise && !serverResult?.success && (serverResult?.error?.isNetworkError === true || serverResult?.error?.isServerError === true);
+                if (serverResult.executed && !retryableError) {
+                    // Server update succeeded, or failed with a non-network/server related reason
 
                     if (serverResult.success) {
                         // Server update success
@@ -2039,7 +2039,7 @@ export class WebApi extends Api {
                             return reject(new CachedValueUnavailableError(path));
                         }
                         // Could not get server value because of a non-network related issue - possibly unauthorized access
-                        const error = new CachedValueUnavailableError(path, `Value for "${path}" not found in cache, and server value could not be loaded. See serverError for more details`);
+                        const error = new CachedValueUnavailableError(path, `Value for "${path}" not found in cache, and server value could not be loaded because of error ${serverError.code}: ${serverError.message}`);
                         error.serverError = serverError;
                         return reject(error);
                     }

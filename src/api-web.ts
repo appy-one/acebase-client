@@ -2018,8 +2018,10 @@ export class WebApi extends Api {
         // Get both, use cached value if available and server version takes too long
         return new Promise((resolve, reject) => {
             let wait = true, done = false;
+            const handledSources = [];
             const gotValue = (source: 'cache' | 'server', val: { value: any; context: any; cursor?: string }) => {
                 this.debug.verbose(`Got ${source} value of "${path}":`, val);
+                handledSources.push(source);
                 if (done) { return; }
                 const { value, context, cursor } = val;
                 if (source === 'server') {
@@ -2064,9 +2066,9 @@ export class WebApi extends Api {
             };
             const errors = [] as Array<{ source: 'cache' | 'server', error: any }>;
             const gotError = (source: 'cache' | 'server', error: any) => {
-                errors.push({ source, error });
-                if (errors.length === 2) {
-                    // Both failed, reject with server error
+                handledSources.push(source);
+                if (handledSources.length === 2) {
+                    // Both failed, or server failed and cache had no value, reject with server error
                     reject(errors.find(e => e.source === 'server')?.error);
                 }
             };

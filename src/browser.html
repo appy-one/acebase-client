@@ -7,23 +7,18 @@
             // Test connecting to an AceBase server running on localhost port 3291,
             // using specific admin credentials
             const db = new AceBaseClient('localhost', 3291, 'server', false);
-            db.ready(() => {
-                console.log('Database ready to use');
-                db.signIn('admin', 'p@5sw0rd')
-                .then(() => {
-                    return db.ref('browser').set({
-                        test: 'Browser test!'
-                    });
-                })
-                .then(ref => {
-                    console.log(`"${ref.path}" was saved!`);
-                    return ref.get();
-                })
-                .then(snap => {
-                    console.log(`Got "${snap.ref.path}" value:`);
-                    console.log(snap.val());
-                })
-            })
+            await db.ready();
+            console.log('Database ready to use');
+
+            await db.signIn('admin', 'p@5sw0rd');
+            const ref = await db.ref('browser').set({
+                test: 'Browser test!'
+            });
+            console.log(`"${ref.path}" was saved!`);
+            
+            const snap = await ref.get();
+            console.log(`Got "${snap.ref.path}" value:`);
+            console.log(snap.val());
         </script>
     </body>
 </html>

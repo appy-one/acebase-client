@@ -26,7 +26,10 @@
     "./dist/esm/base64/index.js": "./dist/esm/base64/browser.js"
   },
   "private": false,
-  "repository": "github:appy-one/acebase-client",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/appy-one/acebase-client.git"
+  },
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

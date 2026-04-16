@@ -5,7 +5,7 @@ cat >dist/cjs/package.json <<JSON
 {
     "type": "commonjs",
     "browser": {
-        "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
+        "socket.io-client": "socket.io-client/dist/socket.io.min.js",
         "./request/index.js": "./request/browser.js",
         "./performance/index.js": "./performance/browser.js",
         "./base64/index.js": "./base64/browser.js"
@@ -23,7 +23,7 @@ cat >dist/esm/package.json <<JSON
 {
     "type": "module",
     "browser": {
-        "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
+        "socket.io-client": "socket.io-client/dist/socket.io.esm.min.js",
         "./request/index.js": "./request/browser.js",
         "./performance/index.js": "./performance/browser.js",
         "./base64/index.js": "./base64/browser.js"

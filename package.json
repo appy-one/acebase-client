@@ -17,7 +17,7 @@
     }
   },
   "browser": {
-    "socket.io-client": "socket.io-client/dist/socket.io.slim.js",
+    "socket.io-client": "socket.io-client/dist/socket.io.min.js",
     "./dist/cjs/request/index.js": "./dist/cjs/request/browser.js",
     "./dist/esm/request/index.js": "./dist/esm/request/browser.js",
     "./dist/cjs/performance/index.js": "./dist/cjs/performance/browser.js",
@@ -79,11 +79,10 @@
   "license": "MIT",
   "dependencies": {
     "acebase-core": "file:../acebase-core",
-    "socket.io-client": "^2.5.0"
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@types/node": "^18.11.0",
-    "@types/socket.io-client": "^1.4.36",
     "@typescript-eslint/eslint-plugin": "^5.40.0",
     "@typescript-eslint/parser": "^5.40.0",
     "browserify": "^17.0.0",

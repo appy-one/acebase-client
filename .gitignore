@@ -1,3 +1,4 @@
 node_modules
 *.acebase
 dist
+.DS_Store

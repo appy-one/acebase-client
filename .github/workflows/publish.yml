@@ -119,7 +119,7 @@ jobs:
         run: |
           if [[ "${{ steps.version.outputs.IS_RC }}" == "true" ]]; then
             echo "RC tag detected — running npm publish --dry-run"
-            npm publish --access public --dry-run
+            npm publish --access public --tag next --dry-run
           else
             npm publish --access public
           fi

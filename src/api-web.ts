@@ -465,7 +465,7 @@ export class WebApi extends Api {
                     // Automatic reconnect should be done by socket.io
                     this._connectionState = CONNECTION_STATE_CONNECTING;
                     this._eventTimeline.disconnect = Date.now();
-                    if (reason === 'io server disconnect') {
+                    if (reason === 'io server disconnect' || reason === 'transport close') {
                         // if the server has shut down and disconnected all clients, we have to reconnect manually
                         this.socket = null;
                         this.connect().catch(err => {
@@ -557,14 +557,24 @@ export class WebApi extends Api {
                         // NOTE: fireThisEvent === true, because it is impossible that this mutation was caused by us (well, it should be!)
                     }
                     else if (data.event === 'mutations') {
-                        // Apply all mutations
+                        // Apply all mutations, combine set operations on paths with the same parent path to single updates for better performance
                         const mutations = val.current as IDataMutationsArray;
+                        const updates = [] as Array<{ path: string, value: any }>;
                         mutations.forEach(m => {
                             const pathInfo = m.target.reduce(
                                 (pathInfo, key) => pathInfo.child(key),
                                 PathInfo.get(this.getCachePath())
                             );
-                            this.cache.db.api.set(pathInfo.path, m.val, { suppress_events: !fireCacheEvents, context });
+                            const update = updates.find(u => u.path === pathInfo.parentPath);
+                            if (update) {
+                                update.value[pathInfo.key] = m.val;
+                            }
+                            else {
+                                updates.push({ path: pathInfo.parentPath, value: { [pathInfo.key]: m.val } });
+                            }
+                        });
+                        updates.forEach(update => {
+                            this.cache.db.api.update(update.path, update.value, { suppress_events: !fireCacheEvents, context });
                         });
                     }
                     else if (data.event === 'notify_child_removed') {

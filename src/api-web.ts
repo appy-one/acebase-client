@@ -1011,10 +1011,10 @@ export class WebApi extends Api {
         this.eventCallback('signout');
     }
 
-    async changePassword(uid: string, currentPassword: string, newPassword: string) {
+    async changePassword(uid: string, currentPassword: string, newPassword: string, signOutOthers = false) {
         if (!this.accessToken) { throw new Error(`not_signed_in`); }
         if (!this.isConnected) { throw new Error(NOT_CONNECTED_ERROR_MESSAGE); }
-        const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword } });
+        const result = await this._request({ method: 'POST', url: `${this.url}/auth/${this.dbname}/change_password`, data: { uid, password: currentPassword, new_password: newPassword, sign_out: signOutOthers === true } });
         this.accessToken = result.access_token;
         return { accessToken: this.accessToken as string };
     }

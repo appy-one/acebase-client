@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.run = exports.startServer = void 0;
+exports.startServer = startServer;
+exports.run = run;
 const acebase_server_1 = require("acebase-server");
 const cache_js_1 = require("./cache.js");
 const settings_js_1 = require("./settings.js");
@@ -9,7 +10,6 @@ async function startServer(dbname) {
     await server.ready();
     return server;
 }
-exports.startServer = startServer;
 async function run(modules, Client, Database) {
     const dbname = `test-${modules}`;
     // Start server
@@ -33,11 +33,14 @@ async function run(modules, Client, Database) {
     console.log('Signed in with token', user);
     // Pause server
     await server.pause();
-    // TODO: Expect to be disconnected
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Expect client to remain sconnected (server.pause only denies new connections, keeps current)
+    console.log('Expecting to stay connected to paused server...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    if (!client.connected) {
+        throw new Error('Client should still be connected!');
+    }
     // Resume server
     await server.resume();
-    // TODO: Expect to reconnect
     // Store test data
     await client.ref('test').set({
         text: `Storing this text from ${modules} tests`,
@@ -58,4 +61,3 @@ async function run(modules, Client, Database) {
     await new Promise(resolve => setTimeout(resolve, 5000));
     console.log('Tests done');
 }
-exports.run = run;

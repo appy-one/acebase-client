@@ -11,6 +11,7 @@ export async function startServer(dbname: string) {
 }
 
 export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClient, Database: typeof AceBase) {
+    // TODO: These tests need work
     const dbname = `test-${modules}`;
 
     // Start server
@@ -42,13 +43,15 @@ export async function run(modules: 'ESM'|'CommonJS', Client: typeof AceBaseClien
     // Pause server
     await server.pause();
 
-    // TODO: Expect to be disconnected
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Expect client to remain sconnected (server.pause only denies new connections, keeps current)
+    console.log('Expecting to stay connected to paused server...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    if (!client.connected) {
+        throw new Error('Client should still be connected!');
+    }
 
     // Resume server
     await server.resume();
-
-    // TODO: Expect to reconnect
 
     // Store test data
     await client.ref('test').set({

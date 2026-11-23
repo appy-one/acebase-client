@@ -5,6 +5,16 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
+  workflow_dispatch:
+    # Manually (re)run the release for an existing tag, e.g. when a previous
+    # run failed after the version bump was already committed.
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v1.23.0)'
+        required: true
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   publish:
@@ -18,6 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # full history needed for release notes
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -27,8 +38,8 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF_NAME}" == *"-rc."* ]]; then
+          echo "VERSION=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          if [[ "${RELEASE_TAG}" == *"-rc."* ]]; then
             echo "IS_RC=true" >> "$GITHUB_OUTPUT"
           else
             echo "IS_RC=false" >> "$GITHUB_OUTPUT"
@@ -38,23 +49,25 @@ jobs:
         run: npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version
 
       - name: Commit version bump
+        # Skipped on manual re-runs: the bump was already pushed by the original run.
+        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # Find which branch tip matches the tagged commit.
-          TAGGED_COMMIT=$(git rev-parse "$GITHUB_REF_NAME")
+          TAGGED_COMMIT=$(git rev-parse "$RELEASE_TAG")
           TARGET_BRANCH=$(git for-each-ref --format='%(refname:short)' refs/remotes/origin \
             --points-at "$TAGGED_COMMIT" | sed 's|^origin/||' | grep -v '^HEAD$' | head -1)
 
           if [ -z "$TARGET_BRANCH" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME is not at the tip of any branch. Create tags only at the latest commit of a branch."
+            echo "::error::Tag $RELEASE_TAG is not at the tip of any branch. Create tags only at the latest commit of a branch."
             exit 1
           fi
 
           echo "Pushing version bump to branch: $TARGET_BRANCH"
           git add package.json package-lock.json
-          git commit -m "chore: release ${{ github.ref_name }} [skip ci]"
+          git commit -m "chore: release ${RELEASE_TAG} [skip ci]"
           git push origin HEAD:"$TARGET_BRANCH"
 
       - name: Resolve file dependencies to npm versions
@@ -91,7 +104,7 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
-          CURRENT_TAG="${GITHUB_REF_NAME}"
+          CURRENT_TAG="${RELEASE_TAG}"
           PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${CURRENT_TAG}$" | head -1)
 
           if [ -n "$PREVIOUS_TAG" ]; then
@@ -110,8 +123,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, skipping"
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
             --notes-file release_notes.md \
             ${{ steps.version.outputs.IS_RC == 'true' && '--prerelease' || '' }}
 

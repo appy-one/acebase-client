@@ -6,11 +6,11 @@
         "test": "node esm && node cjs"
     },
     "dependencies": {
-        "acebase": "^1.29.10",
+        "acebase": "^1.29.15",
         "acebase-core": "^1.28.1",
-        "acebase-server": "^1.19.0"
+        "acebase-server": "^1.20.1"
     },
     "devDependencies": {
-        "typescript": "^4.9.3"
+        "typescript": "^5.9.3"
     }
 }

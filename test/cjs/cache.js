@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.cacheTest = void 0;
+exports.cacheTest = cacheTest;
 const settings_js_1 = require("./settings.js");
 async function cacheTest(modules, server, Client, Database) {
     const dbname = `test-${modules}`;
@@ -25,4 +25,3 @@ async function cacheTest(modules, server, Client, Database) {
     // Disconnect
     client.disconnect();
 }
-exports.cacheTest = cacheTest;

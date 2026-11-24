@@ -9,7 +9,7 @@
     \_| |_/\___\___\____/ \__,_|___/\___|
                  realtime database client
 
-   Copyright 2018-2022 by Ewout Stortenbeker <http://appy.one>
+   Copyright 2018-2026 by Ewout Stortenbeker <http://appy.one>
    Released under MIT license
 
    See docs at https://github.com/appy-one/acebase-client
@@ -18,7 +18,7 @@
 */
 /*!
  * AceBaseClient
- * (c) 2018-2022 Ewout Stortenbeker <http://appy.one>
+ * (c) 2018-2026 Ewout Stortenbeker <http://appy.one>
  * Released under MIT license
  */
 export {
